@@ -649,7 +649,7 @@ impl Claude {
         let not_sent = result.as_ref().err().is_some_and(|e| {
             e.downcast_ref::<ApiError>()
                 .is_some_and(|e| !e.outcome_unknown)
-                || e.downcast_ref::<crate::desktop_owner_ipc::DispatchFailure>()
+                || e.downcast_ref::<crate::service_transport::DispatchFailure>()
                     .is_some_and(|e| !e.dispatched)
         });
         let deferred = result.as_ref().is_ok_and(|r| r["deferred"] == true);

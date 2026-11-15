@@ -2975,24 +2975,6 @@ const turn=(threadId,model="gpt-6.1-sol",serviceTier="priority")=>({threadId,mod
  assert.equal(modelLabel.getAttribute("data-codex-elves-fast-model"),"true");
  delete options.getComposers;Object.assign(options,originalGetters);model="gpt-6.1-sol";
 
- const remoteContext={hostId:"local",threadId:"remote-thread-ffffffff"},desktopFast=api.status().fast;
- assert.equal((await api.remoteState(remoteContext,"gpt-6.1-sol")).enabled,false);
- assert.equal((await api.setRemoteState(remoteContext,"gpt-6.1-sol",true)).enabled,true);
- assert.equal(api.status().fast,desktopFast,"远程写入不能读取或修改当前桌面会话");
- assert.equal((await api.patchTurnRequest(turn(remoteContext.threadId))).serviceTier,"priority","远程开关覆盖真实会话的直接和出队发送");
- assert.equal((await api.patchTurnRequest(turn("remote-other-ffffffff"))).serviceTier,"default","远程会话之间隔离");
- await assert.rejects(api.setRemoteState(remoteContext,"claude-opus",true),/Fast/);
- await assert.rejects(api.setRemoteState({hostId:"remote",threadId:remoteContext.threadId},"gpt-6.1-sol",true),/参数无效/);
- await assert.rejects(api.setRemoteState(remoteContext,"gpt-6.1-sol",false,()=>{throw Error("连接已变化");}),/连接已变化/);
- assert.equal((await api.remoteState(remoteContext,"gpt-6.1-sol")).enabled,true,"连接变化后不保存迟到设置");
- const remoteDraft=await api.createRemoteContext("gpt-6.1-sol",true);
- assert.equal((await api.patchTurnRequest(turn(undefined),remoteDraft)).serviceTier,"priority");
- api.bindConversation(remoteDraft,"remote-created-ffffffff");
- assert.equal((await api.patchTurnRequest(turn("remote-created-ffffffff"))).serviceTier,"priority");
- const remoteDefault=await api.createRemoteContext("gpt-6.1-sol");
- assert.equal((await api.patchTurnRequest(turn(undefined),remoteDefault)).serviceTier,"default","远程新建默认关闭，不能继承桌面草稿");
- assert.equal(api.status().fast,desktopFast);
-
  context={hostId:"local",draftId:"draft-first"};await api.refresh();
  assert.equal(api.status().fast,false);
  await toggle();const captured=api.captureContext();
@@ -3021,7 +3003,6 @@ const turn=(threadId,model="gpt-6.1-sol",serviceTier="priority")=>({threadId,mod
  assert.equal(await api.patchTurnRequest(nonGpt),nonGpt);
  const denied=turn("thread-aaaaaaaa");
  assert.equal(await api.patchTurnRequest(denied),denied,"保留管理员限制");
- await assert.rejects(api.setRemoteState(remoteContext,"gpt-6.1-sol",true),/未开放 Fast/);
  responses["configRequirements/read"]={requirements:null};
  options.isCopilotActive=async()=>true;
  await api.configure(options);
@@ -9948,18 +9929,16 @@ function build(text, env, expression) {
   assert.equal(result.firstTurn.turnId,"first");
   assert.equal(fastContexts.at(-1),draft);
   assert.deepEqual(fastBindings,[[draft,id]],"首轮前把本次草稿选择绑定到真实会话");
-  const remoteDraft={hostId:"local",draftId:"remote-first",fast:false};
   let originalBefore=0;
   await helpers.invoke({startConversation:async(params,options)=>{
-    assert.equal(Object.hasOwn(options,"codexElvesFastContext"),false,"本地远程上下文不能泄漏给原生 RPC");
     assert.equal(options.keep,"native-option");
-    await options.beforeFirstTurn({conversationId:"remote-created"});
-    return {status:"created",conversationId:"remote-created"};
-  }},"startConversation",[{cwd:"E:/remote",model:"gpt-5.5"},{
-    codexElvesFastContext:remoteDraft,keep:"native-option",beforeFirstTurn:async()=>{++originalBefore;}
+    await options.beforeFirstTurn({conversationId:"local-created"});
+    return {status:"created",conversationId:"local-created"};
+  }},"startConversation",[{cwd:"E:/repo",model:"gpt-5.5"},{
+    keep:"native-option",beforeFirstTurn:async()=>{++originalBefore;}
   }]);
-  assert.equal(fastContexts.at(-1),remoteDraft,"远程新建必须显式选择自己的草稿");
-  assert.deepEqual(fastBindings.at(-1),[remoteDraft,"remote-created"]);
+  assert.equal(fastContexts.at(-1),draft,"本地新建只使用本地草稿");
+  assert.deepEqual(fastBindings.at(-1),[draft,"local-created"]);
   assert.equal(originalBefore,1,"保留原生创建回调");
   const direct={startTurn:async(id,start)=>({status:"accepted",turnId:"direct"}),
     startEmptyTurn:async()=>null,sendFollowUpMessage:async()=>null};

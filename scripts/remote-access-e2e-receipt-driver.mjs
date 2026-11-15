@@ -249,7 +249,7 @@ export function createQuestionReceiptRecoveryDriver({
     for (const name of ["runId", "caseId", "origin", "sourceFingerprint", "capturedAt"])
       rawFacts[name] = `/capture/${name}`;
     return {
-      source: "bridge", evidencePath: path, size: bytes.length,
+      source: "service", evidencePath: path, size: bytes.length,
       sha256: createHash("sha256").update(bytes).digest("hex"),
       threadId: value.observation.threadId, readId,
       ...(actionId ? { actionId } : {}), outcomePointer, rawFacts,
@@ -1254,7 +1254,7 @@ export function createQuestionReceiptRecoveryDriver({
     const path = resolve(root, `question-receipt-recovered-answer-${randomUUID()}.json`);
     await writeFile(path, bytes, { flag: "wx" });
     return { records: [{
-      source: "bridge", actionId: action.id, threadId: receipt.result.threadId,
+      source: "service", actionId: action.id, threadId: receipt.result.threadId,
       receiptId: receipt.requestId, readId: read.requestId, evidencePath: path, size: bytes.length,
       sha256: createHash("sha256").update(bytes).digest("hex"), outcomePointer: "",
       rawFacts: {

@@ -22,7 +22,7 @@ const NATIVE_RPC_COMPAT_SCRIPT: &str = include_str!("../../../assets/inject/nati
 // 保留主线缓存修复、Token 编号解析与侧边 Fast；
 // 分支信息、多仓库变更和压缩恢复使用同一构建标识，便于核对网页和后台是否来自同一包。
 // 远程 Codex 固定使用服务模式，本地桌面注入增强独立保留。
-pub const DIAGNOSTIC_BUILD_ID: &str = "diag-20261113-remote-fast-next-turn-r30";
+pub const DIAGNOSTIC_BUILD_ID: &str = "diag-20261115-remove-remote-app-bridge-r31";
 
 pub fn statsig_cache_script() -> String {
     // 缓存修复必须在 SDK 首次读取前执行；压缩库不污染宿主模块加载器或全局对象。

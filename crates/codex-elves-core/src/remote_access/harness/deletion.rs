@@ -228,9 +228,8 @@ impl Harness {
     }
 
     pub(super) async fn confirm_thread_deleted(&self, id: &str) -> Value {
-        // 先登记删除事实，阻止迟到快照和重新观察；不持有 thread_lock，避免事件接收与 RPC 互相等待。
+        // 先登记删除事实，阻止迟到状态恢复已删除会话；不持有 thread_lock，避免事件接收与 RPC 互相等待。
         self.projection.lock().await.forget_deleted_thread(id);
-        self.desktop.forget(id).await;
         self.loaded.lock().await.remove(id);
         self.queue_recovery_after.lock().await.remove(id);
         self.runtime.invalidate_read(id).await;

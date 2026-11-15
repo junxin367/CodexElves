@@ -56,7 +56,6 @@
 
 ## 已有验证证据及限制
 
-已读取 `backend/README.md`、`backend/native-checks.json`、`backend/rust-checks.txt`、`backend/final-checks.txt`：后端代理报告 19 项 native 隔离检查、6 项 Rust 路由/事件流检查通过，持续正文下通知心跳为 15.01 秒，普通 SSE / WebSocket 正文和鉴权回归通过。本审查未重新运行这些测试。
 
 已读取 `native/validation.json` 和 `native/policy-validation.txt`：独立审查取证时原生代理报告 Java 17 / Android API 35 编译及 99 项隔离断言通过；主代理最终核对的报告已补充为 100 条断言，使用进程内伪造 HTTPS 连接，无真实网络。已逐一比对该报告中的 9 个 Java 源文件 SHA-256，与本轮最终审查的工作区文件一致，包括新增划掉接收器；主代理最终摘要复核也一致。该报告的资源符号为临时生成 `R.java`，不能替代最终 Gradle 资源构建与 lint。本审查没有另行运行或替代这些测试。
 

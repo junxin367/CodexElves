@@ -10,11 +10,11 @@ import { promisify, isDeepStrictEqual } from "node:util";
 import { fileURLToPath } from "node:url";
 import { Buffer } from "node:buffer";
 
-export const REMOTE_ACCESS_EVIDENCE_VERSION = "1.3.8";
+export const REMOTE_ACCESS_EVIDENCE_VERSION = "1.3.9";
 const executeFile = promisify(execFile);
 const repositoryRoot = fileURLToPath(new URL("../", import.meta.url));
 const hashPattern = /^[a-fA-F0-9]{64}$/;
-const sources = new Set(["rpc", "bridge", "native-log", "android-device", "desktop-ui"]);
+const sources = new Set(["rpc", "service", "native-log", "android-device"]);
 const identityNames = ["threadId", "turnId", "receiptId", "readId", "eventId", "parentThreadId"];
 const receiptNames = new Set(["receiptId", "readId", "eventId"]);
 const successfulReceiptStates = new Set([
@@ -1165,8 +1165,8 @@ export async function verifyRuntimeEvidence(evidence, request = {}, options = {}
     invariant(evidence[name] !== undefined && evidence[name] !== null && evidence[name] !== "", `运行版本证据缺少 ${name}`);
     expectedFacts[name] = evidence[name];
   }
-  // 协议 6 起固定使用服务模式；与 remote_access/service.rs 及 Windows 构建基线同步核对。
-  invariant(Number.isSafeInteger(evidence.serviceProtocolVersion) && evidence.serviceProtocolVersion >= 6,
+  // 协议 7 移除 Codex App IPC；与 remote_access/service.rs 及 Windows 构建基线同步核对。
+  invariant(Number.isSafeInteger(evidence.serviceProtocolVersion) && evidence.serviceProtocolVersion >= 7,
     "运行服务尚未提供仅服务模式的协议");
   invariant(hashPattern.test(evidence.managerExecutableSha256) && hashPattern.test(evidence.remoteAssetSha256),
     "运行资产 SHA-256 格式无效");
@@ -1858,7 +1858,7 @@ export async function verifyRemoteAccessReport(reportOrPath, {
             "外部驱动步骤起点早于本轮");
         const records = await verifyNativeEvidence(step.records, fixed, options);
         verifiedDriverStages.push({ step, records });
-        if (["desktop", "android", "files"].includes(step.driver))
+        if (["android", "files"].includes(step.driver))
           invariant(Array.isArray(step.uiEvidence) && step.uiEvidence.length > 0,
             "桌面、Android 或文件选择驱动缺少真实界面证据");
         for (const evidence of step.uiEvidence || []) await verifyDriverUiEvidence(evidence, options);

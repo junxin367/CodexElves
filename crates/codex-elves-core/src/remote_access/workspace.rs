@@ -2776,7 +2776,7 @@ mod tests {
     }
 
     #[async_trait::async_trait]
-    impl super::super::NativeRemoteBridge for WorkspaceTestBridge {
+    impl super::super::TestRemoteBackend for WorkspaceTestBridge {
         async fn call(&self, action: &str, mut payload: Value) -> anyhow::Result<Value> {
             anyhow::ensure!(action == "workspaceContext", "此测试仅解析工作目录");
             payload["ok"] = json!(true);
@@ -2809,7 +2809,7 @@ mod tests {
         let mut key: Value = serde_json::from_slice(&std::fs::read(&key_path).unwrap()).unwrap();
         key["value"] = json!("");
         std::fs::write(key_path, serde_json::to_vec(&key).unwrap()).unwrap();
-        let controller = RemoteAccessController::with_test_bridge(
+        let controller = RemoteAccessController::with_test_backend(
             Arc::new(WorkspaceTestBridge { cwd: root.clone() }),
             state.path().to_owned(),
         )

@@ -1,17 +1,12 @@
-// 侧栏列表状态：本地已读与优先显示、桌面端观察、未读角标计时、侧栏读取请求与折叠分组。
+// 侧栏列表状态：本地已读与优先显示、未读角标计时、侧栏读取请求与折叠分组。
 
-import { $ } from "../../ui/dom.js";
-import { creating, nativeConnectionVersion, pageLeaving, selectedId, session, sidebar } from "../../core/state.js";
-import { api } from "../api.js";
+import { selectedId, session, sidebar } from "../../core/state.js";
 import { claudeThreadId } from "../session/capabilities.js";
-import { foregroundReadGeneration } from "../session/connection-state.js";
-import { relatedSessionView } from "../session/related-state.js";
 
 export let collapsed = new Set(), search = "";
 export function setSearch(value) { return search = value; }
 export let sidebarVersion = 0;
 export function setSidebarVersion(value) { return sidebarVersion = value; }
-let desktopObservationTimer = null, desktopObservationRequest = null, desktopObservationLast = null;
 export const projectVisibleThreadCounts = new Map();
 export const collapsedSidebarSections = new Set();
 export let recentLimit = 40;
@@ -140,67 +135,4 @@ export function sidebarAttentionState(item) {
     flag === "waitingOnApproval" || flag === "waitingOnUserInput"))) return "waiting";
   if (side?.unread || own === "unread" || item.hasUnreadTurn) return "unread";
   return side?.active || own === "active" || !own && (type === "active" || type === "inProgress") ? "active" : "idle";
-}
-function desktopObservationIds() {
-  const ids = new Set();
-  const add = id => {
-    if (typeof id === "string" && /^[a-z0-9_-]{1,120}$/i.test(id) && !claudeThreadId(id)) ids.add(id);
-  };
-  if (!creating) add(relatedSessionView?.parentThreadId || selectedId);
-  const root = $("#sidebar-content"), bounds = root?.getBoundingClientRect();
-  if (bounds?.width > 0 && bounds.right > 0 && bounds.left < window.innerWidth) {
-    for (const row of root.querySelectorAll(".thread-row")) {
-      const rect = row.getBoundingClientRect();
-      if (rect.height > 0 && rect.bottom > bounds.top && rect.top < bounds.bottom) add(row.dataset.threadId);
-      if (ids.size >= 128) break; // 与 observeThreads 的单批上限保持一致。
-    }
-  }
-  return [...ids].sort();
-}
-export function resetDesktopObservation() {
-  clearTimeout(desktopObservationTimer);
-  desktopObservationTimer = null;
-  const previous = desktopObservationRequest;
-  // 页面或连接代次已变时立即退役旧读取，不等待被取消的网络 promise 才允许重新观察。
-  desktopObservationRequest = null;
-  desktopObservationLast = null;
-  previous?.controller.abort();
-}
-export function scheduleDesktopObservation() {
-  if (pageLeaving || document.hidden || !session?.capabilities?.desktopSessionSync) {
-    resetDesktopObservation();
-    return;
-  }
-  clearTimeout(desktopObservationTimer);
-  // 用户要求服务模式同步桌面会话：只观察当前会话及列表可见项，滚动合并 150ms；
-  // 沿用连接轮询每 15 秒续期，对应后端 45 秒兴趣窗口，不轮询整份消息正文。
-  desktopObservationTimer = setTimeout(() => void syncDesktopObservation(), 150);
-}
-async function syncDesktopObservation() {
-  desktopObservationTimer = null;
-  if (pageLeaving || document.hidden || !session?.capabilities?.desktopSessionSync) return;
-  if (desktopObservationRequest && (desktopObservationRequest.generation !== foregroundReadGeneration
-      || desktopObservationRequest.deviceId !== session.device.id
-      || desktopObservationRequest.revision !== nativeConnectionVersion)) resetDesktopObservation();
-  if (desktopObservationRequest) { desktopObservationRequest.again = true; return; }
-  const ids = desktopObservationIds(), deviceId = session.device.id, revision = nativeConnectionVersion;
-  const signature = JSON.stringify([deviceId, revision, ids]), now = Date.now();
-  // 12 秒内合并重复渲染，确保既有 15 秒轮询仍能在后端 45 秒到期前续上观察。
-  if (desktopObservationLast?.signature === signature && now - desktopObservationLast.at < 12000) return;
-  const request = { controller: new AbortController(), generation: foregroundReadGeneration, deviceId, revision, again: false };
-  desktopObservationRequest = request;
-  try {
-    await api("/api/read/observeThreads", { threadIds: ids }, undefined, request.controller.signal,
-      { resourcePriority: "background" });
-    if (!request.controller.signal.aborted && request.generation === foregroundReadGeneration
-        && session?.device.id === deviceId && nativeConnectionVersion === revision)
-      desktopObservationLast = { signature, at: now };
-  } catch {
-    // 观察失败由后台重连和下一次连接轮询恢复，不阻塞输入或修改已有发送回执。
-  } finally {
-    if (desktopObservationRequest === request) {
-      desktopObservationRequest = null;
-      if (request.again) scheduleDesktopObservation();
-    }
-  }
 }

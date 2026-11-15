@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
@@ -10,129 +10,9 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::{Child, ChildStdout, Command};
 use tokio::sync::mpsc;
 
-use crate::desktop_owner_ipc::{self, WriteFrame};
+use crate::service_transport::{self, WriteFrame};
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(45);
-
-// 用户要求移除远程 CDP 及旧兜底路由；仅保留服务模式桌面 IPC 共用的纯快照差异计算。
-pub(crate) struct ServiceProjection;
-
-impl ServiceProjection {
-    pub(crate) fn snapshot_changes(thread_id: &str, before: &Value, after: &Value) -> Vec<Value> {
-        // 桌面观察只计算本次差异；回放历史由统一服务通道保存，不能每个订阅再缓存 2,048 条正文事件。
-        let mut events = Vec::new();
-        for (field, method, parameter) in [
-            ("threadRuntimeStatus", "thread/status/changed", "status"),
-            (
-                "latestTokenUsageInfo",
-                "thread/tokenUsage/updated",
-                "tokenUsage",
-            ),
-        ] {
-            if before.get(field) != after.get(field) && after.get(field).is_some() {
-                let mut params = json!({"threadId":thread_id});
-                params[parameter] = after[field].clone();
-                events.push(json!({"method":method,"params":params}));
-            }
-        }
-        if before["title"] != after["title"] && after["title"].as_str().is_some() {
-            events.push(json!({"method":"thread/name/updated","params":{
-                "threadId":thread_id,"name":after["title"]}}));
-        }
-        if before["requests"] != after["requests"] && after["requests"].is_array() {
-            events.push(json!({"method":"remote/requestsChanged","params":{
-                "threadId":thread_id,"requests":after["requests"]}}));
-        }
-        if before["threadGoal"] != after["threadGoal"] {
-            events.push(if after["threadGoal"].is_null() {
-                json!({"method":"thread/goal/cleared","params":{"threadId":thread_id}})
-            } else {
-                json!({"method":"thread/goal/updated","params":{
-                    "threadId":thread_id,"goal":after["threadGoal"]}})
-            });
-        }
-        let old_turns = desktop_owner_ipc::snapshot_turns(before);
-        let max_started = old_turns
-            .iter()
-            .filter_map(|turn| turn["turnStartedAtMs"].as_u64())
-            .max();
-        let old_turns: BTreeMap<_, _> = old_turns
-            .into_iter()
-            .filter_map(|turn| {
-                turn["turnId"]
-                    .as_str()
-                    .map(str::to_string)
-                    .map(|id| (id, turn))
-            })
-            .collect();
-        let mut observed_turns = desktop_owner_ipc::snapshot_turns(after);
-        // 桌面完整快照按原生轮次时间发布，避免对象键顺序让新轮次开始后又显示旧轮次完成。
-        observed_turns.sort_by_key(|turn| turn["turnStartedAtMs"].as_u64().unwrap_or(0));
-        for mut turn in observed_turns {
-            let Some(turn_id) = turn["turnId"].as_str().map(str::to_string) else {
-                continue;
-            };
-            let previous = old_turns.get(&turn_id);
-            // 长会话只处理有变化的轮次，避免每个流式快照重复遍历已经稳定的历史内容。
-            if previous == Some(&turn) {
-                continue;
-            }
-            let new_live_turn = previous.is_some()
-                || turn["status"] == "inProgress"
-                || turn["turnStartedAtMs"].as_u64().is_some_and(|started| {
-                    max_started.map_or_else(
-                        || {
-                            before["turnHistory"]["kind"] == "canonical"
-                                && before["turnHistory"]["history"]["isComplete"] == true
-                        },
-                        |latest| started > latest,
-                    )
-                });
-            if !new_live_turn {
-                // Historical pagination is not a newly completed turn.
-                continue;
-            }
-            turn["id"] = json!(&turn_id);
-            let status = turn["status"].as_str().unwrap_or_default();
-            let terminal = matches!(
-                status,
-                "completed" | "failed" | "interrupted" | "cancelled" | "canceled"
-            );
-            let changed_status = previous.is_none_or(|old| old["status"] != turn["status"]);
-            if changed_status && (status == "inProgress" || terminal) {
-                let method = if terminal {
-                    "turn/completed"
-                } else {
-                    "turn/started"
-                };
-                events.push(json!({"method":method,"params":{"threadId":thread_id,
-                    "turnId":turn_id,"turn":turn}}));
-                continue;
-            }
-            let old_items = previous.and_then(|old| old["items"].as_array());
-            let mut old_by_id = HashMap::new();
-            for item in old_items.into_iter().flatten() {
-                if let Some(id) = item["id"].as_str() {
-                    old_by_id.entry(id).or_insert(item);
-                }
-            }
-            for item in turn["items"].as_array().into_iter().flatten() {
-                // 稳定消息 ID 建立一次索引，避免长轮次的每次更新进行平方次数的逐项查找。
-                let old_item = if let Some(id) = item["id"].as_str() {
-                    old_by_id.get(id).copied()
-                } else {
-                    old_items.and_then(|items| items.iter().find(|old| old["id"] == item["id"]))
-                };
-                if old_item != Some(item) {
-                    // Exact observed item state, not invented deltas or completion.
-                    events.push(json!({"method":"item/updated","params":{
-                        "threadId":thread_id,"turnId":turn_id,"item":item}}));
-                }
-            }
-        }
-        events
-    }
-}
 
 pub trait ServiceDispatchPermit: Send {
     fn commit(
@@ -155,7 +35,7 @@ pub(crate) struct RunningService {
 #[cfg(test)]
 impl RunningService {
     pub(crate) fn for_test(mut child: Child) -> anyhow::Result<Self> {
-        let (stdin, _) = desktop_owner_ipc::spawn_writer(
+        let (stdin, _) = service_transport::spawn_writer(
             child.stdin.take().context("missing stdin")?,
             REQUEST_TIMEOUT,
         );
@@ -245,7 +125,7 @@ async fn spawn_candidate(
         .stdin
         .take()
         .context("Codex CLI service 标准输入不可用")?;
-    let (stdin, _writer_task) = desktop_owner_ipc::spawn_writer(stdin, REQUEST_TIMEOUT);
+    let (stdin, _writer_task) = service_transport::spawn_writer(stdin, REQUEST_TIMEOUT);
     let stdout = child
         .stdout
         .take()
@@ -460,81 +340,6 @@ pub(crate) fn normalize_history_items_page(
     Ok((items, next_cursor))
 }
 
-pub(crate) fn owner_snapshot_history(snapshot: &Value, thread_id: &str) -> Option<Value> {
-    let complete = if snapshot["turnHistory"]["kind"] == "canonical" {
-        snapshot["turnHistory"]["history"]["isComplete"] == true
-    } else {
-        snapshot["turnsPagination"]["hasLoadedOldest"] == true
-    };
-    let mut turns = desktop_owner_ipc::snapshot_turns(snapshot);
-    if !complete
-        || turns.iter().any(|turn| {
-            turn.get("itemsPagination").is_some_and(|pagination| {
-                pagination["hasLoadedOldest"] != true || pagination["isLoadingOlder"] == true
-            })
-        })
-    {
-        return None;
-    }
-    turns.retain(|turn| turn["turnId"].as_str().is_some_and(|id| !id.is_empty()));
-    turns.sort_by(|left, right| {
-        right["turnStartedAtMs"]
-            .as_u64()
-            .cmp(&left["turnStartedAtMs"].as_u64())
-            .then_with(|| right["turnId"].as_str().cmp(&left["turnId"].as_str()))
-    });
-    let mut pagination = serde_json::Map::new();
-    for turn in &mut turns {
-        let id = turn["turnId"].as_str()?.to_string();
-        turn["id"] = json!(&id);
-        pagination.insert(
-            id,
-            json!({"complete":true,"pageComplete":true,"hasMore":false,
-                "nextCursor":null,"direction":"older","order":"asc"}),
-        );
-    }
-    Some(json!({
-        "ok":true,"scope":"turns","threadId":thread_id,"data":turns,
-        "nextCursor":null,"backwardsCursor":null,"turnOrder":"desc","itemOrder":"asc",
-        "turnsPageComplete":true,"turnsComplete":true,"itemsPaginationByTurnId":pagination,
-        "transcriptEvents":[],"nativeBridge":"desktop-owner-ipc"
-    }))
-}
-
-pub(crate) async fn local_queue_is_empty(
-    home: &Path,
-    thread_id: &str,
-    snapshot: &Value,
-) -> anyhow::Result<bool> {
-    let rollout = snapshot["rolloutPath"]
-        .as_str()
-        .context("桌面会话数据目录未知，无法核对本地队列")?;
-    let sessions = tokio::fs::canonicalize(home.join("sessions")).await?;
-    let rollout = tokio::fs::canonicalize(rollout).await?;
-    anyhow::ensure!(
-        rollout.starts_with(&sessions),
-        "桌面与后台使用不同的会话数据目录，未发送"
-    );
-    let state_path = home.join(".codex-global-state.json");
-    anyhow::ensure!(
-        tokio::fs::metadata(&state_path).await?.len() <= 16 * 1024 * 1024,
-        "桌面本地队列状态文件超过大小限制"
-    );
-    let state: Value = serde_json::from_slice(&tokio::fs::read(&state_path).await?)
-        .context("桌面本地队列状态无法解析")?;
-    let queue = state.get("queued-follow-ups");
-    anyhow::ensure!(
-        state.is_object() && queue.is_none_or(Value::is_object),
-        "桌面本地队列状态格式未知"
-    );
-    let messages = queue.and_then(|queue| queue.get(thread_id));
-    anyhow::ensure!(
-        messages.is_none_or(Value::is_array),
-        "桌面本地队列状态格式未知"
-    );
-    Ok(messages.is_none_or(|messages| messages.as_array().is_some_and(Vec::is_empty)))
-}
-
 pub(crate) fn normalize_thread_response(response: &Value) -> anyhow::Result<Value> {
     let thread = response
         .get("thread")
@@ -546,87 +351,6 @@ pub(crate) fn normalize_thread_response(response: &Value) -> anyhow::Result<Valu
             normalized["hasUnreadTurn"] = json!(!first_unread.is_null());
         }
     }
-    Ok(normalized)
-}
-
-pub(crate) fn normalize_owner_thread(
-    snapshot: &Value,
-    metadata: Option<&Value>,
-) -> anyhow::Result<Value> {
-    let mut thread = snapshot.clone();
-    thread["status"] = snapshot["threadRuntimeStatus"].clone();
-    thread["model"] = snapshot["latestModel"].clone();
-    thread["reasoningEffort"] = snapshot["latestReasoningEffort"].clone();
-    if ["name", "title", "preview"].iter().all(|key| {
-        snapshot[*key]
-            .as_str()
-            .is_none_or(|text| text.trim().is_empty())
-    }) {
-        if let Some(title) = metadata
-            .and_then(|thread| thread.get("title"))
-            .filter(|value| value.as_str().is_some_and(|title| !title.trim().is_empty()))
-        {
-            thread["title"] = title.clone();
-        }
-    }
-    let mut normalized = normalize_thread(&thread)?;
-    if let Some(metadata) = metadata {
-        for field in ["createdAt", "updatedAt", "recencyAt"] {
-            if normalized[field].is_null() {
-                normalized[field] = metadata[field].clone();
-            }
-        }
-        if let Some(read_state) = metadata.get("readState") {
-            normalized["readState"] = read_state.clone();
-        }
-        if normalized["hasUnreadTurn"].is_null() {
-            normalized["hasUnreadTurn"] = metadata["hasUnreadTurn"].clone();
-        }
-    }
-    normalized["requests"] = snapshot["requests"].clone();
-    normalized["requestsKnown"] = json!(snapshot["requests"].is_array());
-    normalized["goal"] = snapshot["threadGoal"].clone();
-    normalized["tokenUsage"] = snapshot["latestTokenUsageInfo"].clone();
-    // 用户要求服务模式切回桌面持有的会话也恢复压缩；IPC 快照已有记录，不能在元数据转换时丢弃。
-    let mut turns = desktop_owner_ipc::snapshot_turns(snapshot);
-    turns.sort_by_key(|turn| turn["turnStartedAtMs"].as_u64().unwrap_or(0));
-    let events: Vec<_> = turns
-        .iter()
-        .flat_map(|turn| {
-            turn["items"]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .filter(|item| item["type"] == "contextCompaction")
-                .map(|item| json!({"turnId":turn["turnId"],"item":item}))
-        })
-        .collect();
-    if let Some(event) = events.last() {
-        let item = &event["item"];
-        let turn_ended = turns
-            .iter()
-            .find(|turn| turn["turnId"] == event["turnId"])
-            .is_some_and(|turn| {
-                turn["status"].as_str().is_some_and(|status| {
-                    matches!(
-                        status,
-                        "completed" | "failed" | "interrupted" | "cancelled" | "canceled"
-                    )
-                })
-            });
-        let completed = item["completed"] == true
-            || item["completedAtMs"].as_u64().is_some()
-            || item["status"].as_str().is_some_and(|status| {
-                matches!(
-                    status,
-                    "completed" | "failed" | "interrupted" | "cancelled" | "canceled"
-                )
-            });
-        normalized["compaction"] = json!({
-            "state":if completed || turn_ended {"idle"} else if item["id"] == "pending-manual-context-compaction" {"pending"} else {"running"},
-            "turnId":event["turnId"],"itemId":item["id"]});
-    }
-    normalized["transcriptEvents"] = json!(events);
     Ok(normalized)
 }
 
@@ -697,8 +421,8 @@ pub(crate) fn normalize_subagent_thread(thread: &Value) -> anyhow::Result<Value>
 // 及 app.js 的 sidebarTimestamp() 使用同一阈值，三处需同步核对。
 const UNIX_SECONDS_LIMIT: u64 = 100_000_000_000;
 
-// 用户要求服务模式会话的排序和日期分组与 Codex App / CDP 一致：app-server 的
-// createdAt / updatedAt 是 Unix 秒，CDP 与 Claude 会话为毫秒，统一输出毫秒。
+// 用户要求各实例会话的排序和日期分组使用相同单位：app-server 的
+// createdAt / updatedAt 是 Unix 秒，网页和 Claude 会话为毫秒，统一输出毫秒。
 // 已是毫秒的值（如侧边会话的 now_ms()）保持不变，重复规范化不会再次放大。
 fn thread_timestamp_ms(value: Option<&Value>) -> Value {
     let Some(value) = value else {
@@ -851,59 +575,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn owner_snapshot_history_only_claims_complete_for_complete_items_and_keeps_turn_identity() {
-        let snapshot = json!({"turnHistory":{"kind":"canonical","history":{
-            "isComplete":true,"entitiesByKey":{
-                "tail":{"turnId":"accepted-turn","status":"completed","turnStartedAtMs":1000,
-                    "turnCompletedAtMs":2000,
-                    "params":{"clientUserMessageId":"stable-message"},
-                    "items":[
-                        {"id":"input","type":"userMessage","content":[]},
-                        {"id":"answer","type":"agentMessage","text":"done"}
-                    ]}
-            }
-        }}});
-        let history = owner_snapshot_history(&snapshot, "main").unwrap();
-        assert_eq!(history["data"][0]["id"], "accepted-turn");
-        assert_eq!(history["data"][0]["items"][0]["sentAtMs"], 1000);
-        assert_eq!(history["data"][0]["items"][1]["sentAtMs"], 2000);
-        assert_eq!(
-            history["data"][0]["params"]["clientUserMessageId"],
-            "stable-message"
-        );
-        assert_eq!(history["turnsComplete"], true);
-        let mut partial = snapshot;
-        partial["turnHistory"]["history"]["entitiesByKey"]["tail"]["itemsPagination"] =
-            json!({"hasLoadedOldest":false});
-        assert!(owner_snapshot_history(&partial, "main").is_none());
-    }
-
-    #[test]
-    fn owner_compaction_snapshot_preserves_reentry_state_without_a_new_message() {
-        let mut snapshot = json!({"id":"main","cwd":"test","threadRuntimeStatus":{"type":"active"},"requests":[],
-            "turns":[{"turnId":"compact-turn","status":"inProgress","turnStartedAtMs":1000,
-                "items":[{"id":"compact","type":"contextCompaction","startedAtMs":1000}]}]});
-        let running = normalize_owner_thread(&snapshot, None).unwrap();
-        assert_eq!(running["compaction"]["state"], "running");
-        assert_eq!(running["transcriptEvents"][0]["item"]["startedAtMs"], 1000);
-        snapshot["turns"][0]["items"][0]["completedAtMs"] = json!(2000);
-        let completed = normalize_owner_thread(&snapshot, None).unwrap();
-        assert_eq!(completed["compaction"]["state"], "idle");
-        assert_eq!(
-            completed["transcriptEvents"][0]["item"]["completedAtMs"],
-            2000
-        );
-        snapshot["turns"][0]["items"][0]
-            .as_object_mut()
-            .unwrap()
-            .remove("completedAtMs");
-        snapshot["turns"][0]["status"] = json!("interrupted");
-        assert_eq!(
-            normalize_owner_thread(&snapshot, None).unwrap()["compaction"]["state"],
-            "idle"
-        );
-    }
     #[test]
     fn normalize_model_keeps_ultra_and_drops_hidden_entries() {
         let model = normalize_model(&json!({

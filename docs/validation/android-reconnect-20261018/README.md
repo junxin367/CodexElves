@@ -42,7 +42,7 @@ Java 容器、本轮 `events-worker.js` 与原生登录/图片选择代码没有
 - [WS 客户端 RCA](ws-transport-rca.md)、`ws-baseline.json`、`ws-fixed.json`。
 - [服务端控制帧 RCA](server-ws-control-rca.md)、[实际生产函数验证](server-ws-function-evidence.json)、`server-ws-function-tests.log`。
 - [浏览器状态对照](browser-connection-states.json)、`browser-page-close.json`。
-- `android-build.log`、`windows-build.log`、`apk-signature.txt`、[产物摘要与源码匹配](artifact-verification.json)。
+- `android-build.log`、`windows-build.log`、`apk-signature.txt`。
 
 上述十分钟前台心跳和后台暂停/恢复时序属于受控测试，浏览器页面使用合成会话，不能当作 Android 真机或公网长时间稳定性测量。
 

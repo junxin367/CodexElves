@@ -351,8 +351,6 @@ const vm = {
       resetComposerMetrics() {}, syncComposerMetrics() {}, fitComposerMetrics() {}, normalizeComposerMetrics: () => null,
       syncClientUnreadBadge() {}, startClientUnreadBadgePolling() {}, stopClientUnreadBadgePolling() {},
       promptOptimizationSettingsDialog: null,
-      desktopObservationTimer: null, desktopObservationRequest: null, desktopObservationLast: null,
-      scheduleDesktopObservation() {}, resetDesktopObservation() {},
       syncWorkspaceSidePanelState() {},
       workspaceSidePanel: false,
       appearance: { sessionTypes: { codex: true, claude: false }, sessionFilter: "all" },
@@ -368,31 +366,6 @@ const vm = {
   },
 };
 
-function desktopObservationHarness() {
-  const requests = [], scheduled = [];
-  const rows = [
-    { dataset: { threadId: "visible" }, getBoundingClientRect: () => ({ top: 20, bottom: 40, height: 20 }) },
-    { dataset: { threadId: "offscreen" }, getBoundingClientRect: () => ({ top: 300, bottom: 320, height: 20 }) },
-    { dataset: { threadId: "claude-11111111-2222-3333-4444-555555555555" }, getBoundingClientRect: () => ({ top: 60, bottom: 80, height: 20 }) },
-  ];
-  const root = { querySelectorAll: () => rows,
-    getBoundingClientRect: () => ({ top: 0, bottom: 200, left: 0, right: 250, width: 250 }) };
-  const context = vm.createContext({ nativeConnectionVersion: 1,
-    AbortController, Date, pageLeaving: false, document: { hidden: false }, window: { innerWidth: 1000 },
-    session: { device: { id: "device" },
-      capabilities: { desktopSessionSync: true } },
-    selectedId: "selected", relatedSessionView: null, foregroundReadGeneration: 1,
-    $: selector => selector === "#sidebar-content" ? root : null,
-    setTimeout: callback => { scheduled.push(callback); return scheduled.length; }, clearTimeout() {},
-    api: async (path, payload, _, signal, options) => {
-      const request = { ...deferred(), path, payload, signal, options };
-      requests.push(request);
-      return request.promise;
-    },
-  });
-  vm.runInContext(sourceSection("function des"), context);
-  return { context, requests, scheduled, root };
-}
 
 test("服务模式秒级会话时间按毫秒进入今天分组，并与 Claude 毫秒时间正确排序", () => {
   const context = vm.createContext({ nativeConnectionVersion: 1,});
@@ -427,87 +400,21 @@ test("最近会话按今天、昨天、前天、近四个星期日历日和历�
     [["day-0"], ["day-1"], ["day-2"], ["day-3"], ["day-4"], ["day-5"], ["day-6"], ["day-7", "history"]]);
 });
 
-test("桌面同步只观察当前会话与可见 Codex 列表项，关联详情沿用主会话", () => {
-  const { context, root } = desktopObservationHarness();
-  assert.deepEqual([...context.desktopObservationIds()], ["selected", "visible"]);
-  context.relatedSessionView = { parentThreadId: "parent", threadId: "child" };
-  assert.deepEqual([...context.desktopObservationIds()], ["parent", "visible"]);
-  root.getBoundingClientRect = () => ({ top: 0, bottom: 200, left: -250, right: 0, width: 250 });
-  assert.deepEqual([...context.desktopObservationIds()], ["parent"]);
-  context.creating = true;
-  assert.deepEqual([...context.desktopObservationIds()], []);
-});
-
-test("桌面同步复用同一批观察，变更选择后续读；旧后台和后台页面不发请求", async () => {
-  const { context, requests, scheduled } = desktopObservationHarness();
-  const first = context.syncDesktopObservation();
-  assert.equal(requests.length, 1);
-  assert.equal(requests[0].path, "/api/read/observeThreads");
-  assert.equal(requests[0].options.resourcePriority, "background");
-  context.selectedId = "next";
-  await context.syncDesktopObservation();
-  assert.equal(requests.length, 1);
-  requests[0].resolve({ ok: true }); await first;
-  assert.equal(scheduled.length, 1);
-  const next = context.syncDesktopObservation();
-  assert.equal(requests.length, 2);
-  assert.deepEqual([...requests[1].payload.threadIds], ["next", "visible"]);
-  requests[1].resolve({ ok: true }); await next;
-  await context.syncDesktopObservation();
-  assert.equal(requests.length, 2);
-  context.session.capabilities.desktopSessionSync = false;
-  await context.syncDesktopObservation();
-  context.session.capabilities.desktopSessionSync = true;
-  context.document.hidden = true;
-  await context.syncDesktopObservation();
-  assert.equal(requests.length, 2);
-});
-
-test("桌面观察迟到回执不能确认新连接或新授权下的订阅", async () => {
-  const { context, requests } = desktopObservationHarness();
-  const first = context.syncDesktopObservation();
-  context.nativeConnectionVersion++;
-  requests[0].resolve({ ok: true }); await first;
-  assert.equal(context.desktopObservationLast, null);
-  const second = context.syncDesktopObservation();
-  context.session.device.id = "other";
-  requests[1].resolve({ ok: true }); await second;
-  assert.equal(context.desktopObservationLast, null);
-});
-
-test("桌面边界：取消观察后立即重建，旧 promise 不阻塞也不撤销新请求", async () => {
-  const { context, requests } = desktopObservationHarness();
-  const first = context.syncDesktopObservation();
-  context.resetDesktopObservation();
-  assert.equal(requests[0].signal.aborted, true);
-  ++context.nativeConnectionVersion;
-  const next = context.syncDesktopObservation();
-  assert.equal(requests.length, 2, "不等待已取消请求的旧 promise 才恢复观察");
-  requests[0].resolve({ ok: true }); await first;
-  assert.equal(context.desktopObservationRequest.controller.signal, requests[1].signal);
-  assert.equal(context.desktopObservationLast, null);
-  requests[1].resolve({ ok: true }); await next;
-  assert.equal(context.desktopObservationRequest, null);
-});
-
-test("桌面单会话重连只补对应正文与列表，不重复刷新整个连接", () => {
-  let reloads = 0, sidebars = 0, connections = 0, resets = 0, observations = 0;
+test("单会话重同步只补对应正文与列表，不重复刷新整个连接", () => {
+  let reloads = 0, sidebars = 0, connections = 0;
   const context = vm.createContext({ nativeConnectionVersion: 1,
     selectedId: "selected", handleRemoteChannelEvent: () => false, scheduleRelatedMenuRefresh() {},
     sidebarReadRefreshSuppressions: new Set(),
     scheduleReload: () => reloads++, scheduleSidebarRefresh: () => sidebars++,
     withRecoveryErrorSilence: async run => run(), refreshConnectedSession: async () => connections++,
-    resetDesktopObservation: () => resets++, scheduleDesktopObservation: () => observations++,
   });
   vm.runInContext(`${sourceSection("function receive(event) {", "  const params = { ...event.params || {} };")}\n}`, context);
   context.receive({ method: "remote/resync", params: { threadId: "background" } });
   assert.equal(reloads, 0); assert.equal(sidebars, 1); assert.equal(connections, 0);
   context.receive({ method: "remote/resync", params: { threadId: "selected" } });
   assert.equal(reloads, 1); assert.equal(sidebars, 2); assert.equal(connections, 0);
-  assert.equal(resets, 0); assert.equal(observations, 0);
   context.receive({ method: "remote/resync", params: {} });
   assert.equal(connections, 1);
-  assert.equal(resets, 1); assert.equal(observations, 1);
 });
 
 test("Codex/Claude 图片添加和草稿/队列恢复完整保留八张，第九张拒绝且不丢原图", async () => {
@@ -10018,7 +9925,7 @@ test("侧边标签执行状态沿用原生状态并去重，排队占位和等�
     workspaceSidePanelStateSignature: "", creating: false, selectedId: "side-a", connected: true, pageLeaving: false,
     thread: { id: "side-a", status: { type: "active" } },
   });
-  nodeVm.runInContext(sourceSection("function sidebarAttentionState(", "function desktopObservationIds(")
+  nodeVm.runInContext(sourceSection("function sidebarAttentionState(")
     + sourceSection("function syncWorkspaceSidePanelState(", "function installSidePanelMessageListener("), context);
   context.syncWorkspaceSidePanelState();
   assert.equal(sent.at(-1).running, true);
@@ -11993,7 +11900,7 @@ test("Codex 切换模型保留仍受支持的深度，目标模型不支持时�
   assert.equal(c.currentEffort(), "low");
 });
 
-test("Codex 新建权限优先显式草稿和有效记忆，再采用 App 默认，管理员禁用后不会沿用旧权限", async () => {
+test("Codex 新建权限优先显式草稿和有效记忆，再采用独立服务默认，管理员禁用后不会沿用旧权限", async () => {
   const h = composerPermissionHarness({ creating: true }), c = h.context;
   Object.assign(c, {
     newChatModels: new Map(), localStorage: storage(), creationProject: "project-a", selectionVersion: 1,

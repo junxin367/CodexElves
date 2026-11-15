@@ -88,7 +88,7 @@ static WEB_ASSETS: OnceLock<HashMap<&'static str, StaticWebAsset>> = OnceLock::n
 
 #[cfg(test)]
 #[async_trait]
-trait NativeRemoteBridge: Send + Sync {
+trait TestRemoteBackend: Send + Sync {
     async fn call(&self, action: &str, payload: Value) -> anyhow::Result<Value>;
 
     async fn call_authorized(
@@ -385,7 +385,7 @@ struct LiveService {
 
 pub struct RemoteAccessController {
     #[cfg(test)]
-    test_bridge: OnceLock<Arc<dyn NativeRemoteBridge>>,
+    test_backend: OnceLock<Arc<dyn TestRemoteBackend>>,
     harness: Arc<harness::Harness>,
     claude: Arc<claude::Claude>,
     permissions: permissions::SessionPermissions,
@@ -451,7 +451,7 @@ impl RemoteAccessController {
         harness.enabled.store(true, Ordering::Release);
         let controller = Arc::new(Self {
             #[cfg(test)]
-            test_bridge: OnceLock::new(),
+            test_backend: OnceLock::new(),
             harness: harness.clone(),
             claude: claude.clone(),
             permissions,
@@ -498,13 +498,13 @@ impl RemoteAccessController {
     }
 
     #[cfg(test)]
-    fn with_test_bridge(
-        native: Arc<dyn NativeRemoteBridge>,
+    fn with_test_backend(
+        native: Arc<dyn TestRemoteBackend>,
         state_dir: PathBuf,
     ) -> anyhow::Result<Arc<Self>> {
         let controller = Self::new(state_dir)?;
         // 仅隔离接口测试可替换服务结果；正式程序没有可注入的桌面执行后端。
-        let _ = controller.test_bridge.set(native);
+        let _ = controller.test_backend.set(native);
         Ok(controller)
     }
 
@@ -1636,7 +1636,7 @@ impl RemoteAccessController {
     ) -> anyhow::Result<Value> {
         // 用户要求移除远程桌面注入路由：所有 Codex 读写都由服务管理，失败只保留原错误与回执，不换通道重发。
         #[cfg(test)]
-        if let Some(bridge) = self.test_bridge.get() {
+        if let Some(bridge) = self.test_backend.get() {
             return bridge.call_authorized(action, payload, authorization).await;
         }
         execution::Scope::service(
@@ -3087,7 +3087,7 @@ async fn session(
         "goalComposer":native_write_available,"compactionQueueSend":native_write_available,
         "sendText":native_write_available || service_connected,
         "sideThreads":true,"serviceSideThreads":true,"subagents":true,"serviceSubagents":true,
-        "desktopSessionSync":true,"sessionMetrics":true,
+        "sessionMetrics":true,
         "claudeSessions":true,"claudeProjectTrust":true,"claudeSubscriptionUsage":true}})))
 }
 
@@ -3255,7 +3255,6 @@ async fn read(
     if !matches!(
         action.as_str(),
         "sidebar"
-            | "observeThreads"
             | "history"
             | "thread"
             | "models"
@@ -3273,19 +3272,6 @@ async fn read(
             | "relatedThreads"
     ) {
         return Err(ApiError::new(404, "不支持的读取操作"));
-    }
-    if action == "observeThreads" {
-        // 128 与 app.js 的可见列表采集上限一致；不接收路径、正文或执行指令。
-        let ids = payload["threadIds"]
-            .as_array()
-            .filter(|ids| ids.len() <= 128)
-            .ok_or_else(|| ApiError::new(400, "会话观察列表无效"))?;
-        if ids.iter().any(|id| {
-            notification_thread_id(id).is_none() || id.as_str().is_some_and(claude::Claude::owns_id)
-        }) {
-            return Err(ApiError::new(400, "会话观察标识无效"));
-        }
-        payload = json!({"threadIds":ids});
     }
     if action == "sessionMetrics" && notification_thread_id(&payload["threadId"]).is_none() {
         return Err(ApiError::new(400, "会话统计标识无效"));
@@ -5438,7 +5424,7 @@ mod tests {
             cwd: String,
         }
         #[async_trait]
-        impl NativeRemoteBridge for SharedProjects {
+        impl TestRemoteBackend for SharedProjects {
             async fn call(&self, action: &str, payload: Value) -> anyhow::Result<Value> {
                 match action {
                     "workspaceContext" => Ok(json!({"ok":true,"hostId":"local",
@@ -5514,7 +5500,7 @@ mod tests {
             cwd: fixture.to_string_lossy().into_owned(),
         });
         let controller =
-            RemoteAccessController::with_test_bridge(native, directory.path().to_path_buf())
+            RemoteAccessController::with_test_backend(native, directory.path().to_path_buf())
                 .unwrap();
         let settings = RemoteAccessSettings {
             enabled: true,
@@ -6186,7 +6172,9 @@ readline.createInterface({input:process.stdin}).on('line',line=>{
    const readThread=related.rows.includes(t)?{...t,turns:p.includeTurns?t.turns||[]:[]}:t;
    result={thread:nativePins?{...readThread,section:sectionId?{id:sectionId,name:'Section'}:null}:readThread,
      readState:{firstUnread:null,revision:'r1'}};break;
- case 'thread/resume': result={thread:t,model:'gpt-6.1-sol',reasoningEffort:'high'};break;
+ case 'thread/resume':
+   if(t?.name==='external-writer'){output({id:q.id,error:{code:-32600,message:`thread ${p.threadId} already has an active writer`}});return;}
+   result={thread:t,model:'gpt-6.1-sol',reasoningEffort:'high'};break;
  case 'thread/turns/list':
    if(t?.ephemeral&&related.ephemeralHistoryUnavailable){output({id:q.id,error:{code:-32600,message:'ephemeral threads do not support thread/turns/list'}});return;}
    result=pageRows(t?.turns||[],p,'turns');break;
@@ -7348,7 +7336,7 @@ readline.createInterface({input:process.stdin}).on('line',line=>{
     }
 
     #[tokio::test]
-    async fn harness_new_session_defaults_match_desktop_and_apply_to_the_first_turn() {
+    async fn harness_new_session_defaults_use_independent_config_and_ignore_app_preferences() {
         let (directory, authorization) = harness_fixture().await;
         let controller = &authorization.controller;
         std::fs::write(
@@ -7371,12 +7359,18 @@ readline.createInterface({input:process.stdin}).on('line',line=>{
             .unwrap();
         assert_eq!(defaults["model"], "gpt-6.1-sol");
         assert_eq!(defaults["reasoningEffort"], "high");
-        assert_eq!(defaults["permissionMode"], "full-access");
+        assert_eq!(defaults["permissionMode"], "auto");
         assert!(
             !harness_engine_requests(directory.path())
                 .iter()
                 .any(|frame| frame["method"] == "thread/start")
         );
+        // App 私有文件即使损坏也不能改变或阻断独立服务的新建配置。
+        std::fs::write(
+            directory.path().join(".codex-global-state.json"),
+            "{invalid app state",
+        )
+        .unwrap();
         let created = controller
             .call_authorized(
                 "create",
@@ -7385,7 +7379,7 @@ readline.createInterface({input:process.stdin}).on('line',line=>{
             )
             .await
             .unwrap();
-        assert_eq!(created["permissionMode"], "full-access");
+        assert_eq!(created["permissionMode"], "auto");
         let frames = harness_engine_requests(directory.path());
         let start = frames
             .iter()
@@ -7400,10 +7394,10 @@ readline.createInterface({input:process.stdin}).on('line',line=>{
             start["params"]["config"]["model_reasoning_effort"],
             defaults["reasoningEffort"]
         );
-        assert_eq!(start["params"]["sandbox"], "danger-full-access");
+        assert_eq!(start["params"]["sandbox"], "workspace-write");
         assert_eq!(turn["params"]["effort"], defaults["reasoningEffort"]);
-        assert_eq!(turn["params"]["approvalPolicy"], "never");
-        assert_eq!(turn["params"]["sandboxPolicy"]["type"], "dangerFullAccess");
+        assert_eq!(turn["params"]["approvalPolicy"], "on-request");
+        assert_eq!(turn["params"]["sandboxPolicy"]["type"], "workspaceWrite");
         assert!(
             frames
                 .iter()
@@ -7421,7 +7415,69 @@ readline.createInterface({input:process.stdin}).on('line',line=>{
             )
             .await
             .unwrap();
-        assert_eq!(detail["thread"]["permissionMode"], "full-access");
+        assert_eq!(detail["thread"]["permissionMode"], "auto");
+        controller.harness.release().await;
+    }
+
+    #[tokio::test]
+    async fn harness_external_writer_rejection_never_delegates_or_reports_a_false_stop() {
+        let (directory, authorization) = harness_fixture().await;
+        let controller = &authorization.controller;
+        let id = uuid::Uuid::new_v4().to_string();
+        controller
+            .harness
+            .seed_test_subagents(json!({"rows":[{
+                "id":id,"name":"external-writer","cwd":directory.path(),"ephemeral":false,
+                "forkedFromId":null,"threadSource":"user","source":"vscode",
+                "status":{"type":"notLoaded"},"turns":[],"createdAt":1,"updatedAt":1
+            }]}))
+            .await
+            .unwrap();
+        let send = || {
+            controller.execute(authorization.device.clone(), "standalone-send".into(),
+            "send".into(), json!({"threadId":id,"prompt":"must not be dispatched","clientUserMessageId":"standalone-user"}))
+        };
+        let rejected = send().await.unwrap();
+        assert_eq!(rejected["state"], "failed");
+        assert_eq!(rejected["result"]["notSent"], true);
+        assert_eq!(send().await.unwrap(), rejected);
+        let stopped = controller
+            .execute(
+                authorization.device.clone(),
+                "standalone-stop".into(),
+                "stop".into(),
+                json!({"threadId":id}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(stopped["state"], "failed");
+        assert_eq!(stopped["result"]["notSent"], true);
+        let frames = harness_engine_requests(directory.path());
+        assert_eq!(
+            frames
+                .iter()
+                .filter(|frame| frame["method"] == "thread/resume")
+                .count(),
+            1
+        );
+        assert!(!frames.iter().any(|frame| matches!(
+            frame["method"].as_str(),
+            Some("turn/start" | "turn/interrupt" | "thread/compact/start")
+        )));
+        let queue = controller
+            .call_authorized("queue", json!({"threadId":id}), &authorization)
+            .await
+            .unwrap();
+        assert_eq!(queue["queuedMessages"], json!([]));
+        let audit = controller.harness.audit.snapshot();
+        for record in audit["records"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|record| record["action"] == "send")
+        {
+            assert_eq!(record["transports"], json!(["app-server-stdio"]));
+        }
         controller.harness.release().await;
     }
 
@@ -10067,13 +10123,8 @@ readline.createInterface({input:process.stdin}).on('line',line=>{
     }
 
     #[tokio::test]
-    #[ignore = "显式提供隔离原生引擎与隔离桌面 IPC 环境后验收服务侧边会话"]
+    #[ignore = "显式提供隔离原生引擎后验收服务侧边会话"]
     async fn harness_service_side_real_app_server_lifecycle() {
-        assert!(
-            std::env::var("CODEX_ELVES_TEST_IPC_PIPE")
-                .unwrap_or_default()
-                .starts_with(r"\\.\pipe\codex-elves-isolation-")
-        );
         let executable = std::env::var_os("CODEX_ELVES_SERVICE_CHECK_EXE").unwrap();
         let (directory, authorization) = harness_fixture().await;
         let controller = &authorization.controller;
@@ -11239,7 +11290,7 @@ readline.createInterface({input:process.stdin}).on('line',line=>{
             calls: Mutex::new(Vec::new()),
             result: Mutex::new(json!({"ok":true,"threadId":"side-1","parentThreadId":"parent-1"})),
         });
-        let controller = RemoteAccessController::with_test_bridge(
+        let controller = RemoteAccessController::with_test_backend(
             native.clone(),
             state_dir.path().to_path_buf(),
         )
@@ -11576,7 +11627,7 @@ readline.createInterface({input:process.stdin}).on('line',line=>{
             calls: Mutex::new(Vec::new()),
             result: Mutex::new(json!({"ok":true,"thread":{"id":"thread-1","tokenUsage":null}})),
         });
-        let controller = RemoteAccessController::with_test_bridge(
+        let controller = RemoteAccessController::with_test_backend(
             native.clone(),
             directory.path().to_path_buf(),
         )
@@ -11668,7 +11719,7 @@ readline.createInterface({input:process.stdin}).on('line',line=>{
     }
 
     #[async_trait::async_trait]
-    impl NativeRemoteBridge for RecordingActionBridge {
+    impl TestRemoteBackend for RecordingActionBridge {
         async fn call(&self, action: &str, payload: Value) -> anyhow::Result<Value> {
             self.calls.lock().await.push((action.to_string(), payload));
             Ok(self.result.lock().await.clone())
@@ -11760,7 +11811,7 @@ readline.createInterface({input:process.stdin}).on('line',line=>{
             result: Mutex::new(json!({"ok":true,"threadId":"thread-1",
                 "model":"gpt-fixture","supported":true,"enabled":true})),
         });
-        let controller = RemoteAccessController::with_test_bridge(
+        let controller = RemoteAccessController::with_test_backend(
             native.clone(),
             state_dir.path().to_path_buf(),
         )
@@ -11967,8 +12018,8 @@ readline.createInterface({input:process.stdin}).on('line',line=>{
     async fn image_http_cache_revalidates_content_and_authorization() {
         let directory = tempfile::tempdir().unwrap();
         configure_access_key(directory.path(), "image-cache-test-key").unwrap();
-        let controller = RemoteAccessController::with_test_bridge(
-            Arc::new(OfflineNativeBridge),
+        let controller = RemoteAccessController::with_test_backend(
+            Arc::new(OfflineTestBackend),
             directory.path().to_path_buf(),
         )
         .unwrap();
@@ -12155,7 +12206,7 @@ readline.createInterface({input:process.stdin}).on('line',line=>{
             calls: Mutex::new(Vec::new()),
             result: Mutex::new(expected.clone()),
         });
-        let controller = RemoteAccessController::with_test_bridge(
+        let controller = RemoteAccessController::with_test_backend(
             native.clone(),
             state_dir.path().to_path_buf(),
         )
@@ -12289,7 +12340,7 @@ readline.createInterface({input:process.stdin}).on('line',line=>{
                 json!({"ok":true,"threadId":thread_id,"deleted":true,"status":"local_deleted"}),
             ),
         });
-        let controller = RemoteAccessController::with_test_bridge(
+        let controller = RemoteAccessController::with_test_backend(
             native.clone(),
             state_dir.path().to_path_buf(),
         )
@@ -12619,7 +12670,7 @@ readline.createInterface({input:process.stdin}).on('line',line=>{
                     "firstTurnAccepted":false,"goalSet":"succeeded"}
             })),
         });
-        let controller = RemoteAccessController::with_test_bridge(
+        let controller = RemoteAccessController::with_test_backend(
             native.clone(),
             directory.path().to_path_buf(),
         )
@@ -12830,10 +12881,10 @@ readline.createInterface({input:process.stdin}).on('line',line=>{
         }
     }
 
-    struct OfflineNativeBridge;
+    struct OfflineTestBackend;
 
     #[async_trait::async_trait]
-    impl NativeRemoteBridge for OfflineNativeBridge {
+    impl TestRemoteBackend for OfflineTestBackend {
         async fn call(&self, _action: &str, _payload: Value) -> anyhow::Result<Value> {
             anyhow::bail!("native bridge unavailable during test")
         }
@@ -12844,8 +12895,8 @@ readline.createInterface({input:process.stdin}).on('line',line=>{
     #[test]
     fn channel_journal_replays_in_order_and_reports_expired_cursors() {
         let directory = tempfile::tempdir().unwrap();
-        let controller = RemoteAccessController::with_test_bridge(
-            Arc::new(OfflineNativeBridge),
+        let controller = RemoteAccessController::with_test_backend(
+            Arc::new(OfflineTestBackend),
             directory.path().to_owned(),
         )
         .unwrap();
@@ -13283,8 +13334,8 @@ readline.createInterface({input:process.stdin}).on('line',line=>{
     }
 
     fn reopened_login_lock_state(directory: &std::path::Path) -> WebState {
-        let controller = RemoteAccessController::with_test_bridge(
-            Arc::new(OfflineNativeBridge),
+        let controller = RemoteAccessController::with_test_backend(
+            Arc::new(OfflineTestBackend),
             directory.to_path_buf(),
         )
         .unwrap();
@@ -14421,8 +14472,8 @@ readline.createInterface({input:process.stdin}).on('line',line=>{
     #[tokio::test]
     async fn missing_credentials_allow_listener_but_reject_session_access() {
         let state_dir = tempfile::tempdir().unwrap();
-        let controller = RemoteAccessController::with_test_bridge(
-            Arc::new(OfflineNativeBridge),
+        let controller = RemoteAccessController::with_test_backend(
+            Arc::new(OfflineTestBackend),
             state_dir.path().to_path_buf(),
         )
         .unwrap();
@@ -14479,8 +14530,8 @@ readline.createInterface({input:process.stdin}).on('line',line=>{
             .prefix("remote-key-test-")
             .tempdir_in(temp_root)
             .unwrap();
-        let controller = RemoteAccessController::with_test_bridge(
-            Arc::new(OfflineNativeBridge),
+        let controller = RemoteAccessController::with_test_backend(
+            Arc::new(OfflineTestBackend),
             state_dir.path().to_path_buf(),
         )
         .unwrap();
@@ -14631,8 +14682,8 @@ readline.createInterface({input:process.stdin}).on('line',line=>{
     #[tokio::test]
     async fn app_resource_manifest_matches_public_routes_and_preserves_api_boundary() {
         let state_dir = tempfile::tempdir().unwrap();
-        let controller = RemoteAccessController::with_test_bridge(
-            Arc::new(OfflineNativeBridge),
+        let controller = RemoteAccessController::with_test_backend(
+            Arc::new(OfflineTestBackend),
             state_dir.path().to_path_buf(),
         )
         .unwrap();

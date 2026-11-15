@@ -1,6 +1,6 @@
 (() => {
   const root = typeof window === "object" ? window : {};
-  const version = "11";
+  const version = "12";
   if (root.__codexElvesComposerFast?.version === version) return;
   root.__codexElvesComposerFast?.configure?.({ enabled: false });
   const attribute = "data-codex-elves-fast";
@@ -376,20 +376,7 @@
     return refreshing;
   }
 
-  async function remoteState(context, model, force = false) {
-    // 用户要求远程开关作用于指定会话；能力检查复用原有账号、管理员和模型约束，不读取桌面当前输入区。
-    const unavailable = { supported: false, enabled: false, reason: "本机 Fast 增强尚未启用" };
-    if (!enabled) return unavailable;
-    if (!dispatcher) await installDispatcher();
-    const state = await readSnapshot(force);
-    const supported = context?.hostId === "local" && allowed(state) && !!modelCapability(state, model);
-    return {
-      supported,
-      enabled: supported && !!threadId(context.threadId) && configuredFast(context),
-      reason: supported ? "" : !allowed(state) ? "当前账号或配置未开放 Fast" : "当前模型未声明 Fast 能力",
-    };
-  }
-
+  // 用户禁止远程会话借用 Codex App；此接口只保留桌面本地控件与原生发送增强所需能力。
   const api = {
     version,
     configure(options) {
@@ -401,39 +388,6 @@
       return refresh();
     },
     refresh,
-    remoteState,
-    async remoteAvailability() {
-      // 用户要求模型能力复用模型目录；此处只读实例的账号/管理员/配置，不再请求 model/list。
-      if (!enabled) return { available: false, reason: "本机 Fast 增强尚未启用" };
-      if (!dispatcher) await installDispatcher();
-      const state = snapshot && Date.now() - snapshotAt < 10000 ? snapshot : await readEnvironment();
-      const available = allowed(state);
-      return { available, reason: available ? "" : "当前账号或配置未开放 Fast" };
-    },
-    remotePreference(context) {
-      // 会话详情只读取已保存的布尔偏好，不探测账号、模型或其它会话。
-      if (!enabled || context?.hostId !== "local" || !threadId(context.threadId) || !root.localStorage) return null;
-      return readPreference(context);
-    },
-    async setRemoteState(context, model, value, assertCurrent = () => {}) {
-      if (context?.hostId !== "local" || !threadId(context.threadId) || typeof value !== "boolean")
-        throw new Error("Fast 会话参数无效");
-      const token = revision;
-      const state = await remoteState(context, model, true);
-      assertCurrent();
-      if (token !== revision || !state.supported) throw new Error(state.reason || "Fast 设置已变化，请重新读取");
-      writePreference(context, value);
-      void refresh();
-      return { ...state, enabled: value };
-    },
-    async createRemoteContext(model, fast = false) {
-      // 用户要求远程新会话默认关闭；显式草稿随本次创建绑定，绝不继承电脑上另一个输入框的选择。
-      if (fast === true) {
-        const state = await remoteState({ hostId: "local" }, model, true);
-        if (!state.supported) throw new Error(state.reason || "当前模型不支持 Fast");
-      }
-      return { hostId: "local", draftId: `remote:${root.crypto.randomUUID()}`, fast: fast === true };
-    },
     captureContext() {
       const context = adapters?.getCreationContext ? adapters.getCreationContext() : currentContext();
       return context && { ...context, fast: configuredFast(context) };

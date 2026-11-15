@@ -1,10 +1,9 @@
 //! 远程会话服务：统一维护执行引擎、会话归属、队列、编辑事务、审批和事件。
-//! 用户要求 Codex 仅保留服务模式；本模块不包含页面脚本或桌面注入回退。
+//! 用户要求 Codex 仅保留服务模式；不连接 Codex App，也不包含桌面 IPC、页面脚本或注入回退。
 mod catalog;
 mod commands;
 mod defaults;
 mod deletion;
-mod desktop;
 mod fast;
 mod pins;
 mod projection;
@@ -41,13 +40,10 @@ pub(super) struct Harness {
     catalog: Arc<Catalog>,
     projection: Arc<Mutex<Projection>>,
     store: Mutex<Store>,
-    #[cfg(test)]
-    project_codex_home: std::path::PathBuf,
     controller: OnceLock<Weak<RemoteAccessController>>,
     receiver: Mutex<Option<mpsc::Receiver<Value>>>,
     worker: Mutex<Option<tokio::task::JoinHandle<()>>>,
     queue_worker: Mutex<Option<tokio::task::JoinHandle<()>>>,
-    desktop: desktop::DesktopObservers,
     locks: Mutex<HashMap<String, Arc<Mutex<()>>>>,
     queue_recovery_after: Mutex<HashMap<String, std::time::Instant>>,
     loaded: Mutex<HashMap<String, String>>,
@@ -112,13 +108,10 @@ impl Harness {
             catalog: Arc::new(Catalog::default()),
             projection: projection.clone(),
             store: Mutex::new(store),
-            #[cfg(test)]
-            project_codex_home: directory.to_path_buf(),
             controller: OnceLock::new(),
             receiver: Mutex::new(Some(receiver)),
             worker: Mutex::new(None),
             queue_worker: Mutex::new(None),
-            desktop: desktop::DesktopObservers::new(projection, audit),
             locks: Mutex::new(HashMap::new()),
             queue_recovery_after: Mutex::new(HashMap::new()),
             loaded: Mutex::new(HashMap::new()),
@@ -160,7 +153,7 @@ impl Harness {
                 async move {
                     while let Some(frame) = receiver.recv().await {
                         let Some(service) = weak.upgrade() else { break };
-                        // 执行权随引擎加载生命周期变化；已释放的旧标记不能永久屏蔽桌面观察。
+                        // 加载标记只属于当前独立引擎；收到卸载事件后清除旧代次记录。
                         let generation = frame["_generation"].as_str().unwrap_or("");
                         if frame["method"] == "thread/deleted"
                             && generation == service.projection.lock().await.generation
@@ -323,7 +316,6 @@ impl Harness {
 
     pub async fn release(&self) {
         self.catalog.reset().await;
-        self.desktop.reset().await;
         self.runtime.shutdown().await;
         self.loaded.lock().await.clear();
     }
@@ -362,9 +354,8 @@ impl Harness {
             }
         }
         self.remember_settings(id, &response).await?;
-        // 与列表观察的登记共用归属锁：取消旧订阅到登记服务执行权之间不能插入新桌面订阅。
+        // 用户要求远程会话独立于 Codex App；只登记本服务原生引擎的加载代次。
         let mut loaded = self.loaded.lock().await;
-        self.desktop.forget(id).await;
         self.projection
             .lock()
             .await
@@ -398,82 +389,9 @@ impl Harness {
         Ok(())
     }
 
-    async fn locally_loaded(&self, id: &str) -> anyhow::Result<bool> {
+    async fn engine_loaded(&self, id: &str) -> anyhow::Result<bool> {
         let generation = self.runtime.connection().await?.generation.clone();
         Ok(self.loaded.lock().await.get(id) == Some(&generation))
-    }
-
-    async fn owner_snapshot(&self, id: &str) -> anyhow::Result<Option<Value>> {
-        self.owner_snapshot_kind(id, false).await
-    }
-
-    async fn owner_view_snapshot(&self, id: &str) -> anyhow::Result<Option<Value>> {
-        self.owner_snapshot_kind(id, true).await
-    }
-
-    async fn owner_snapshot_kind(
-        &self,
-        id: &str,
-        allow_subagents: bool,
-    ) -> anyhow::Result<Option<Value>> {
-        if self.locally_loaded(id).await? {
-            return Ok(None);
-        }
-        let snapshot = if allow_subagents {
-            crate::desktop_owner_ipc::read_view_snapshot(id).await
-        } else {
-            crate::desktop_owner_ipc::read_snapshot(id).await
-        }
-        .map_err(|error| {
-            if error.downcast_ref::<ApiError>().is_some() {
-                error
-            } else {
-                super::ApiError::new(
-                    503,
-                    "当前会话的桌面连接暂时不可用，请确认桌面应用可响应后重试。",
-                )
-                .into()
-            }
-        })?;
-        if snapshot.is_some() {
-            execution::transport("desktop-ipc", "thread-snapshot", false);
-        }
-        Ok(snapshot)
-    }
-
-    async fn owner_request(
-        &self,
-        id: &str,
-        method: &str,
-        params: Value,
-        version: u64,
-        guard: Option<&dyn ServiceDispatchGuard>,
-    ) -> anyhow::Result<Option<Value>> {
-        if self.locally_loaded(id).await? {
-            return Ok(None);
-        }
-        crate::desktop_owner_ipc::request_owner(id, method, params, version, guard)
-            .await
-            .map_err(|error| {
-                if error.downcast_ref::<ApiError>().is_some() {
-                    return error;
-                }
-                // 用户要求 IPC 故障不能冒充无持有者；未发送和已发送待核对必须分别保留，均不回退到其他执行通道。
-                let dispatched = error
-                    .downcast_ref::<crate::desktop_owner_ipc::DispatchFailure>()
-                    .is_some_and(|failure| failure.dispatched);
-                ApiError {
-                    code: 503,
-                    message: if dispatched {
-                        "当前会话的桌面连接中断，操作结果待核对，请刷新会话确认，勿重复提交。"
-                    } else {
-                        "当前会话的桌面连接暂时不可用，操作未发送，请确认桌面应用可响应后重试。"
-                    }
-                    .into(),
-                    outcome_unknown: dispatched,
-                }
-                .into()
-            })
     }
 
     pub async fn call(
@@ -535,28 +453,10 @@ impl Harness {
         let result = match action {
             "events" => {
                 self.runtime.check_health().await?;
-                // 服务模式有可见页面时沿用 3 秒目录缓存补齐桌面新会话；后台发现不阻塞事件推送。
-                if self.desktop.catalog_refresh_due() {
-                    self.catalog
-                        .refresh_in_background(&self.runtime, &self.projection);
-                }
+                // 只通过独立引擎刷新目录；Catalog 自身合并请求并限制读取频率。
+                self.catalog
+                    .refresh_in_background(&self.runtime, &self.projection);
                 Ok(self.projection.lock().await.events(&payload))
-            }
-            "observeThreads" => {
-                self.desktop.renew_catalog_interest();
-                let generation = self.runtime.connection().await?.generation.clone();
-                let loaded = self.loaded.lock().await;
-                for id in payload["threadIds"]
-                    .as_array()
-                    .into_iter()
-                    .flatten()
-                    .filter_map(Value::as_str)
-                {
-                    if loaded.get(id) != Some(&generation) {
-                        self.desktop.observe(id, None).await;
-                    }
-                }
-                Ok(json!({"ok":true}))
             }
             "notifications" => Ok(self.projection.lock().await.notifications(&payload)),
             "sidebar" => self.sidebar().await,
@@ -777,44 +677,6 @@ impl Harness {
             self.remember_queue_wait(id, turn, compacting).await?;
             return Ok(());
         }
-        if let Some(snapshot) = self.owner_snapshot(id).await? {
-            // 桌面已明确执行中时，历史尚未载入当前轮次也必须等待，不能提前派发队列。
-            let active = desktop::executing(&snapshot)
-                || crate::desktop_owner_ipc::snapshot_turns(&snapshot)
-                    .iter()
-                    .any(|t| t["status"] == "inProgress");
-            if active {
-                let turn = crate::desktop_owner_ipc::snapshot_turns(&snapshot)
-                    .iter()
-                    .rev()
-                    .find(|turn| turn["status"] == "inProgress")
-                    .and_then(|turn| turn["turnId"].as_str())
-                    .map(str::to_owned);
-                self.remember_queue_wait(id, turn, false).await?;
-                self.follow_owner(id, snapshot).await;
-                return Ok(());
-            }
-            // 桌面已有待发内容时继续等待其持有者处理，不能让服务队列抢先发送。
-            let settings = crate::settings::SettingsStore::default().load()?;
-            let home = crate::codex_home::codex_home_dir_for_settings(&settings);
-            if !crate::codex_service::local_queue_is_empty(&home, id, &snapshot).await? {
-                return Ok(());
-            }
-            let native_queue = self
-                .runtime
-                .request(
-                    "thread/queue/list",
-                    json!({"threadId":id,"cursor":null,"limit":1}),
-                    None,
-                )
-                .await?;
-            let queued = native_queue["data"]
-                .as_array()
-                .context("桌面服务端队列状态未知")?;
-            if !queued.is_empty() || !native_queue["nextCursor"].is_null() {
-                return Ok(());
-            }
-        }
         if !self
             .queue_completion_confirmed(id, &identity, message.created_at)
             .await?
@@ -882,16 +744,6 @@ impl Harness {
         self.queue_changed(id).await;
         result.map(|_| ())
     }
-
-    async fn follow_owner(&self, id: &str, baseline: Value) {
-        let Ok(connection) = self.runtime.connection().await else {
-            return;
-        };
-        let loaded = self.loaded.lock().await;
-        if loaded.get(id) != Some(&connection.generation) {
-            self.desktop.observe(id, Some(baseline)).await;
-        }
-    }
 }
 
 fn error(code: u16, message: &str) -> anyhow::Error {
@@ -915,13 +767,8 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    #[ignore = "只读验证已安装引擎，需显式指定会话和轮次，并隔离桌面 IPC"]
+    #[ignore = "只读验证已安装引擎，需显式指定会话和轮次"]
     async fn installed_engine_history_reentry_smoke() {
-        assert!(
-            std::env::var("CODEX_ELVES_TEST_IPC_PIPE")
-                .unwrap_or_default()
-                .starts_with(r"\\.\pipe\codex-elves-isolation-")
-        );
         let id = std::env::var("CODEX_ELVES_HISTORY_CHECK_THREAD").expect("缺少待核对会话");
         let turn_id = std::env::var("CODEX_ELVES_HISTORY_CHECK_TURN").expect("缺少待核对轮次");
         let expected = std::env::var("CODEX_ELVES_HISTORY_CHECK_TEXT").expect("缺少待核对用户消息");
@@ -1105,9 +952,7 @@ mod tests {
     #[ignore]
     async fn installed_engine_native_pins_read_only_smoke() {
         let directory = tempfile::tempdir().unwrap();
-        let mut service = Harness::new(directory.path()).unwrap();
-        Arc::get_mut(&mut service).unwrap().project_codex_home =
-            crate::codex_home::default_codex_home_dir();
+        let service = Harness::new(directory.path()).unwrap();
         service.prepare().await.unwrap();
         let expected = service
             .list_all(
@@ -1140,9 +985,7 @@ mod tests {
     #[ignore]
     async fn installed_engine_read_only_smoke() {
         let directory = tempfile::tempdir().unwrap();
-        let mut service = Harness::new(directory.path()).unwrap();
-        Arc::get_mut(&mut service).unwrap().project_codex_home =
-            crate::codex_home::default_codex_home_dir();
+        let service = Harness::new(directory.path()).unwrap();
         service.prepare().await.unwrap();
         let threads = service
             .runtime
@@ -1171,31 +1014,17 @@ mod tests {
                 .iter()
                 .all(|project| project["synthetic"] != true)
         );
-        let desktop: Value =
-            std::fs::read(service.project_codex_home.join(".codex-global-state.json"))
-                .ok()
-                .and_then(|bytes| serde_json::from_slice(&bytes).ok())
-                .unwrap_or(Value::Null);
-        let expected_order = ["pinned-project-ids", "project-order"]
-            .into_iter()
-            .flat_map(|key| desktop[key].as_array().into_iter().flatten())
-            .filter(|id| {
-                displayed_projects
-                    .iter()
-                    .any(|project| project["id"] == **id)
-            })
-            .collect::<Vec<_>>();
-        if !expected_order.is_empty() {
-            assert_eq!(
-                displayed_projects
-                    .iter()
-                    .take(expected_order.len())
-                    .map(|project| &project["id"])
-                    .collect::<Vec<_>>(),
-                expected_order,
-                "真实列表顺序应与桌面置顶和项目顺序一致"
-            );
-        }
+        assert_eq!(
+            displayed_projects
+                .iter()
+                .map(|project| &project["id"])
+                .collect::<Vec<_>>(),
+            projects
+                .iter()
+                .map(|project| &project["id"])
+                .collect::<Vec<_>>(),
+            "独立服务的项目顺序应来自原生 project/list"
+        );
         let assigned = sidebar["recent"]
             .as_array()
             .unwrap()

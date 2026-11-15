@@ -1,36 +1,6 @@
-use std::path::Path;
-
-use anyhow::Context;
 use serde_json::{Value, json};
 
 use super::{Harness, error, runtime::UnsupportedMethod};
-
-fn desktop_permission(state: &Value) -> Option<&str> {
-    // 用户要求默认权限沿用 Codex App；只读取当前桌面账号所属的偏好，不能借用其他账号的记录。
-    let atoms = match state["electron-renderer-content-owner"].as_str() {
-        Some(owner) => state.get(format!("electron-owner-atoms:{owner}"))?,
-        None => &state["electron-persisted-atom-state"],
-    };
-    let selection = &atoms["permission-selection-by-host-id:local"];
-    match selection["kind"].as_str() {
-        Some("agent-mode") => selection["agentMode"].as_str(),
-        Some("custom" | "profile" | "server-default") => Some("configured"),
-        _ => atoms["agent-mode-by-host-id"]["local"].as_str(),
-    }
-}
-
-fn load_desktop_permission(home: &Path) -> anyhow::Result<Option<String>> {
-    let path = home.join(".codex-global-state.json");
-    let metadata = match std::fs::metadata(&path) {
-        Ok(metadata) => metadata,
-        Err(failure) if failure.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(failure) => return Err(failure).context("无法读取 Codex App 默认权限"),
-    };
-    anyhow::ensure!(metadata.len() <= 16 * 1024 * 1024, "Codex App 偏好文件过大");
-    let state: Value =
-        serde_json::from_slice(&std::fs::read(path)?).context("Codex App 默认权限配置格式无效")?;
-    Ok(desktop_permission(&state).map(str::to_owned))
-}
 
 pub(super) fn model_effort(model: &Value, preferred: Option<&str>) -> Option<String> {
     let efforts = model["supportedReasoningEfforts"].as_array()?;
@@ -106,12 +76,7 @@ fn configured_permission(config: &Value) -> &str {
     }
 }
 
-fn resolve_defaults(
-    models: &[Value],
-    config: &Value,
-    desktop: Option<&str>,
-    requirements: &Value,
-) -> Value {
+fn resolve_defaults(models: &[Value], config: &Value, requirements: &Value) -> Value {
     let policy = &requirements["models"]["newThread"];
     let requested_model = policy["model"]
         .as_str()
@@ -120,7 +85,7 @@ fn resolve_defaults(
         .and_then(|name| models.iter().find(|model| model["model"] == name))
         .or_else(|| models.iter().find(|model| model["isDefault"] == true))
         .or_else(|| models.first());
-    // 用户要求模型和深度按 App 一起解析；配置中的深度只属于匹配的模型，失效时采用该模型目录默认值。
+    // 模型和深度按独立引擎配置一起解析；配置中的深度只属于匹配的模型，失效时采用该模型目录默认值。
     let effort = model.and_then(|model| {
         model_effort(
             model,
@@ -132,9 +97,8 @@ fn resolve_defaults(
         )
     });
     let configured = configured_permission(config);
-    let mode = desktop
-        .filter(|mode| permission_allowed(mode, requirements))
-        .unwrap_or(configured);
+    // 新建权限只遵循独立引擎的生效配置，不借用 Codex App 当前账号的内部偏好。
+    let mode = configured;
     let mode = if permission_allowed(mode, requirements) {
         mode
     } else {
@@ -192,13 +156,6 @@ impl Harness {
         if !config["config"].is_object() {
             return Err(error(503, "无法确认 Codex 新会话的生效配置"));
         }
-        #[cfg(test)]
-        let home = self.project_codex_home.clone();
-        #[cfg(not(test))]
-        let home = crate::codex_home::codex_home_dir_for_settings(
-            &crate::settings::SettingsStore::default().load()?,
-        );
-        let desktop = tokio::task::spawn_blocking(move || load_desktop_permission(&home)).await??;
         let mut effective = config["config"].clone();
         if let Some(model) = payload["model"].as_str().filter(|model| !model.is_empty())
             && effective["model"] != model
@@ -207,12 +164,7 @@ impl Harness {
             effective["model_reasoning_effort"] = Value::Null;
         }
         Ok((
-            resolve_defaults(
-                &models,
-                &effective,
-                desktop.as_deref(),
-                &requirements["requirements"],
-            ),
+            resolve_defaults(&models, &effective, &requirements["requirements"]),
             config,
         ))
     }
@@ -221,23 +173,6 @@ impl Harness {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn desktop_permission_uses_only_the_current_account_and_preserves_custom_selection() {
-        let mut state = json!({
-            "electron-renderer-content-owner":"current",
-            "electron-owner-atoms:current":{"permission-selection-by-host-id:local":
-                {"kind":"agent-mode","agentMode":"full-access"}},
-            "electron-owner-atoms:other":{"permission-selection-by-host-id:local":
-                {"kind":"agent-mode","agentMode":"auto"}}
-        });
-        assert_eq!(desktop_permission(&state), Some("full-access"));
-        state["electron-owner-atoms:current"]["permission-selection-by-host-id:local"] =
-            json!({"kind":"custom"});
-        assert_eq!(desktop_permission(&state), Some("configured"));
-        state["electron-renderer-content-owner"] = json!("missing");
-        assert_eq!(desktop_permission(&state), None);
-    }
 
     #[test]
     fn defaults_keep_model_effort_permissions_and_requirements_consistent() {
@@ -249,13 +184,13 @@ mod tests {
         ];
         let config = json!({"model":"first","model_reasoning_effort":"xhigh",
             "approval_policy":"never","sandbox_mode":"danger-full-access"});
-        let resolved = resolve_defaults(&models, &config, None, &Value::Null);
+        let resolved = resolve_defaults(&models, &config, &Value::Null);
         assert_eq!(resolved["model"], "first");
         assert_eq!(resolved["reasoningEffort"], "medium");
         assert_eq!(resolved["permissionMode"], "full-access");
         let required = json!({"models":{"newThread":{"model":"second"}},
             "allowedSandboxModes":["workspace-write"]});
-        let resolved = resolve_defaults(&models, &config, Some("full-access"), &required);
+        let resolved = resolve_defaults(&models, &config, &required);
         assert_eq!(resolved["model"], "second");
         assert_eq!(resolved["reasoningEffort"], "low");
         assert_eq!(resolved["permissionMode"], "configured");
@@ -267,7 +202,7 @@ mod tests {
         );
         let custom = json!({"approval_policy":"on-request","sandbox_mode":"danger-full-access"});
         assert_eq!(
-            resolve_defaults(&models, &custom, None, &Value::Null)["permissionMode"],
+            resolve_defaults(&models, &custom, &Value::Null)["permissionMode"],
             "configured"
         );
         let custom_workspace = json!({"approval_policy":"on-request","sandbox_mode":"workspace-write",

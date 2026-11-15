@@ -63,14 +63,13 @@ import { restoreReadViews } from "./thread-display.js";
 import { sessionMenu } from "../shell-state.js";
 import { setSidebarPreferenceScope } from "../sidebar/actions.js";
 import {
-  resetDesktopObservation, scheduleDesktopObservation, setSidebarRequest, setSidebarVersion,
+  setSidebarRequest, setSidebarVersion,
   sidebarReadRefreshSuppressions, sidebarRequest, sidebarVersion
 } from "../sidebar/list-state.js";
 import { stopClientUnreadBadgePolling } from "../sidebar/list.js";
 
 export function disconnect() {
   stopClientUnreadBadgePolling(true);
-  resetDesktopObservation();
   resetClaudeUsage({ clearCache: true });
   resetComposerMetrics();
   clearPendingFeedbackTimer();
@@ -187,7 +186,6 @@ export function startConnectionPoll(deviceId) {
       if (privateInputScope(current) !== privateInputScope(session)) { await reconnectChangedAuthorization(); return; }
       const wasConnected = connected;
       setSession(current);
-      scheduleDesktopObservation();
       setConnection(backendAvailable(current) && stream?.readyState === EventSource.OPEN);
       // 连接在线不等于当前会话已读完；只补失败或未完成的读取，成功后停止补读。
       if (connected && (!wasConnected || selectedThreadReadIncomplete()
@@ -205,7 +203,6 @@ export function retireForegroundReads(reason = "页面进入后台") {
   setForegroundReadGeneration(foregroundReadGeneration + 1);
   setThreadReadVersion(threadReadVersion + 1);
   const controllers = [selectionController, historyController, threadRequest?.controller, sidebarRequest?.controller];
-  resetDesktopObservation();
   setSelectionController(null); setHistoryController(null);
   setThreadRequest(null); setHistoryRequest(null); setRefreshRequest(null); setSidebarRequest(null);
   setHistoryLoading(false); setHistoryLoadingTurnId(null); setHistoryLoadingOlder(false);

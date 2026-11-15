@@ -4418,11 +4418,10 @@
     if (method === "startConversation") {
       const fast = window.__codexElvesComposerFast;
       const options = args[1] || {};
-      // 远程新建显式携带自己的 Fast 草稿；本地选项在 RPC 前移除，避免套用当前桌面会话。
-      const { codexElvesFastContext, ...nativeOptions } = options;
-      const context = codexElvesFastContext || fast?.captureContext?.();
+      // 用户禁止远程会话桥接；这里只捕获桌面本地新建页的 Fast 草稿。
+      const context = fast?.captureContext?.();
       next[0] = await patchCodexNativeTurnParams(args[0], context);
-      next[1] = { ...nativeOptions, beforeFirstTurn: async (created) => {
+      next[1] = { ...options, beforeFirstTurn: async (created) => {
         fast?.bindConversation?.(context, created.conversationId);
         return await options.beforeFirstTurn?.(created);
       } };
@@ -12555,98 +12554,6 @@
     };
   }
 
-  const promptOptimizeRemoteRequests = new Map();
-
-  function promptOptimizeRemoteStatus({ requestId }) {
-    const request = promptOptimizeRemoteRequests.get(requestId);
-    if (!request) return { ok: false, code: 404, message: "未找到提示词优化请求" };
-    return { ok: true, state: request.state, ...request.result };
-  }
-
-  function promptOptimizeRemoteCancel({ requestId }) {
-    const request = promptOptimizeRemoteRequests.get(requestId);
-    if (!request) {
-      if (!/^[a-f0-9]{64}$/.test(requestId || "") || promptOptimizeRemoteRequests.size >= 64)
-        return { ok: false, code: 400, message: "提示词优化请求无效" };
-      promptOptimizeRemoteRequests.set(requestId, {
-        state: "cancelled", phase: "catalog", createdAt: Date.now(), result: {},
-      });
-      return { ok: true, state: "cancelled" };
-    }
-    if (request.state === "pending") {
-      request.state = "cancelled";
-      if (request.phase === "request")
-        void postJson("/prompt-optimize/cancel", { requestId }).catch(() => {});
-    }
-    return promptOptimizeRemoteStatus({ requestId });
-  }
-
-  async function promptOptimizeRemoteRun(payload, request) {
-    const { requestId, input } = payload;
-    try {
-      if (!promptOptimizeFeatureEnabled()) throw new Error("请先在桌面端开启 CodexElves 增强功能");
-      try { await loadCodexModelCatalog(); } catch {}
-      if (request.state !== "pending" || !promptOptimizeRuntimeCurrent()) return;
-      if (!promptOptimizeFeatureEnabled()) throw new Error("CodexElves 桌面端增强功能已关闭，优化未执行");
-      await promptOptimizeLoadBackendSettings(true);
-      if (request.state !== "pending" || !promptOptimizeRuntimeCurrent()) return;
-      const saved = promptOptimizeReadSettings();
-      const settings = promptOptimizeResolvedSettings({
-        ...saved, model: saved.model || String(payload.model || "").trim(),
-      });
-      const systemPrompt = String(settings.prompts?.[settings.style] || "");
-      if (!settings.model || !settings.reasoningEffort)
-        throw new Error("暂无可用模型或思考深度，请在 CodexElves 桌面端检查提示词优化设置");
-      if (!systemPrompt.trim()) throw new Error("当前风格的系统提示词不能为空，请在桌面端设置");
-      if (Array.from(input).length > 100000 || Array.from(systemPrompt).length > 20000)
-        throw new Error("提示词过长，无法优化");
-      const recentContext = settings.includeRecentContext ? payload.recentContext : null;
-      if (Array.from(recentContext?.user || "").length + Array.from(recentContext?.assistant || "").length
-          > codexPromptOptimizeMaxRecentContextChars)
-        throw new Error("最近一轮上下文过长，请在桌面端调整提示词优化设置后重试");
-      request.phase = "request";
-      const result = await postJson("/prompt-optimize", {
-        requestId, model: settings.model, reasoningEffort: settings.reasoningEffort,
-        systemPrompt, input, ...(recentContext ? { recentContext } : {}),
-      });
-      if (request.state !== "pending") return;
-      if (result?.status === "cancelled") {
-        request.state = "cancelled";
-      } else if (result?.status === "ok" && String(result.text || "").trim()) {
-        request.state = "completed";
-        request.result = { text: String(result.text), totalTokens: finiteNonNegativeNumber(result.totalTokens) };
-      } else {
-        throw new Error(result?.message || "提示词优化失败，原输入未改动");
-      }
-    } catch (error) {
-      if (request.state !== "pending") return;
-      request.state = "failed";
-      request.result = { message: String(error?.message || "提示词优化失败，原输入未改动") };
-    }
-  }
-
-  function promptOptimizeRemoteStart(payload) {
-    if (!/^[a-f0-9]{64}$/.test(payload?.requestId || "")
-        || typeof payload.input !== "string" || !payload.input.trim())
-      return { ok: false, code: 400, message: "提示词优化请求无效" };
-    if (promptOptimizeRemoteRequests.has(payload.requestId)) return promptOptimizeRemoteStatus(payload);
-    for (const [id, request] of promptOptimizeRemoteRequests) {
-      if (request.state !== "pending" && Date.now() - request.createdAt > 600000)
-        promptOptimizeRemoteRequests.delete(id);
-    }
-    if (promptOptimizeRemoteRequests.size >= 64)
-      return { ok: false, code: 429, message: "提示词优化请求过多，请稍后重试" };
-    const request = { state: "pending", phase: "catalog", createdAt: Date.now(), result: {} };
-    promptOptimizeRemoteRequests.set(payload.requestId, request);
-    void promptOptimizeRemoteRun(payload, request);
-    return promptOptimizeRemoteStatus(payload);
-  }
-
-  const promptOptimizeRemote = {
-    start: promptOptimizeRemoteStart, status: promptOptimizeRemoteStatus, cancel: promptOptimizeRemoteCancel,
-  };
-  window.__codexElvesPromptOptimizeRemote = promptOptimizeRemote;
-
   function promptOptimizeCloseSettings() {
     const overlay = promptOptimizeSettingsOverlay;
     if (!overlay) return;
@@ -14328,10 +14235,6 @@
   }
 
   function cleanupPromptOptimizeFeature() {
-    for (const requestId of promptOptimizeRemoteRequests.keys()) promptOptimizeRemoteCancel({ requestId });
-    promptOptimizeRemoteRequests.clear();
-    if (window.__codexElvesPromptOptimizeRemote === promptOptimizeRemote)
-      delete window.__codexElvesPromptOptimizeRemote;
     const pendingRequestIds = [];
     promptOptimizeThreadStates.forEach((state) => {
       const requestId = String(state?.requestId || "").trim();

@@ -53,7 +53,7 @@ import { rememberBackgroundThreadDisplay, rememberThreadDisplay } from "../sessi
 import { sessionMenu } from "../shell-state.js";
 import { threadDeleted } from "../sidebar/deletion-state.js";
 import {
-  recentPrioritySelectionSuppressions, resetDesktopObservation, scheduleDesktopObservation,
+  recentPrioritySelectionSuppressions,
   sidebarReadRefreshSuppressions
 } from "../sidebar/list-state.js";
 import { applyThreadDeletion } from "../sidebar/thread-deletion.js";
@@ -142,23 +142,19 @@ export function receive(event) {
       session.serviceConnected = serviceAvailable;
     }
     setConnection(backendAvailable() && stream?.readyState === EventSource.OPEN);
-    resetDesktopObservation();
     if (available) {
-      scheduleDesktopObservation();
       void withRecoveryErrorSilence(() => refreshConnectedSession()).catch(() => {});
     }
     return;
   }
   if (event.method === "remote/resync") {
     if (typeof rawParams.threadId === "string") {
-      // 桌面重订阅只补对应会话，避免多个列表订阅同时恢复时重复刷新整个页面。
+      // 单会话重同步只补对应正文，避免重复刷新整个页面。
       scheduleSidebarRefresh();
       if (rawParams.threadId === selectedId) scheduleReload();
       return;
     }
-    // 服务重启可能保留同一设备授权；全量重连不能被 12 秒的旧订阅去重窗口挡住。
-    resetDesktopObservation();
-    scheduleDesktopObservation();
+    // 服务重启可能保留同一设备授权；全量重同步仍重新读取当前服务状态。
     void withRecoveryErrorSilence(() => refreshConnectedSession()).catch(() => {});
     return;
   }

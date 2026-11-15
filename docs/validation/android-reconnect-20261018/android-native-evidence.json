@@ -251,7 +251,6 @@
       "sha256": "e6e9276d78d7d230d7cb82daf814ea19600c1767f5caf691e54d8b3b54e1eeed"
     }
   ],
-  "priorBuildEvidence": "docs/validation/android-loading-images-20261018/artifact-verification.json",
   "nativeMainActivityMatchesPriorFinalHash": true,
   "checks": {
     "allApkResourcesMatchManifest": true,

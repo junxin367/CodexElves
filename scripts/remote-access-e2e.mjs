@@ -18,7 +18,7 @@ import {
 import { withRemoteAccessEnvironmentLease, restoreRemoteAccessEnvironmentLease,
   validateRemoteAccessEnvironmentScope } from "./remote-access-e2e-environment.mjs";
 
-export const REMOTE_ACCESS_E2E_VERSION = "2.5.12";
+export const REMOTE_ACCESS_E2E_VERSION = "2.5.13";
 
 export const REMOTE_ACCESS_E2E_CASES = Object.freeze([
   { id: "read.ready", suite: "read", title: "真实页面与连接可用" },
@@ -40,7 +40,6 @@ export const REMOTE_ACCESS_E2E_CASES = Object.freeze([
   { id: "lifecycle.side_switch", suite: "lifecycle", title: "侧边会话与主会话往返切换" },
   { id: "lifecycle.side_refresh", suite: "lifecycle", title: "侧边会话刷新及主会话归属" },
   { id: "read.side_aggregate", suite: "read", title: "多侧边未读聚合、逐个阅读及再次未读" },
-  { id: "read.cross_client", suite: "read", title: "Codex 阅读同步远程及新回复再次未读" },
   { id: "read.side_read_state", suite: "read", title: "侧边与父会话的未读、已读持久化及再次未读" },
   { id: "project.pin_unpin", suite: "project", title: "专用项目置顶取消及刷新保持" },
   { id: "project.search_preferences", suite: "project", title: "项目搜索与客户端独立视图偏好持久化" },
@@ -1215,8 +1214,8 @@ async function strictDriverEvidence(ctx, result, request, name) {
     await verifyEvidenceReference(item.dom, { baseDir: ctx.outputDir });
     await verifyEvidenceReference(item.screenshot, { baseDir: ctx.outputDir });
   }
-  if (["desktop", "android", "files"].includes(name)) invariant(result.uiEvidence?.length,
-    `${name} 操作必须保存真实设备或 Codex 桌面的 DOM/可访问性树与截图`);
+  if (["android", "files"].includes(name)) invariant(result.uiEvidence?.length,
+    `${name} 操作必须保存真实设备或文件选择界面的 DOM/可访问性树与截图`);
   await note(ctx, "driver", { driver: name, operation: request.operation, records: result.records,
     uiEvidence: result.uiEvidence || [], request });
   return result;
@@ -1245,7 +1244,7 @@ async function driverStep(ctx, name, operation, { key = "main", mutation = false
     marker: record.marker, outputDir: ctx.outputDir,
     payload: name === "environment" ? { ...payload, environmentLease: ctx.environmentLease } : payload, approval,
     expectations: [fact("threadId", record.id),
-      ...(["desktop", "android"].includes(name) ? [fact("surface", name === "desktop" ? "codex-desktop" : "android")] : []),
+      ...(name === "android" ? [fact("surface", "android")] : []),
       ...(name === "environment" ? environmentScopeFacts(ctx) : []),
       ...facts], actions: [],
   };
@@ -1265,8 +1264,9 @@ async function driverStep(ctx, name, operation, { key = "main", mutation = false
     return { records: result.records, uiEvidence: result.uiEvidence || [] };
   };
   if (!mutation) return perform();
-  permit(ctx, ({ desktop: "allowDesktop", android: "allowAndroid", files: "allowAttachments",
-    text: "allowDrafts", native: "allowFaults", environment: "allowFaults" })[name] || "allowFaults");
+  permit(ctx, name === "native" && operation === "create-project" ? "allowProjects"
+    : ({ android: "allowAndroid", files: "allowAttachments", text: "allowDrafts",
+      native: "allowFaults", environment: "allowFaults" })[name] || "allowFaults");
   const label = `driver-${name}-${operation}-${payload.sequence || "once"}`;
   return action(ctx, label, { kind: operation, threadId: record.id, contextThreadId: contextRecord.id }, async () => {
     const actionId = `${ctx.report.runId}:${ctx.current.id}:${label}`;
@@ -1775,18 +1775,20 @@ const handlers = {
   },
   async "lifecycle.rename"(ctx) {
     permit(ctx, "allowSessionMetadata");
-    driver(ctx, "desktop", ["rename-thread", "observe-thread"]);
-    await idle(ctx);
-    const title = `远程回归 ${ctx.report.runId}`;
-    await driverStep(ctx, "desktop", "rename-thread", { mutation: true, payload: { title },
-      facts: [fact("title", title), fact("visibleTitle", title), fact("visibleThreadId", owned(ctx, "main").id)] });
-    await wait(ctx, "Codex 改名同步到远程同一主会话", value => value.threadId === owned(ctx, "main").id && value.title === title);
-    owned(ctx, "main").title = title;
-    await reloadPage(ctx);
-    await wait(ctx, "刷新后名称持久化", value => value.threadId === owned(ctx, "main").id && value.title === title);
-    await driverStep(ctx, "desktop", "observe-thread", {
-      facts: [fact("title", title), fact("visibleTitle", title), fact("visibleThreadId", owned(ctx, "main").id)],
+    await idle(ctx); await rowMenu(ctx, "main");
+    const record = owned(ctx, "main"), title = `远程回归 ${ctx.report.runId}`;
+    // 重命名只使用远程页面控件，不借助 Codex App 操作测试对象。
+    await action(ctx, "rename-main", { kind: "rename", threadId: record.id }, async () => {
+      await click(ctx, ctx.tab.playwright.getByRole("menuitem", { name: "重命名", exact: true }));
+      await ctx.tab.playwright.locator("#thread-rename-input").fill(title);
+      await click(ctx, ctx.tab.playwright.locator('#rename-thread-dialog button[type="submit"]'));
+      await wait(ctx, "远程会话名称保存成功", value => value.threadId === record.id && value.title === title);
+      return { title };
     });
+    record.title = title;
+    await reloadPage(ctx);
+    await wait(ctx, "刷新后名称持久化", value => value.threadId === record.id && value.title === title);
+    await verifyNative(ctx, { threadIds: [record.id], expectedFacts: { title } });
   },
   async "lifecycle.delete_preview"(ctx) {
     const { record } = await deletionDialog(ctx);
@@ -2489,28 +2491,6 @@ Object.assign(handlers, {
     await openSide(ctx); await finalReply(ctx, again); await backToMain(ctx);
     await verifyNative(ctx, { threadIds: [first.id, second.id], parentThreadId: parent.id });
   },
-  async "read.cross_client"(ctx) {
-    driver(ctx, "desktop", ["open-thread", "observe-thread"]);
-    readStateReady(ctx);
-    const main = owned(ctx, "main");
-    for (const cycle of [1, 2]) {
-      await selectOwned(ctx, "main");
-      await driverStep(ctx, "desktop", "open-thread", { mutation: true,
-        payload: { sequence: `away-${cycle}`, targetThreadId: owned(ctx, "control").id, targetMarker: owned(ctx, "control").marker },
-        facts: [fact("visibleThreadId", owned(ctx, "control").id)] });
-      const spec = await startUnreadTurn(ctx, "main", `cross-${cycle}`);
-      await selectOwned(ctx, "control");
-      await wait(ctx, "远程离开后目标实际未读", value => rowReadState(value, main.id, true), ctx.options.turnTimeoutMs ?? 180_000);
-      await nativeReadState(ctx, { phase: `cross-${cycle}-unread`, threadId: main.id, turnId: spec.turnId, hasUnreadTurn: true });
-      await driverStep(ctx, "desktop", "open-thread", { key: "control", mutation: true,
-        payload: { sequence: `read-${cycle}`, targetThreadId: main.id, targetMarker: main.marker },
-        facts: [fact("visibleThreadId", main.id), fact("readThreadId", main.id), fact("hasUnreadTurn", false)] });
-      await wait(ctx, "Codex 端阅读后远程未读同步清除", value => value.threadId === owned(ctx, "control").id && rowReadState(value, main.id, false));
-      await nativeReadState(ctx, { phase: `cross-${cycle}-desktop-read`, threadId: main.id, turnId: spec.turnId, hasUnreadTurn: false });
-      await selectOwned(ctx, "main"); await finalReply(ctx, spec);
-    }
-    await verifyNative(ctx, { threadIds: [main.id, owned(ctx, "control").id] });
-  },
   async "side.close_running"(ctx) {
     driver(ctx, "native", ["observe-side-lifecycle"]);
     if (!ctx.options.messages?.stop) block("运行中关闭侧边需已批准的 messages.stop");
@@ -2606,13 +2586,13 @@ async function queueRace(ctx, kind) {
 }
 
 async function projectFixture(ctx) {
-  driver(ctx, "desktop", ["create-project", "observe-project"]);
+  driver(ctx, "native", ["create-project", "observe-project"]);
   permit(ctx, "allowProjects");
   const fixture = ctx.options.projectFixture;
   if (!fixture?.name?.includes(ctx.report.runId) || !fixture.path?.includes(ctx.report.runId))
     block("需为本轮提供带 runId 的 projectFixture.name/path；只能置顶本轮新建专用项目");
   if (!ctx.report.project) {
-    const result = await driverStep(ctx, "desktop", "create-project", {
+    const result = await driverStep(ctx, "native", "create-project", {
       mutation: true, payload: { projectName: fixture.name, projectPath: fixture.path },
       facts: [fact("projectName", fixture.name), fact("projectPath", fixture.path), fact("createdProjectCount", 1)] });
     const id = await rawDriverFact(result, "projectId");
@@ -2620,7 +2600,7 @@ async function projectFixture(ctx) {
     ctx.report.project = { id, name: fixture.name, path: fixture.path, runId: ctx.report.runId };
     await checkpoint(ctx);
   }
-  await driverStep(ctx, "desktop", "observe-project", { facts: [fact("projectId", ctx.report.project.id),
+  await driverStep(ctx, "native", "observe-project", { facts: [fact("projectId", ctx.report.project.id),
     fact("projectName", ctx.report.project.name), fact("projectPath", ctx.report.project.path)] });
   return ctx.report.project;
 }
@@ -2654,7 +2634,7 @@ Object.assign(handlers, {
           "刷新后的专用项目置顶状态不一致或重复");
         return { projectId: project.id, pinned };
       });
-      await driverStep(ctx, "desktop", "observe-project", {
+      await driverStep(ctx, "native", "observe-project", {
         facts: [fact("projectId", project.id), fact("projectName", project.name), fact("pinned", pinned)] });
     }
     } finally {
@@ -3146,9 +3126,8 @@ const requiredSteps = value => Object.freeze(value.split(" ").map(entry => {
 export const REMOTE_ACCESS_E2E_REQUIRED_DRIVER_STEPS = Object.freeze(Object.fromEntries(Object.entries({
   "queue.edit_draft": "native:observe-queue-edit-cancel*2",
   "read.side_aggregate": "native:observe-side-aggregate*4",
-  "read.cross_client": "desktop:open-thread*4",
-  "project.pin_unpin": "desktop:create-project desktop:observe-project*3",
-  "project.search_preferences": "desktop:observe-project",
+  "project.pin_unpin": "native:create-project native:observe-project*3",
+  "project.search_preferences": "native:observe-project",
   "composer.image": "files:choose-image",
   "optimizer.cancel": "native:wait-optimization-terminal",
   "optimizer.late_result": "native:wait-optimization-terminal",
@@ -3169,7 +3148,6 @@ export const REMOTE_ACCESS_E2E_REQUIRED_DRIVER_STEPS = Object.freeze(Object.from
   "queue.dequeue_remove_race": "native:observe-dequeue-window native:observe-queue-race*2 environment:arm-queue-race-request environment:observe-queue-race-request environment:release-queue-race-request environment:acquire-environment-lease environment:restore-environment-resource environment:inspect-environment-lease",
   "side.close_running": "native:observe-side-lifecycle",
   "side.delete_parent": "native:observe-side-lifecycle",
-  "lifecycle.rename": "desktop:rename-thread desktop:observe-thread",
   "scenario.approval": "native:observe-request native:observe-scenario",
   "scenario.question": "native:observe-request native:observe-scenario",
   "scenario.question_completed": "native:observe-request*2 native:observe-scenario",

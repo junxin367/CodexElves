@@ -2,11 +2,9 @@ use std::collections::HashSet;
 
 use serde_json::{Value, json};
 
-use super::projects::DesktopProjects;
+use super::projects::assigned_index;
 use super::{Harness, error, required, sent_key};
-use crate::codex_service::{
-    normalize_owner_thread, normalize_thread, normalize_thread_response, owner_snapshot_history,
-};
+use crate::codex_service::{normalize_thread, normalize_thread_response};
 
 // 40 只限制一次引擎读取的条数；执行中的轮次必须读取全部分页，不能因此隐藏“继续”等开头输入。
 const HISTORY_ITEM_PAGE_LIMIT: usize = 40;
@@ -85,14 +83,6 @@ fn executing_history_turn(status: &Value) -> bool {
 }
 
 impl Harness {
-    pub(super) async fn desktop_projects(&self) -> anyhow::Result<DesktopProjects> {
-        #[cfg(test)]
-        let home = self.project_codex_home.clone();
-        #[cfg(not(test))]
-        let home = crate::codex_home::default_codex_home_dir();
-        tokio::task::spawn_blocking(move || DesktopProjects::load(&home)).await?
-    }
-
     pub(super) async fn list_all(
         &self,
         method: &str,
@@ -116,13 +106,12 @@ impl Harness {
 
     pub(super) async fn sidebar(&self) -> anyhow::Result<Value> {
         // 会话与项目互不依赖；首屏只等最近一页，后续目录由服务后台补齐。
-        let ((mut rows, complete), project_rows, desktop, native_pins) = tokio::try_join!(
+        let ((mut rows, complete), project_rows, native_pins) = tokio::try_join!(
             self.catalog.snapshot(&self.runtime, &self.projection),
             self.list_all("project/list", json!({"limit":100})),
-            self.desktop_projects(),
             self.native_pinned_threads()
         )?;
-        // 用户要求项目效果对齐桌面：只列出已保存项目，并保留 project/list 的桌面顺序；
+        // 用户要求独立服务提供项目列表：只列出已保存项目，并保留 project/list 的原生顺序；
         // 会话工作目录不能补成项目，否则无项目会话和历史临时目录会进入新建选择器。
         let mut projects: Vec<Value> = project_rows
             .into_iter()
@@ -136,7 +125,7 @@ impl Harness {
                 project["cwd"] = roots.first().map(|s| json!(s)).unwrap_or(Value::Null);
                 project["roots"] = json!(roots);
                 project["threads"] = json!([]);
-                desktop.display_project(&mut project);
+                project["serverProjectId"] = project["id"].clone();
                 Some(project)
             })
             .collect();
@@ -196,7 +185,7 @@ impl Harness {
             let Ok(mut thread) = normalize_thread(&row) else {
                 continue;
             };
-            let project_index = desktop.assigned_index(&row, &projects);
+            let project_index = assigned_index(&row, &projects);
             thread["projectId"] = project_index
                 .map(|index| projects[index]["id"].clone())
                 .unwrap_or(Value::Null);
@@ -227,32 +216,11 @@ impl Harness {
                 .get(id)
                 .or_else(|| project_pin_overrides.get(server_id))
                 .copied()
-                .unwrap_or_else(|| {
-                    project_pins.contains(id)
-                        || project_pins.contains(server_id)
-                        || desktop
-                            .pinned
-                            .iter()
-                            .any(|pinned| pinned == id || pinned == server_id)
-                });
+                .unwrap_or_else(|| project_pins.contains(id) || project_pins.contains(server_id));
             project["pinned"] = json!(pinned);
         }
-        // 先展示置顶项目，再按桌面项目顺序排列；未记录的新项目保留引擎顺序。
-        projects.sort_by_key(|project| {
-            let pinned = project["pinned"] == true;
-            let order = if pinned {
-                &desktop.pinned
-            } else {
-                &desktop.order
-            };
-            (
-                !pinned,
-                order
-                    .iter()
-                    .position(|id| project["id"] == *id || project["serverProjectId"] == *id)
-                    .unwrap_or(usize::MAX),
-            )
-        });
+        // 用户禁止读取 App 私有项目状态：置顶取远程偏好，同组保留原生 project/list 顺序。
+        projects.sort_by_key(|project| project["pinned"] != true);
         let mut pins: Vec<_> = recent
             .iter()
             .filter(|t| t["pinned"] == true)
@@ -290,13 +258,9 @@ impl Harness {
             );
         }
         let id = required(payload, "projectId")?;
-        // 用户要求与桌面已保存项目一致；旧缓存的合成项目不能再用于文件、Skill 或新建，
-        // 无项目会话仍可通过 threadId 读取自己的工作目录，不为项目查询遍历会话。
-        let (projects, desktop) = tokio::try_join!(
-            self.list_all("project/list", json!({"limit":100})),
-            self.desktop_projects()
-        )?;
-        let server_id = desktop.server_id(id);
+        // 项目身份只取独立引擎的已保存项目；失效的旧缓存 ID 必须重新选择。
+        let projects = self.list_all("project/list", json!({"limit":100})).await?;
+        let server_id = id;
         let project = projects
             .iter()
             .find(|project| project["id"] == server_id)
@@ -314,28 +278,16 @@ impl Harness {
         if self.known_side(id).await {
             return self.side_detail(id).await;
         }
-        let (response, owner) = tokio::join!(
-            self.runtime
-                .read("thread/read", json!({"threadId":id,"includeTurns":false}),),
-            self.owner_view_snapshot(id)
-        );
-        let owner = owner?;
-        let response = match response {
+        let response = match self
+            .runtime
+            .read("thread/read", json!({"threadId":id,"includeTurns":false}))
+            .await
+        {
             Ok(response) => response,
-            Err(failure) => {
-                if super::subagents::missing_thread_read(&failure)
-                    && let Some(snapshot) = owner.as_ref()
-                    && crate::codex_service::normalize_subagent_thread(snapshot).is_ok()
-                {
-                    return self.subagent_detail(id, snapshot, Some(snapshot)).await;
-                }
-                return Err(self.subagent_read_error(id, failure).await);
-            }
+            Err(failure) => return Err(self.subagent_read_error(id, failure).await),
         };
         if crate::codex_service::subagent_parent_id(&response["thread"]).is_some() {
-            return self
-                .subagent_detail(id, &response["thread"], owner.as_ref())
-                .await;
+            return self.subagent_detail(id, &response["thread"]).await;
         }
         let mut thread = normalize_thread_response(&response)?;
         if let Some(settings) = self.store.lock().await.data.settings.get(id) {
@@ -345,32 +297,17 @@ impl Harness {
                 }
             }
         }
-        let mut latest;
-        if let Some(snapshot) = owner {
-            thread = normalize_owner_thread(&snapshot, Some(&thread))?;
-            // 桌面规范历史以对象保存，最新执行轮次按原生时间选择，不能依赖对象键顺序。
-            latest = crate::desktop_owner_ipc::snapshot_turns(&snapshot)
-                .into_iter()
-                .max_by_key(|turn| turn["turnStartedAtMs"].as_u64().unwrap_or(0));
-            self.follow_owner(id, snapshot).await;
-        } else {
-            thread = self.projection.lock().await.thread(id, thread);
-            // 最近一轮与目标互不依赖，并行读取；控制和派发校验不使用短时读缓存。
-            let (goal, history) = tokio::try_join!(
-                self.runtime.read("thread/goal/get", json!({"threadId":id})),
-                self.latest_turn(id)
-            )?;
-            thread["goal"] = goal["goal"].clone();
-            latest = history;
-            // 读取历史期间也可能收到压缩完成事件，返回前重新合并当前投影，避免切回会话看到旧状态。
-            self.projection
-                .lock()
-                .await
-                .decorate_compaction(id, &mut thread);
-        }
-        if latest.is_none() {
-            latest = self.latest_turn(id).await?;
-        }
+        thread = self.projection.lock().await.thread(id, thread);
+        // 只读独立引擎的目标与历史，读取不恢复会话或连接桌面。
+        let (goal, latest) = tokio::try_join!(
+            self.runtime.read("thread/goal/get", json!({"threadId":id})),
+            self.latest_turn(id)
+        )?;
+        thread["goal"] = goal["goal"].clone();
+        self.projection
+            .lock()
+            .await
+            .decorate_compaction(id, &mut thread);
         thread["editableMessage"] = Value::Null;
         if let Some(turn) = &latest {
             let turn_id = turn
@@ -460,20 +397,6 @@ impl Harness {
         {
             Ok(identity) => identity,
             Err(failure) => {
-                if super::subagents::missing_thread_read(&failure)
-                    && let Some(owner) = self.owner_view_snapshot(id).await?
-                    && crate::codex_service::normalize_subagent_thread(&owner).is_ok()
-                {
-                    if payload["cursor"].is_null()
-                        && payload["turnId"].is_null()
-                        && payload["itemCursor"].is_null()
-                    {
-                        if let Some(history) = owner_snapshot_history(&owner, id) {
-                            return Ok(history);
-                        }
-                    }
-                    return Err(error(503, "子智能体的桌面历史快照尚未完整，请稍后重试"));
-                }
                 return Err(self.subagent_read_error(id, failure).await);
             }
         };
@@ -488,20 +411,6 @@ impl Harness {
             normalize_thread_response(&identity)?;
         }
         let cursor = history_cursor(&payload["cursor"], "会话分页游标")?;
-        if cursor.is_none() && payload["turnId"].is_null() {
-            if let Some(snapshot) = self.owner_view_snapshot(id).await? {
-                if !subagent {
-                    self.follow_owner(id, snapshot.clone()).await;
-                }
-                if let Some(history) = owner_snapshot_history(&snapshot, id) {
-                    return Ok(if subagent {
-                        history
-                    } else {
-                        self.projection.lock().await.history(id, history, true)
-                    });
-                }
-            }
-        }
         if let Some(turn_id) = payload["turnId"].as_str() {
             // 用户要求服务模式可以实际翻页；网页用 itemCursor 表示消息游标，不能误读成轮次 cursor。
             let item_cursor = history_cursor(&payload["itemCursor"], "消息分页游标")?;
@@ -543,7 +452,7 @@ impl Harness {
             let turn_id = required(turn, "id")?.to_owned();
             pagination.insert(turn_id, items.pagination());
             items.apply_to(turn);
-            *turn = crate::desktop_owner_ipc::normalize_owner_turn(turn.clone());
+            *turn = crate::service_history::normalize_history_turn(turn.clone());
         }
         let history = json!({"ok":true,"scope":"turns","threadId":id,"data":turns,
             "nextCursor":next_cursor,"backwardsCursor":page["backwardsCursor"],

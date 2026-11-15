@@ -443,18 +443,10 @@ impl Harness {
         {
             return self.hold_unconfirmed_queue(id, &gate).await;
         }
-        let mut path = identity["thread"]["path"]
+        let path = identity["thread"]["path"]
             .as_str()
             .or_else(|| identity["thread"]["rolloutPath"].as_str())
             .map(str::to_owned);
-        if path.is_none()
-            && let Some(owner) = self.owner_view_snapshot(id).await?
-        {
-            path = owner["rolloutPath"]
-                .as_str()
-                .or_else(|| owner["path"].as_str())
-                .map(str::to_owned);
-        }
         // 用户要求异常恢复不抢发：恢复快照中的 completed 可能只是进程退出后的重建值。
         // 必须找到该轮原生 task_complete，且完成时间晚于入队时间；不以“已有回复文字”代替完成回执。
         let confirmed = if let Some(path) = path {

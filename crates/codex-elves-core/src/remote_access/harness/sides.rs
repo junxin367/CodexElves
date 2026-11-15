@@ -764,7 +764,6 @@ impl Harness {
         } else {
             format!("{configured_instructions}\n\n{SIDE_CONVERSATION_INSTRUCTIONS}")
         };
-        let owner = self.owner_snapshot(parent).await?;
         let saved = self
             .store
             .lock()
@@ -777,30 +776,17 @@ impl Harness {
         let mut params = json!({"threadId":parent,"ephemeral":true,"excludeTurns":true,"threadSource":"user",
             "developerInstructions":instructions,"config":{"thread_unload_delay_secs":0}});
         // 用户要求继承点击创建时的主会话选择，包括尚未发送的模型/深度；旧客户端再读原生及已保存设置。
-        let source = owner.as_ref().unwrap_or(&main);
         let model = payload["model"]
             .as_str()
             .filter(|model| !model.is_empty())
-            .or_else(|| {
-                source["latestCollaborationMode"]["settings"]["model"]
-                    .as_str()
-                    .filter(|model| !model.is_empty())
-            })
-            .or_else(|| {
-                source["latestModel"]
-                    .as_str()
-                    .filter(|model| !model.is_empty())
-            })
             .or_else(|| saved["model"].as_str().filter(|model| !model.is_empty()))
             .or_else(|| main["model"].as_str().filter(|model| !model.is_empty()));
         if let Some(model) = model {
             params["model"] = json!(model);
         }
         let effort = payload.get("reasoningEffort").or_else(|| {
-            source["latestCollaborationMode"]["settings"]
-                .get("reasoning_effort")
-                .or_else(|| source.get("latestReasoningEffort"))
-                .or_else(|| saved.get("reasoningEffort"))
+            saved
+                .get("reasoningEffort")
                 .or_else(|| main.get("reasoningEffort"))
         });
         if let Some(effort) = effort
@@ -809,7 +795,7 @@ impl Harness {
         {
             params["config"]["model_reasoning_effort"] = json!(effort);
         }
-        // 主会话在网页保存的后续权限优先；无覆盖时采用桌面原生权限，服务持有的父会话则由原生 fork 继承。
+        // 主会话在网页保存的后续权限优先；无覆盖时只由独立引擎的原生 fork 继承。
         let permissions = match payload["permissionMode"].as_str() {
             Some("configured") => {
                 if let Some(profile) = config["config"]["default_permissions"].as_str() {
@@ -823,13 +809,7 @@ impl Harness {
                 mode,
                 main["cwd"].as_str().unwrap_or(""),
             )?),
-            None => match owner.as_ref() {
-                Some(snapshot) if snapshot["currentPermissions"].is_object() => {
-                    Some(snapshot["currentPermissions"].clone())
-                }
-                Some(_) => return Err(error(503, "无法确认主会话当前的原生权限")),
-                None => None,
-            },
+            None => None,
         };
         if let Some(permissions) = permissions {
             apply_side_fork_permissions(&mut params, &permissions)?;

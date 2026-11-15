@@ -228,36 +228,12 @@ fn page_cursor(page: &Value, seen: &mut HashSet<String>) -> anyhow::Result<Optio
 
 impl Harness {
     async fn read_subagent_candidate(&self, id: &str) -> anyhow::Result<Value> {
-        match self
+        let response = self
             .runtime
             .read("thread/read", json!({"threadId":id,"includeTurns":false}))
-            .await
-        {
-            Ok(response) => {
-                anyhow::ensure!(response["thread"]["id"] == id, "子智能体读取身份不匹配");
-                Ok(response["thread"].clone())
-            }
-            Err(failure) => {
-                if !missing_thread_read(&failure) {
-                    return Err(failure);
-                }
-                // 桌面持有的临时子智能体可能只存在于其内存；使用既有只读 IPC，不启用桌面注入或接管。
-                let Some(mut owner) = self.owner_view_snapshot(id).await? else {
-                    return Err(failure);
-                };
-                anyhow::ensure!(owner["id"] == id, "子智能体持有者身份不匹配");
-                normalize_subagent_thread(&owner)?;
-                if !owner["threadRuntimeStatus"].is_null() {
-                    owner["status"] = owner["threadRuntimeStatus"].clone();
-                }
-                let turns = crate::desktop_owner_ipc::snapshot_turns(&owner);
-                if let Some(turn) = turns.last() {
-                    owner["_latestTurn"] = json!({"id":turn["turnId"],"status":turn["status"],
-                        "turnStartedAtMs":turn["turnStartedAtMs"],"startedAt":turn["startedAt"]});
-                }
-                Ok(owner)
-            }
-        }
+            .await?;
+        anyhow::ensure!(response["thread"]["id"] == id, "子智能体读取身份不匹配");
+        Ok(response["thread"].clone())
     }
     pub(super) async fn known_subagent(&self, id: &str) -> Option<Value> {
         self.projection
@@ -286,26 +262,9 @@ impl Harness {
         }
     }
 
-    pub(super) async fn subagent_detail(
-        &self,
-        id: &str,
-        raw: &Value,
-        owner: Option<&Value>,
-    ) -> anyhow::Result<Value> {
+    pub(super) async fn subagent_detail(&self, id: &str, raw: &Value) -> anyhow::Result<Value> {
         anyhow::ensure!(raw["id"] == id, "子智能体身份不匹配");
-        let mut metadata = raw.clone();
-        if let Some(owner) = owner {
-            anyhow::ensure!(owner["id"] == id, "子智能体快照身份不匹配");
-            for (source, target) in [
-                ("threadRuntimeStatus", "status"),
-                ("latestModel", "model"),
-                ("latestReasoningEffort", "reasoningEffort"),
-            ] {
-                if let Some(value) = owner.get(source).filter(|value| !value.is_null()) {
-                    metadata[target] = value.clone();
-                }
-            }
-        }
+        let metadata = raw.clone();
         self.projection.lock().await.subagents.remember(&metadata);
         let mut thread = normalize_subagent_thread(&metadata)?;
         thread["nativeBridge"] = json!("harness");
@@ -319,17 +278,6 @@ impl Harness {
         payload: &Value,
     ) -> anyhow::Result<Value> {
         // 临时子会话只读取当前快照；不会为查看内容 resume、接管或重新启动已结束的子智能体。
-        if let Some(owner) = self.owner_view_snapshot(id).await? {
-            if payload["cursor"].is_null()
-                && payload["turnId"].is_null()
-                && payload["itemCursor"].is_null()
-            {
-                if let Some(history) = crate::codex_service::owner_snapshot_history(&owner, id) {
-                    return Ok(history);
-                }
-            }
-            return Err(error(503, "临时子智能体的桌面历史快照尚未完整，请稍后重试"));
-        }
         if !payload["cursor"].is_null() || !payload["itemCursor"].is_null() {
             return Err(error(400, "临时子智能体使用当前完整快照，请刷新后读取"));
         }
@@ -358,7 +306,7 @@ impl Harness {
                 {
                     return Err(error(
                         503,
-                        "当前引擎未提供临时子智能体内容快照，请在桌面查看",
+                        "当前独立引擎未提供该临时子智能体的内容快照，无法读取",
                     ));
                 }
                 return Err(failure);
@@ -509,17 +457,10 @@ impl Harness {
             }
             Err(_) => complete = false,
         }
-        // 主会话的最近活动还会包含桌面持有的临时子智能体 ID；读取不会 resume 或争抢执行归属。
+        // 主会话已持久化的最近活动可能包含子智能体 ID；读取不会 resume 或争抢执行归属。
         if let Ok(Some(turn)) = self.latest_turn(root).await {
             for item in turn["items"].as_array().into_iter().flatten() {
                 candidates.extend(candidate_ids(item));
-            }
-        }
-        if let Some(owner) = self.owner_view_snapshot(root).await? {
-            for turn in crate::desktop_owner_ipc::snapshot_turns(&owner) {
-                for item in turn["items"].as_array().into_iter().flatten() {
-                    candidates.extend(candidate_ids(item));
-                }
             }
         }
         candidates.remove(root);

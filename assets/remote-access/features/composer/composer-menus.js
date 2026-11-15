@@ -15,7 +15,6 @@ import {
 } from "./options-state.js";
 import { effortLabels } from "./prompt-editor.js";
 import { fitGoalEditor } from "../goal/state.js";
-import { scheduleDesktopObservation } from "../sidebar/list-state.js";
 
 export function closeSkillMenu() {
   const menu = $("#skill-menu"); if (menu) menu.hidden = true;
@@ -171,14 +170,12 @@ export function refitComposerMenus() {
     const menu = $(`#${id}`); if (menu && !menu.hidden) fitComposerMenu(menu);
   }
 }
-// 视口尺寸或滚动变化时重新适配输入区浮层，并重新安排桌面可见性观测。
+// 视口尺寸或滚动变化时重新适配输入区浮层。
 export function installComposerMenuViewportListeners() {
   window.addEventListener("resize", refitComposerMenus);
-  window.addEventListener("resize", scheduleDesktopObservation);
   window.visualViewport?.addEventListener("resize", refitComposerMenus);
   window.visualViewport?.addEventListener("scroll", refitComposerMenus);
   document.addEventListener("scroll", event => {
-    if (event.target?.id === "sidebar-content") scheduleDesktopObservation();
     fitApprovalArea();
     fitContextUsageTip();
     fitClaudeUsageTip();

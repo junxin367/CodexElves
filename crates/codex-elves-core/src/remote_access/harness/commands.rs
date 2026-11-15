@@ -77,36 +77,22 @@ impl Harness {
                     .await
             }
             "stop" => {
-                let snapshot = self.owner_snapshot(&id).await?;
-                let turn_id = match &snapshot {
-                    Some(snapshot) => crate::desktop_owner_ipc::snapshot_turns(snapshot)
-                        .iter()
-                        .rev()
-                        .find(|t| t["status"] == "inProgress")
-                        .and_then(|t| t["turnId"].as_str())
-                        .map(str::to_owned),
-                    None => self.projection.lock().await.active.get(&id).cloned(),
-                };
+                // 用户禁止桌面桥接：只停止本服务实际加载的会话，不把未知外部任务报告为已停止。
+                if !self.engine_loaded(&id).await? {
+                    return Err(error(
+                        409,
+                        "当前会话未由远程服务加载，无法确认或停止其任务。",
+                    ));
+                }
+                let turn_id = self.projection.lock().await.active.get(&id).cloned();
                 if let Some(turn_id) = turn_id {
-                    if self.owner_request(
-                        &id,
-                        "thread-follower-interrupt-turn",
-                        json!({"conversationId":id,"mode":"user-stop","expectedTurnId":turn_id}),
-                        4,
-                        Some(authorization),
-                    )
-                    .await?
-                    .is_none()
-                    {
-                        self.ensure_loaded(&id, authorization).await?;
-                        self.runtime
-                            .request(
-                                "turn/interrupt",
-                                json!({"threadId":id,"turnId":turn_id}),
-                                Some(authorization),
-                            )
-                            .await?;
-                    }
+                    self.runtime
+                        .request(
+                            "turn/interrupt",
+                            json!({"threadId":id,"turnId":turn_id}),
+                            Some(authorization),
+                        )
+                        .await?;
                 }
                 self.store.lock().await.commit(|data| {
                     data.pause_queue(&id, "消息已暂停");
@@ -117,28 +103,16 @@ impl Harness {
             }
             "compact" => {
                 let revision = self.projection.lock().await.compaction_revision(&id);
-                if self
-                    .owner_request(
-                        &id,
-                        "thread-follower-compact-thread",
-                        json!({"conversationId":id}),
-                        1,
+                self.ensure_loaded(&id, authorization).await?;
+                self.runtime
+                    .request(
+                        "thread/compact/start",
+                        json!({"threadId":id}),
                         Some(authorization),
                     )
-                    .await?
-                    .is_none()
-                {
-                    self.ensure_loaded(&id, authorization).await?;
-                    self.runtime
-                        .request(
-                            "thread/compact/start",
-                            json!({"threadId":id}),
-                            Some(authorization),
-                        )
-                        .await?;
-                }
+                    .await?;
                 let mut projection = self.projection.lock().await;
-                // 用户要求切回仍恢复真实压缩状态；开始/完成事件可能早于 RPC 回执，不能再覆盖为 pending。
+                // 开始/完成事件可能早于 RPC 回执，不能再覆盖为 pending。
                 if projection.compaction_revision(&id) == revision {
                     projection.compactions.insert(id.clone(),
                         json!({"state":"pending","turnId":null,"itemId":"pending-manual-context-compaction"}));
@@ -264,7 +238,7 @@ impl Harness {
                     let id=required(payload,if action=="pinThread" {"threadId"} else {"projectId"})?;
                     let pins=if action=="pinThread" {&mut data.thread_pins} else {&mut data.project_pins};
                     if payload["pinned"]==true { pins.insert(id.to_owned()); } else { pins.remove(id); }
-                    // 初始置顶与桌面对齐；服务端明确取消置顶后，不能被桌面默认值重新覆盖。
+                    // 明确取消置顶后保留远程偏好，不从其他客户端继承旧值。
                     if action=="pinProject" { data.project_pin_overrides.insert(id.to_owned(),payload["pinned"]==true); }
                 }
                 "sort" => {
@@ -388,19 +362,6 @@ impl Harness {
         id: &str,
         fresh_thread: &Value,
     ) -> anyhow::Result<bool> {
-        if let Some(snapshot) = self.owner_snapshot(id).await? {
-            let status = &snapshot["threadRuntimeStatus"];
-            let status = status.as_str().or_else(|| status["type"].as_str());
-            if matches!(status, Some("active" | "inProgress" | "running")) {
-                return Ok(true);
-            }
-            if status == Some("idle") {
-                return Ok(false);
-            }
-            return Ok(crate::desktop_owner_ipc::snapshot_turns(&snapshot)
-                .iter()
-                .any(|turn| turn["status"] == "inProgress"));
-        }
         let projection = self.projection.lock().await;
         if projection.compactions.contains_key(id) {
             return Ok(true);
@@ -475,7 +436,7 @@ impl Harness {
                             .downcast_ref::<super::super::ApiError>()
                             .is_some_and(|error| !error.outcome_unknown)
                         || failure
-                            .downcast_ref::<crate::desktop_owner_ipc::DispatchFailure>()
+                            .downcast_ref::<crate::service_transport::DispatchFailure>()
                             .is_some_and(|error| !error.dispatched);
                     if let Some(queue) = data.queues.get_mut(id) {
                         if not_sent {
@@ -517,6 +478,7 @@ impl Harness {
         input: Vec<Value>,
         authorization: &RemoteAuthorization,
     ) -> anyhow::Result<Value> {
+        self.ensure_loaded(id, authorization).await?;
         self.store.lock().await.commit(|data| {
             data.thread_devices
                 .insert(id.to_owned(), authorization.device.id.clone());
@@ -547,30 +509,10 @@ impl Harness {
         // Fast 按保存成功后的偏好在新轮次派发时读取，排队消息不冻结入队时的旧档位。
         self.apply_fast_to_turn(id, &mut params).await?;
         let applied_tier = params["serviceTier"].clone();
-        let (response, execution_transport) = if let Some(response) = self
-            .owner_request(
-                id,
-                "thread-follower-start-turn",
-                json!({"conversationId":id,"turnStart":{"request":params,
-                "context":{"inheritThreadSettings":true}}}),
-                2,
-                Some(authorization),
-            )
-            .await?
-        {
-            (
-                response.get("result").cloned().unwrap_or(response),
-                "desktop-ipc",
-            )
-        } else {
-            self.ensure_loaded(id, authorization).await?;
-            (
-                self.runtime
-                    .request("turn/start", params, Some(authorization))
-                    .await?,
-                "app-server-stdio",
-            )
-        };
+        let response = self
+            .runtime
+            .request("turn/start", params, Some(authorization))
+            .await?;
         let turn_id = required(&response["turn"], "id")?;
         self.remember_queue_wait(id, Some(turn_id.to_owned()), false)
             .await?;
@@ -588,7 +530,7 @@ impl Harness {
             json!({"ok":true,"confirmed":true,"threadId":id,"turnId":turn_id,
             "clientUserMessageId":payload["clientUserMessageId"],"deliveryState":"accepted",
             "status":response["turn"]["status"],"nativeBridge":"harness",
-            "executionTransport":execution_transport}),
+            "executionTransport":"app-server-stdio"}),
         )
     }
 
@@ -600,21 +542,6 @@ impl Harness {
         authorization: &RemoteAuthorization,
     ) -> anyhow::Result<Value> {
         let client_id = payload["clientUserMessageId"].clone();
-        if let Some(response) = self
-            .owner_request(
-                id,
-                "thread-follower-steer-turn",
-                json!({"conversationId":id,"input":input,"clientUserMessageId":client_id}),
-                1,
-                Some(authorization),
-            )
-            .await?
-        {
-            return Ok(
-                json!({"ok":true,"threadId":id,"confirmed":true,"deliveryState":"accepted",
-                "clientUserMessageId":client_id,"result":response}),
-            );
-        }
         let turn_id = self.projection.lock().await.active.get(id).cloned();
         if let Some(turn_id) = turn_id {
             let response = self
@@ -641,7 +568,7 @@ impl Harness {
         authorization: &RemoteAuthorization,
     ) -> anyhow::Result<Value> {
         inputs(payload)?;
-        // 用户要求新建时按 App 解析默认值，并在派发前重新核对目标项目；显式草稿选择始终优先。
+        // 用户要求远程独立运行：新建时按原生配置解析默认值，并在派发前重新核对目标项目；显式草稿选择始终优先。
         let (defaults, config) = self.creation_defaults(payload).await?;
         let mut resolved = payload.clone();
         for key in ["model", "reasoningEffort", "permissionMode"] {
@@ -665,7 +592,7 @@ impl Harness {
                 // 新建属于实际写入，提交前重新核对项目根目录，不能用展示缓存决定写入位置。
                 self.runtime.invalidate_read("project/list").await;
                 let context = self.workspace_context(&json!({"projectId":id})).await?;
-                // 展示沿用桌面项目 ID；实际创建必须使用已验证的引擎项目 ID。
+                // 创建必须使用已验证的原生项目 ID。
                 (
                     required(&context, "cwd")?.to_owned(),
                     Some(required(&context, "serverProjectId")?.to_owned()),
@@ -836,11 +763,6 @@ impl Harness {
         payload: &Value,
         authorization: &RemoteAuthorization,
     ) -> anyhow::Result<Value> {
-        if let Some(response)=self.owner_request(id,"thread-follower-edit-last-user-turn",
-            json!({"conversationId":id,"turnId":payload["turnId"],"message":payload["prompt"],
-                "allowEarlierMessages":false,"agentMode":"default","shouldSendPermissionOverrides":false}),2,Some(authorization)).await? {
-            return Ok(json!({"ok":true,"threadId":id,"result":response}));
-        }
         let history = self
             .runtime
             .request(
@@ -916,66 +838,28 @@ impl Harness {
         authorization: &RemoteAuthorization,
     ) -> anyhow::Result<Value> {
         let method = required(payload, "method")?;
-        let owner_snapshot = self.owner_snapshot(id).await?;
-        let request = if let Some(snapshot) = &owner_snapshot {
-            snapshot["requests"]
-                .as_array()
-                .and_then(|r| {
-                    r.iter()
-                        .find(|r| r["id"] == payload["requestId"] && r["method"] == method)
-                })
-                .cloned()
-        } else {
-            self.projection
-                .lock()
-                .await
-                .requests
-                .values()
-                .find(|r| {
-                    r["params"]["threadId"] == id
-                        && r["id"] == payload["requestId"]
-                        && r["method"] == method
-                })
-                .cloned()
-        }
-        .ok_or_else(|| error(409, "此审批或询问已结束"))?;
+        let request = self
+            .projection
+            .lock()
+            .await
+            .requests
+            .values()
+            .find(|r| {
+                r["params"]["threadId"] == id
+                    && r["id"] == payload["requestId"]
+                    && r["method"] == method
+            })
+            .cloned()
+            .ok_or_else(|| error(409, "此审批或询问不属于当前服务连接，或已结束"))?;
         let result = approval_response(action, method, payload, &request)?;
-        let owner_method = match method {
-            "item/commandExecution/requestApproval" => "thread-follower-command-approval-decision",
-            "item/fileChange/requestApproval" => "thread-follower-file-approval-decision",
-            "item/permissions/requestApproval" => {
-                "thread-follower-permissions-request-approval-response"
-            }
-            "item/tool/requestUserInput" => "thread-follower-submit-user-input",
-            "mcpServer/elicitation/request" => {
-                "thread-follower-submit-mcp-server-elicitation-response"
-            }
-            _ => return Err(error(400, "不支持的回答类型")),
-        };
-        if owner_snapshot.is_some() {
-            let mut params = json!({"conversationId":id,"requestId":payload["requestId"]});
-            if action == "approve" {
-                params["decision"] = result["decision"].clone();
-            } else {
-                params["response"] = result;
-            }
-            if self
-                .owner_request(id, owner_method, params, 1, Some(authorization))
-                .await?
-                .is_none()
-            {
-                return Err(error(409, "审批所属的会话连接已变化"));
-            }
-        } else {
-            let generation = required(&request, "_generation")?;
-            self.runtime
-                .respond(generation, request["id"].clone(), result, authorization)
-                .await?;
-            self.projection
-                .lock()
-                .await
-                .resolve(&super::projection::request_key(generation, &request["id"]));
-        }
+        let generation = required(&request, "_generation")?;
+        self.runtime
+            .respond(generation, request["id"].clone(), result, authorization)
+            .await?;
+        self.projection
+            .lock()
+            .await
+            .resolve(&super::projection::request_key(generation, &request["id"]));
         Ok(json!({"ok":true,"threadId":id}))
     }
 

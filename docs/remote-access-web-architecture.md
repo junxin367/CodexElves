@@ -106,7 +106,6 @@ Service Worker 安装时下载清单中全部非延后资源；`ui/`、`core/`�
   - `wireVm(vm)`：运行片段前补齐入口负责的装配，即跨模块 setter（写入同名全局）和 `closeAppMenus`。
   - `moduleText(path)`、`corpus`：单个模块或全部模块的脚本文本，用于源码断言。
 - `scripts/remote-access-ui-state.test.mjs` 的 `sourceSection()` 即上述 `section()`；Select 组件测试直接导入 `ui/select.js` 的 `createSelectComponent`。
-- `crates/codex-elves-core/tests/cdp_bridge.rs` 中读取网页源码的测试同样通过该辅助脚本截取，源码包含断言使用全部模块合并后的文本。
 - 远程回归的源码指纹覆盖整个 `assets/remote-access/`；工作区已删除但尚未提交删除的跟踪文件不计入指纹。
 
 ## 检查清单

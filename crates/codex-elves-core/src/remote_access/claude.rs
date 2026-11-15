@@ -16,7 +16,7 @@ use tokio::process::Command;
 use tokio::sync::{Mutex, mpsc, oneshot};
 
 use super::{ApiError, RemoteAccessController, RemoteAuthorization, now_ms};
-use crate::desktop_owner_ipc::{WriteFrame, guarded_write, spawn_writer};
+use crate::service_transport::{WriteFrame, guarded_write, spawn_writer};
 
 #[path = "claude_queue.rs"]
 mod remote_queue;
@@ -60,7 +60,7 @@ pub(super) fn api_error(failure: anyhow::Error) -> anyhow::Error {
         failure
     } else {
         let unknown = failure
-            .downcast_ref::<crate::desktop_owner_ipc::DispatchFailure>()
+            .downcast_ref::<crate::service_transport::DispatchFailure>()
             .is_some_and(|failure| failure.dispatched);
         let error = ApiError::new(503, format!("Claude 服务操作失败：{failure}"));
         if unknown {

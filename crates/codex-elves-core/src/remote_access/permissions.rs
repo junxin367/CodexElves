@@ -354,7 +354,7 @@ async fn save_settings_file(
         .take()
         .ok_or_else(|| ApiError::new(503, "Claude 配置写入连接不可用"))?;
     let timeout = Duration::from_secs(15);
-    let (writer, _) = crate::desktop_owner_ipc::spawn_writer(input, timeout);
+    let (writer, _) = crate::service_transport::spawn_writer(input, timeout);
     let mut bytes = serde_json::to_vec(&json!({
         "path":target.display, "changes":changes, "expectedRevision":expected
     }))
@@ -365,11 +365,11 @@ async fn save_settings_file(
         failure.outcome_unknown = true;
         failure
     };
-    crate::desktop_owner_ipc::guarded_write(&writer, bytes, Some(authorization), timeout)
+    crate::service_transport::guarded_write(&writer, bytes, Some(authorization), timeout)
         .await
         .map_err(|failure| {
             if failure
-                .downcast_ref::<crate::desktop_owner_ipc::DispatchFailure>()
+                .downcast_ref::<crate::service_transport::DispatchFailure>()
                 .is_some_and(|failure| failure.dispatched)
             {
                 unknown()

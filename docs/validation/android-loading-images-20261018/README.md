@@ -12,7 +12,6 @@
 | --- | --- | --- |
 | 系统选择完成后静默丢图 | 统一解析两种 Intent 返回形式，保留取消、旧请求隔离和一次回调；选择器无法启动时回退系统文档选择器 | [图片选择 RCA](android-images.md)、`file-chooser-clipdata-before.json`、`file-chooser-clipdata-after.json` |
 | 正在读图时旧失败消息覆盖草稿 | 自动恢复旧失败输入前检查 `composerAttachmentsLoading()`；保留旧输入的恢复记录，不覆盖正在读取的图片 | `picker-resume-race-before.json`、`picker-resume-race-after.json` |
-| 最近三轮历史串行读取 | 每页最多两轮并发，按原顺序归并，保留每轮分页、用户输入投影与失败语义；原生适配版本为 41 | [网页加载 RCA](web-loading-rca.md)、`source-functions-before.json`、`source-functions-after.json` |
 | 实时活动先到，首屏历史尚未完成却失去加载状态 | 仅在首次历史未完成时显示顶部状态；完成或失败后清除，失败保留重试 | 浏览器对照及 `browser-loading-images.json` |
 | 状态变化反复重建队列图片 | 同一设备、聊天及附件复用图片节点；换图时更新，失败图仍可重新加载 | `browser-loading-images.json`、`browser-image-retry.json` |
 
@@ -53,7 +52,7 @@ https://developer.android.com/training/data-storage/shared/documents-files
 | Windows 配套构建 | 根目录 `build.ps1` 完整成功，退出码 0；未运行安装程序 |
 | 产物一致性与签名 | APK 20 项网页资源的大小、摘要及源码对照全通过；APK v2 签名验证通过；Windows 分发副本一致，manager 中包含当前四份远程网页/原生脚本的完整字节 |
 
-日志：`android-build-final.log`、`windows-build-final.log`、`rust-remote-access-tests.log`、`rust-remote-access-retest.log`、`apk-signature.txt`。完整摘要和资源比对见 `artifact-verification.json`。
+日志：`android-build-final.log`、`windows-build-final.log`、`rust-remote-access-tests.log`、`rust-remote-access-retest.log`、`apk-signature.txt`。
 
 ## 交付
 

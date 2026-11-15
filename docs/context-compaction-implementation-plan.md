@@ -147,7 +147,3 @@ git diff --check
 - [x] 核对原生 GPT Responses Remote Compaction V2 测试仍保留原始 trigger 和 opaque
       compaction item。
 - [x] 核对工作区没有新增临时测试文件、没有执行 commit、没有覆盖用户原有改动。
-
-> 全局 `cargo fmt --check` 仍会命中本次任务开始前已存在的
-> `crates/codex-elves-core/tests/cdp_bridge.rs` 格式差异；本次涉及的四个 Rust 文件已通过
-> 独立 `rustfmt --check`，未修改该无关文件。

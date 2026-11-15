@@ -12,7 +12,7 @@ use tokio::sync::{Mutex, mpsc, oneshot};
 use super::execution;
 use super::read_cache::ReadCache;
 use crate::codex_service::{ServiceDispatchGuard, spawn_service};
-use crate::desktop_owner_ipc::{WriteFrame, guarded_write};
+use crate::service_transport::{WriteFrame, guarded_write};
 
 const TIMEOUT: Duration = Duration::from_secs(45);
 // 用户要求服务模式新建后能立即打开会话：30 秒覆盖创建和首轮准备，

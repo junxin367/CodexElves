@@ -80,8 +80,11 @@ function renderAsyncQuestion(card, request, requestThreadId) {
       status.textContent = receipt?.skip ? "正在确认问题跳过结果。" : "正在确认回答结果。";
     if (receipt?.skip) skip.textContent = "跳过中…";
     else submit.textContent = "提交中…";
-  } else if (!allowed) status.textContent = threadReadOnly(requestThreadId) || !approvalsAllowed()
-    ? "此设备没有问答回复权限，请在 Codex 桌面处理。" : "连接恢复后可以提交回答。";
+  } else if (!allowed) {
+    // 用户禁止以 Codex App 桥接处理远程请求；缺少权限时只引导到有授权的远程设备。
+    status.textContent = threadReadOnly(requestThreadId) || !approvalsAllowed()
+      ? "此设备没有问答回复权限，请使用有权限的远程设备处理。" : "连接恢复后可以提交回答。";
+  }
   form.onsubmit = event => {
     event.preventDefault();
     if (submit.disabled) return;
@@ -166,7 +169,7 @@ export function renderApprovals() {
       const description = request.params?.command || request.params?.reason || request.params?.message || request.method;
       card.append(element("pre", "approval-description", typeof description === "string" ? description : JSON.stringify(description, null, 2)));
     }
-    if (threadReadOnly() || !approvalsAllowed()) { card.append(element("small", "muted", isClaude() ? "此设备没有远程审批权限。" : "请在 Codex 桌面处理，此设备没有审批权限。")); cards.push(card); continue; }
+    if (threadReadOnly() || !approvalsAllowed()) { card.append(element("small", "muted", "此设备没有远程审批权限。")); cards.push(card); continue; }
     // Claude 实时问答复用既有问答卡；原生最终提交后仅核对结果，多端或重连不能再次发送同一组回答。
     if (request.params?.nativeQuestion?.state === "submitted") {
       card.append(element("small", "muted", "回答已提交，等待 Claude 确认结果。"));
@@ -226,7 +229,7 @@ export function renderApprovals() {
           void reply("approve", { decision });
         }, decision === "accept" ? "primary" : ""));
       }
-      if (!actions.children.length) card.append(element("small", "muted", "此请求的审批方式请在 Codex 桌面处理。"));
+      if (!actions.children.length) card.append(element("small", "muted", "当前服务暂不支持此请求的审批方式。"));
     } else if (request.method === "item/tool/requestUserInput") {
       const fields = [], draft = blockingApprovalDraft(requestThreadId, request);
       for (const question of request.params?.questions || []) {
@@ -286,7 +289,7 @@ export function renderApprovals() {
         try { void reply("answer", { response: { action: "accept", content: JSON.parse(input.value) } }); }
         catch { notice("请输入有效 JSON", true); }
       }, "primary"), button("拒绝", "拒绝工具询问", () => reply("answer", { response: { action: "decline" } })));
-    } else card.append(element("small", "muted", "此类请求请在 Codex 桌面处理。"));
+    } else card.append(element("small", "muted", "当前服务暂不支持处理此类请求。"));
     card.append(actions);
     if (!connected) {
       for (const control of card.querySelectorAll("button,input,select,textarea")) control.disabled = true;

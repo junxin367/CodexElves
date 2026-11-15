@@ -31,7 +31,6 @@
 | 通常的 Activity 销毁会销毁 WebView，重新创建会重新建立页面 | 事实 | `onDestroy()` 调用 `destroyWebView()`；`onCreate()` 授权有效时调用 `openSession()`。没有读取 `savedInstanceState` 的页面恢复逻辑 | `MainActivity.java:97`、`:956`、`:978` |
 | 未注册原生网络切换监听 | 事实 | Android 原生目录没有 `ConnectivityManager`、`NetworkCallback`、`registerDefaultNetworkCallback` 或 `registerNetworkCallback`；Manifest 中声明 `ACCESS_NETWORK_STATE` 不等于已注册监听 | 本轮定向 `rg`；`AndroidManifest.xml:4` |
 | 常见界面配置变化已声明自行处理 | 事实 | Manifest 包含 keyboard、orientation、screenLayout、screenSize、smallestScreenSize、uiMode；launch mode 为 singleTask | `AndroidManifest.xml:19` |
-| 当前本地 APK 与上一轮最终产物相同 | 事实 | 当前 Debug APK SHA-256 为 `cdeab7c56c3f4ce971a09fc7c2704b8bd3feb641ccba8916a8aea1158720faca`，与上一轮最终记录相同 | 本轮 `Get-FileHash`；上一轮 `artifact-verification.json` |
 | 当前 APK 的 20 项内置网页资源仍与源码一致 | 事实 | APK 内置清单版本 `1a236d8e4a164a33cba2e88f1b820cbac3051bcaaaa12e40a5315a33a1a161c2`；逐项大小、APK SHA-256、清单 SHA-256 和源码 SHA-256 全部一致 | `android-native-evidence.json` |
 
 上述 `onPause`/定时器结论仅限“应用代码没有主动调用这些 API”，不推断用户设备 WebView、操作系统或厂商后台策略的实际调度行为。Android 官方只规定 `WebView.onPause()` 本身不暂停 JavaScript，而 `pauseTimers()` 会暂停所有 WebView 的解析、布局和 JavaScript 定时器；未取得现场证据时不能把平台策略写成确定原因。

@@ -17,8 +17,8 @@ use serde_json::{Value, json};
 
 const ENDPOINT_FILE: &str = "remote-access-service.json";
 const LOCK_FILE: &str = "remote-access-service.lock";
-// 协议 6 固定由服务执行 Codex 会话；不能复用仍声明双模式路由的旧后台。
-const PROTOCOL_VERSION: u32 = 6;
+// 用户要求完全移除远程 Codex App 桥接；协议 7 只支持独立服务，不能复用具备桌面 IPC 路由的旧进程。
+const PROTOCOL_VERSION: u32 = 7;
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(8);
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(60);
 #[cfg(windows)]

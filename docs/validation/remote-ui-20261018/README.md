@@ -33,6 +33,5 @@
 - `theme-mobile-final.jpg`：单主题图标设置截图。
 - `android-verification.md`：构建命令、APK 哈希、原生与网页差异、设备验收边界。
 - `android-apk-icon-preview.png`：从 APK 实际图层合成的蒙版预览，非设备截图。
-- `loading-state-rca.md` 及对应 JSON：加载状态的定位与局部回归证据。
 
 Android 产物为 `dist/android/CodexElves-0.5.0-android-debug.apk`。本次未安装、发布、提交或推送，正式远程服务仍需更新运行程序后才会使用新网页资源。

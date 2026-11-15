@@ -15,7 +15,6 @@
 
 | 验证 | 结果 | 范围 |
 | --- | --- | --- |
-| 原生事件适配 | 19 项通过 | 实际 native 代码的事件识别、多请求、游标、分类和主/子会话过滤 |
 | Rust 接口 | 6 项通过 | 鉴权、只读接口、过滤 SSE、旧 SSE/WebSocket、撤权；持续正文下心跳约 15 秒 |
 | Android 原生策略与传输 | 100 条断言通过 | 实际 Java 策略、身份、设置、游标和模拟 HTTPS/SSE；系统通知展示使用替身 |
 | 跨端失败包 | 通过 | Java 实际失败 JSON 经生产 `platform.js` 立即拒绝，监听器和定时器清理 |
@@ -46,7 +45,6 @@ lint 的三条提示分别是已有 `v26` 资源目录可合并、登录标题�
 
 ## 证据
 
-- `backend/README.md`：后端及现有事件流验证。
 - `native/README.md`：Android 策略、网络替身、生命周期和设备边界。
 - `browser/browser-results.json`、`browser/bridge-checks.json`、`browser/bridge-records.json`：页面状态与请求。
 - `browser/settings-entry.png`、`browser/notification-events-default.png`：最终默认字号页面。

@@ -145,7 +145,7 @@ export function updateComposerPermissions() {
     : queued ? `当前权限：${label}；已有待发消息按原选择执行，仅后续新轮次使用新选择`
     : waiting ? codex ? `当前权限：${label}；仅后续新轮次生效`
       : `当前权限：${label}；原生允许时切换，无法安全切换时保存待生效，不中断当前任务`
-    : nativeDefaultsEnabled && !mode ? "正在读取 Codex App 默认权限"
+    : nativeDefaultsEnabled && !mode ? "正在读取 Codex 服务默认权限"
     : catalog?.error ? `实例权限读取失败：${catalog.error}；点击重新读取`
     : !codex && !supported.length ? "暂无法确认该 Claude CLI 支持的权限模式，点击重新读取"
     : `当前权限：${label}；仅此会话的后续新轮次生效`;

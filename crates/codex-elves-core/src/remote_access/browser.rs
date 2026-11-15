@@ -318,7 +318,7 @@ mod tests {
 
     struct NoNative;
     #[async_trait]
-    impl NativeRemoteBridge for NoNative {
+    impl TestRemoteBackend for NoNative {
         async fn call(&self, _: &str, _: Value) -> anyhow::Result<Value> {
             anyhow::bail!("browser tunnel must not call Codex");
         }
@@ -332,7 +332,7 @@ mod tests {
     ) {
         let directory = tempfile::tempdir().unwrap();
         configure_access_key(directory.path(), "browser-fixture-key").unwrap();
-        let controller = RemoteAccessController::with_test_bridge(
+        let controller = RemoteAccessController::with_test_backend(
             Arc::new(NoNative),
             directory.path().to_path_buf(),
         )

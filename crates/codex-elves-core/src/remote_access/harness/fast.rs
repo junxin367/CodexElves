@@ -318,7 +318,7 @@ impl Harness {
         let saved = self.store.lock().await.data.settings.get(id).cloned();
         let name = if let Some(name) = params["model"].as_str() {
             name.to_owned()
-        } else if self.locally_loaded(id).await?
+        } else if self.engine_loaded(id).await?
             && let Some(name) = saved
                 .as_ref()
                 .and_then(|settings| settings["model"].as_str())

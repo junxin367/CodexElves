@@ -1543,7 +1543,7 @@ async function runtimeFixture(t, loadedBody = "// runtime asset") {
   const remoteAsset = await createEvidenceReference(await put(root, "installed-app.js", "// runtime asset"), { baseDir: root });
   const fields = {
     managerVersion: "1.2.3", managerExecutableSha256: managerExecutable.sha256,
-    codexVersion: "9.0.0", remoteAssetSha256: remoteAsset.sha256, serviceProtocolVersion: 6,
+    codexVersion: "9.0.0", remoteAssetSha256: remoteAsset.sha256, serviceProtocolVersion: 7,
   };
   const record = await proof(root, fields);
   const browserAsset = await createEvidenceReference(await put(root, "browser-app.js", loadedBody), { baseDir: root });
@@ -1787,7 +1787,7 @@ test("typed driver 的原始 operation 与动作身份严格一致，动作中�
   await assert.rejects(verifyNativeEvidence([wrong], request, { baseDir: root }), /operation/);
 });
 
-test("报告离线重验 typed driver 每步原始事实及桌面界面文件", async t => {
+test("报告离线重验 typed driver 每步原始事实及设备界面文件", async t => {
   const { root, report, options, ui } = await reportFixture(t);
   const record = await proof(root, {
     sourceFingerprint: report.sourceFingerprint, operation: "observe-thread", title: "原生标题",
@@ -1795,7 +1795,7 @@ test("报告离线重验 typed driver 每步原始事实及桌面界面文件", 
   report.actions = {};
   report.cases[0].nativeExpectations = undefined;
   report.cases[0].evidence = [ui, {
-    kind: "driver", driver: "desktop", operation: "observe-thread",
+    kind: "driver", driver: "android", operation: "observe-thread",
     records: [record], uiEvidence: [{ dom: ui.files.dom, screenshot: ui.files.screenshot }],
     request: {
       runId, caseId: "session.send_stream", contractVersion: "remote-e2e-driver/2",
@@ -2349,7 +2349,7 @@ test("报告按源码固定次数核验驱动步骤，删除中间步骤或重�
     }, { actionId: undefined }, "observe-2.json"),
   ];
   const steps = records.map(record => ({
-    kind: "driver", driver: "desktop", operation: "observe-thread", records: [record],
+    kind: "driver", driver: "android", operation: "observe-thread", records: [record],
     uiEvidence: [{ dom: ui.files.dom, screenshot: ui.files.screenshot }],
     request: {
       runId, caseId: "session.send_stream", contractVersion: "remote-e2e-driver/2",
@@ -2361,7 +2361,7 @@ test("报告按源码固定次数核验驱动步骤，删除中间步骤或重�
   report.cases[0].nativeExpectations = undefined;
   report.cases[0].evidence = [ui, ...steps];
   options.caseContracts["session.send_stream"].requiredDriverSteps = [
-    { driver: "desktop", operation: "observe-thread", count: 2 },
+    { driver: "android", operation: "observe-thread", count: 2 },
   ];
   assert.equal((await verifyRemoteAccessReport(report, options)).passed, true);
   report.cases[0].evidence = [ui, steps[0]];

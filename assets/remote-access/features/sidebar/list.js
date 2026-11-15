@@ -1,4 +1,4 @@
-// 侧栏列表：分页读取、最近/项目分组渲染与客户端未读角标同步；本地已读、优先显示、桌面端观察与折叠分组等状态在 list-state.js。
+// 侧栏列表：分页读取、最近/项目分组渲染与客户端未读角标同步；本地已读、优先显示与折叠分组等状态在 list-state.js。
 
 import { $, button, element } from "../../ui/dom.js";
 import { copyText } from "../../ui/clipboard.js";
@@ -31,7 +31,7 @@ import {
   clientUnreadBadgeRequest, clientUnreadBadgeTimer, clientUnreadThreadCount, collapsed,
   collapsedSidebarSections, markSidebarThreadReadLocally, mergeIncompleteSidebar,
   projectVisibleThreadCounts, recentLimit, recentPriorityIds, recentPriorityKnownIds,
-  recentPriorityOpenedAt, recentPrioritySelectionSuppressions, scheduleDesktopObservation, search,
+  recentPriorityOpenedAt, recentPrioritySelectionSuppressions, search,
   setClientUnreadBadgeRequest, setClientUnreadBadgeTimer, setRecentLimit, setRecentPriorityIds,
   setRecentPriorityKnownIds, setRecentPriorityOpenedAt, setSidebarFilterDeviceId, setSidebarRequest,
   setSidebarVersion, sidebarAttentionState, sidebarFilterDeviceId, sidebarReadRefreshSuppressions,
@@ -467,5 +467,4 @@ export function renderSidebar() {
     restored?.focus({ preventScroll: true });
   }
   fitPopup();
-  scheduleDesktopObservation();
 }

@@ -935,7 +935,7 @@ mod tests {
     struct OfflineBridge;
 
     #[async_trait]
-    impl NativeRemoteBridge for OfflineBridge {
+    impl TestRemoteBackend for OfflineBridge {
         async fn call(&self, _action: &str, _payload: Value) -> anyhow::Result<Value> {
             anyhow::bail!("诊断测试不调用桌面桥接")
         }
@@ -997,7 +997,7 @@ mod tests {
             .tempdir_in(temp_root)
             .unwrap();
         configure_access_key(directory.path(), "isolated-diagnostics-key").unwrap();
-        let controller = RemoteAccessController::with_test_bridge(
+        let controller = RemoteAccessController::with_test_backend(
             Arc::new(OfflineBridge),
             directory.path().to_owned(),
         )

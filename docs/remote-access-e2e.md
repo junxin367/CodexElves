@@ -1,14 +1,12 @@
 # 远程会话真实 E2E 回归
 
-**2026-11-04 用户纠正侧边命名规则：** 原文档中“不从首条消息正文改名”是错误规则；同日用户将自动命名上限从 10 个字符调整为 15 个字符。默认名可由首条有效用户文字在合并空白后取前 15 个 Unicode 码点自动生成，写入并确认同一原生标签后同步远程；已有自定义名不得被自动命名或后续消息覆盖。完整规则见 [侧边会话需求](remote-session-tools.md#侧边会话)。以下早期撤销十字符断言或待裁定的记录只描述当时验收状态，不能再作为当前产品规则；本次文档更正不增加任何验收通过结果。
+当前侧边会话由独立服务管理，首条有效用户文字在合并空白后取前 15 个 Unicode 码点作为默认名称，不与 Codex App 标签同步。验收以当前服务回执及会话身份为准。
 
 2026-11-02用户明确：本轮只恢复原有远程能力。文件审批记为能力缺失，排除主动开发及必做验收；`scenario.approval`继续验证已有命令审批，不据案例名称扩展文件审批。已撤回本轮新增的文件审批展示及专用测试。
 
-`scripts/remote-access-e2e.mjs` 是用户要求保留的长期回归资产。当前 2.5.10 包含 **73 个已列案例和处理器**；处理器与 73 条业务基线不是一一对应，数量相同不代表完整覆盖。功能覆盖与预期以 `docs/validation/remote-acceptance-cases-20261101.md` 为基线，子智能体等新补业务用例尚需逐项接入并真实执行。导入模块不启动环境、不认领浏览器、不发送消息；模块只接受调用方已经通过 `chrome@openai-bundled` 明确绑定的真实 `tab`。
-
 用户在 2026-11-03 至 11-04 的手动反馈及精确复现顺序见[手动反馈与防回归清单](validation/remote-user-feedback-20261103-20261104.md)：包含手机目标交互、旧消息/发送禁用恢复、侧栏异步关闭、提示时机、队列耗时、侧边模型往返和前后台连接诊断。后续相关修改按清单选择对应子场景，区分代码、真实验证、部署和真机状态；`UF-*` 仅为反馈索引，不代表新增处理器或整套 E2E 已通过。
 
-案例实现、源码测试、语法检查和模块导入，只证明回归资产可用。没有本轮 Chrome、Codex 桌面、故障环境或 Android 设备的原始证据时，相应案例必须是 `blocked` 或 `not_run`，不能宣传完整 E2E 通过。旧 1.0 报告不能继承为 2.0 的通过结果。
+案例实现、源码测试、语法检查和模块导入，只证明回归资产可用。没有本轮远程页面、独立原生引擎、故障环境或 Android 设备的原始证据时，相应案例必须是 `blocked` 或 `not_run`，不能宣传完整 E2E 通过。旧 1.0 报告不能继承为 2.0 的通过结果。
 
 恢复报告时，案例的编号、分组、标题和必测标记以当前源码定义为准，原执行状态、尝试、证据和动作记录保留。整体状态也按源码必测编号汇总：报告缺项按 `not_run` 处理，修改报告中的 `required` 不能隐藏未完成案例。严格原件校验仍独立执行，汇总的 `passed` 不代替该校验。
 
@@ -17,7 +15,7 @@
 - 每轮使用新 `runId`。新会话、消息、草稿和专用项目均带该标记。只更改本轮通过 UI 创建并登记的对象；明确接入的外部对象也必须是同轮新建，有原始创建回执、准确 thread ID 和可见原始消息标记。
 - `evaluate` 只读 DOM。变更通过真实点击、填写、键盘或明确的外部 UI 驱动完成。不得调用页面应用函数、直接发业务 API、改存储、mock 响应或注入成功状态。
 - 所有发送检查显式授权和剩余预算。默认短消息只请求校验词；长活动轮、停止、未读、审批、问答、目标、Skill、图片与优化消息由用户明确批准。所有消息仍追加唯一标记。
-- 不能覆盖非本轮草稿，不能用用户已有会话测试发送、排队、停止、置顶、改名、关闭或删除。专用项目必须由本轮桌面 UI 创建；名称、路径均包含 runId。
+- 不能覆盖非本轮草稿，不能用用户已有会话测试发送、排队、停止、置顶、改名、关闭或删除。专用项目必须由本轮独立原生驱动创建，缺少可用原生接口时阻塞相应案例；名称、路径均包含 runId。
 - 自动排队案例从排队完成后只读等待，不设置 `deferAutomaticTurns`、暂停自动轮次、点击引导或重新发送。队列边界和并发案例同样不能用暂停、重排队或模拟消费构造通过。
 - 每次服务动作在点击前写入稳定 actionId，先记 `unknown`。任何结果不明都禁止盲目重试。只有原始回执核对成功才确认；`recovery.unknown_receipt` 仅点“查询此消息的送达回执”，不会第二次调用发送。
 - 永久删除与不可恢复的侧边关闭保留动作当时的人类批准门禁。普通授权、初始消息、恒定 `true` 均不替代具体对象预览后的批准。
@@ -37,8 +35,7 @@
 | 队列并发与恢复 | `queue.dequeue_edit_race`、`queue.dequeue_remove_race`、`queue.cross_session` | 等到真实原生出队窗口再操作；接受明确过期拒绝，不接受未知结果；原对象只能删除或消费一次；跨会话刷新保持同 ID |
 | 侧边基础 | `lifecycle.side_create`、`lifecycle.side_switch`、`lifecycle.side_refresh`、`side.multiple` | 真实创建并首次发送标记；主侧往返；侧边刷新；两个不同侧边按 ID 独立切换且父子关系一致 |
 | 侧边生命周期 | `side.late_creation`、`side.close_running`、`side.delete_parent`、`lifecycle.side_close` | 延迟实际创建响应后不抢占控制会话；运行中关闭经预览批准且终止执行；删除单独新建父会话后无孤立/活动侧边；普通关闭刷新后保持消失 |
-| 已读 | `read.main_read_state`、`read.side_read_state`、`read.side_aggregate`、`read.cross_client` | 两轮真实新回复经历未读→阅读→刷新保持→再次未读；多侧边逐个清除聚合；Codex 阅读同步远程，下一轮再次未读 |
-| 项目与会话元数据 | `project.pin_unpin`、`project.search_preferences`、`lifecycle.pin`、`lifecycle.rename` | 本轮专用项目置顶和取消并刷新；搜索指定项目，切换本客户端最近/项目视图并刷新保持；会话置顶；Codex 改名同步远程。项目手动顺序属于另一类原生数据，不能用修改桌面偏好代替客户端偏好验收 |
+| 项目与会话元数据 | `project.pin_unpin`、`project.search_preferences`、`lifecycle.pin`、`lifecycle.rename` | 本轮专用项目置顶和取消并刷新；搜索指定项目，切换本客户端最近/项目视图并刷新保持；会话置顶；远程页面改名并用独立引擎核对。项目手动顺序属于另一类原生数据，不能用修改桌面偏好代替客户端偏好验收 |
 | 输入 | `composer.multiline`、`composer.image`、`composer.skill`、`composer.edit_latest` | 多行草稿切换刷新后逐字发送；真实系统图片选择器、预览、原生附件哈希；当前项目 Skill 的真实选择和原生输入；最新已发消息取消编辑、修改、单次重发及刷新 |
 | 提示词优化 | `optimizer.restore`、`optimizer.cancel`、`optimizer.late_result`、`optimizer.no_injection` | 真实优化后恢复原文；pending 时取消；后来编辑及跨会话草稿不被迟到结果覆盖；最后一项专指**会话服务不可用**时独立优化/取消/恢复，显式只读授权仍禁止写入，结束恢复环境 |
 | 上下文 | `context.switch_update`、`context.zero_missing` | main→control→main 不串值，新实际 turn 更新最后请求用量；两个同轮专用真实会话分别提供零值和缺失原生字段，验证 0% 与“—”。不得改写 tokenUsage 制造夹具 |
@@ -84,7 +81,7 @@ authorization: {
   maxMessageSubmissions: approvedMessageLimit,
   allowQueueChanges: true, allowSideSessions: true,
   allowSessionMetadata: true, allowDrafts: true,
-  allowDesktop: true, allowFaults: true,
+ allowFaults: true,
   allowAttachments: true, allowProjects: true,
   allowOptimizations: true, maxOptimizations: approvedOptimizationLimit,
   allowApprovals: true, allowAnswers: true,
@@ -159,10 +156,10 @@ runner 另保存主/控制两份普通草稿、unknown 锁定菜单、刷新后�
 - `messages`：获准的 `stream/active/stop/unread/multiline/image/skill/optimization/approval/question/goal`。字符串支持 `{ack}` 和 `{runId}`；脚本追加完整标记。`active/stop/unread` 需有明确且有限的真实执行时间窗口。
 - `imageFixture`：真实本机图片 `{path,sha256,size,name}`；`skill`：当前测试项目获准的 `{name,path,displayName}`。
 - `approvalUI`：已批准的具体 `{requestIncludes,buttonName}`；`questionUI`：`{fields:[{label,value}],submitName}`。不批准任意出现的工具或权限请求。
-- `projectFixture`：本轮专用 `{name,path}`，两者均含 runId。桌面驱动通过真实项目 UI 新建，不复用用户已有项目。
+- `projectFixture`：本轮专用 `{name,path}`，两者均含 runId。独立原生驱动通过受支持接口新建，不调用 Codex App，不复用用户已有项目。
 - 侧栏偏好按用户确认在各远程客户端独立保存。`project.search_preferences` 只修改当前测试客户端的视图，并在 finally 恢复原视图和搜索；不修改桌面排序，也不为验证排序额外发送消息。它替代 2.0 的 `project.search_sort`，旧案例预期不能继承。
 - `contextFixtures`：`{zeroKey,missingKey}` 指向两个本轮已登记且原生实际值分别为零/缺失的会话；夹具不存在时阻塞。
-- `readOnlyTab`：调用方明确绑定、正在显示同一专用 main ID 的真实只读授权页，仅用于无原生注入优化的权限检查，不修改授权。
+- `readOnlyTab`：调用方明确绑定、正在显示同一专用 main ID 的真实只读授权页，用于独立提示词优化的权限检查，不修改授权。
 
 逐项运行 `runRemoteAccessCase(caseId, ctx)`；整体运行可传 `suites` 与 `caseIds`。只读起步未建立 main/control 时，依赖案例阻塞。长场景优先分次调用，外层超时应大于案例上限；脚本每十秒落盘等待进度。
 
@@ -170,7 +167,7 @@ runner 另保存主/控制两份普通草稿、unknown 锁定菜单、刷新后�
 
 ## Typed 环境驱动
 
-网页现有控件能完成的步骤由 runner 直接 click/fill/wait/assert。需要 Codex 桌面、系统文件选择器、原生日志、真实故障或 Android 的步骤，由 `drivers.desktop/files/native/environment/android` 明确接入：
+网页现有控件能完成的步骤由 runner 直接 click/fill/wait/assert。需要系统文件选择器、独立原生接口或日志、真实故障或 Android 的步骤，由 `drivers.files/native/environment/android` 明确接入：
 
 ```js
 {
@@ -183,7 +180,7 @@ runner 另保存主/控制两份普通草稿、unknown 锁定菜单、刷新后�
 
 `request` 包含 runId/caseId/origin/sourceFingerprint/时间范围、准确 threadId/parentThreadId、全部本轮 ownedThreadIds、具体 operation/payload、固定 expectations、稳定 actionId、获准消息及输出目录。驱动不接受任意用户会话作为目标，不启动新环境。发送由 runner 预扣预算并提供完整 `request.message`；不能在驱动里额外发送、重试、直接调用业务 API 代替 UI，或自行批准审批/关闭/删除。
 
-驱动返回 `{records,uiEvidence}`，不返回 `status: passed` 或 `verified: true`。环境未就绪可以返回 `{status:"blocked",reason}`。每条 records 必须满足下节原始文件契约。desktop/android/files 的 uiEvidence 必须包含真实 UI 的 DOM/可访问性树与原始截图文件引用：
+驱动返回 `{records,uiEvidence}`，不返回 `status: passed` 或 `verified: true`。环境未就绪可以返回 `{status:"blocked",reason}`。每条 records 必须满足下节原始文件契约。android/files 的 uiEvidence 必须包含真实 UI 的 DOM/可访问性树与原始截图文件引用：
 
 ```js
 {
@@ -196,9 +193,8 @@ runner 会执行固定步骤、保存远程页观察并读取 rawFacts 自行断
 
 | 驱动 | 必需能力与真实环境 |
 | --- | --- |
-| `desktop` | observe-thread、create-side、rename-side-tab、rename-thread、open-thread；create-project、observe-project。必须使用真实 Codex UI，并保存 visibleThreadId/visibleTitle/nativeTabThreadId/nativeTabTitle 等原始观察，不通过同名标题猜 ID |
 | `files` | choose-image：响应 runner 已打开的真实系统图片选择器，选择明确文件；证明 fileName/fileSha256/pickerUsed，保留实际 UI 图与树 |
-| `native` | observe-context、wait-optimization-terminal、observe-draft、observe-request、observe-question-recovery、observe-project-membership、observe-side-aggregate、observe-queue-boundary、observe-dequeue-window、observe-queue-race、observe-side-lifecycle、observe-late-side-create、observe-compaction、observe-goal、observe-scenario。只读原始 RPC/bridge/日志及真实回执 |
+| `native` | create-project、observe-project、observe-context、wait-optimization-terminal、observe-draft、observe-request、observe-question-recovery、observe-project-membership、observe-side-aggregate、observe-queue-boundary、observe-dequeue-window、observe-queue-race、observe-side-lifecycle、observe-late-side-create、observe-compaction、observe-goal、observe-scenario。只读取独立 app-server RPC、远程服务回执及原生日志；唯一的项目准备写入须受 allowProjects 授权，不接受 Codex App 桥接 |
 | `environment` | acquire-environment-lease、restore-environment-resource、inspect-environment-lease；真实 disconnect-service、disconnect-network、restart-native、drop-next-action-receipt、start-question-recovery-observation、drop-question-answer-receipt、release-question-receipt-on-reload、delay-side-create-delivery、fail-active-upstream；observe-transport/recovery/original-receipt/question-recovery/optimization/authorization。只操作原始证据核对的独立实例或授权 tab 租约，不伪造响应 |
 | `android` | observe-installed、open-thread、fill-draft、background-app、resume-app、open-model-menu、press-back、observe-navigation、observe-notification、tap-notification、observe-notification-navigation、check/apply-resource-update、reload-webview、attempt-unavailable-resource-update、observe-resource-update。每步均有实际设备 UI 与版本/原生回执 |
 
@@ -246,7 +242,7 @@ Browser Use 自身可能产生 `Fetch.requestPaused(resourceType=Document)`。�
 ```js
 {
   actionId, threadId, turnId, receiptId, // 原生标识按实际存在提供；数字回执 ID 可为 0
-  source: "rpc", // rpc | bridge | native-log | desktop-ui | android-device
+  source: "rpc", // rpc | service | native-log | android-device
   evidencePath: absoluteOriginalJsonPath,
   sha256: originalFileSha256,
   outcomePointer: "/receipt", // 指向本次动作封套；平铺单回执显式使用 ""
@@ -284,7 +280,7 @@ Browser Use 自身可能产生 `Fetch.requestPaused(resourceType=Document)`。�
 
 ## 运行版本与 Android 版本
 
-`versionEvidence` 包含实际 managerVersion/managerExecutableSha256/codexVersion/remoteAssetSha256/serviceProtocolVersion/verifiedAt。`serviceProtocolVersion` 读取同一后台健康接口的 `protocolVersion`，要求不低于 6；不再读取已删除的桌面会话桥版本。另有：
+`versionEvidence` 包含实际 managerVersion/managerExecutableSha256/codexVersion/remoteAssetSha256/serviceProtocolVersion/verifiedAt。`serviceProtocolVersion` 读取同一后台健康接口的 `protocolVersion`，要求不低于 7；不再读取已删除的桌面会话桥版本。另有：
 
 - `managerExecutable`、`remoteAsset`：实际运行资产的 `{path,sha256,size}` 引用；可复制取证，不能以待构建源码/历史安装包代替。
 - `browserAsset`：浏览器实际收到的 `/app.js` 内容文件引用。`browserAssetEvidence` 为同一次加载的 浏览器网络原始记录引用，包含 `capture`（runId/caseId/origin/sourceFingerprint/capturedAt）、`request`（Network.requestWillBeSent）、`response`（Network.responseReceived）及 `body`（Network.getResponseBody 返回值）。请求 ID 必须一致、资源类型必须是 Script，正文哈希必须与目标网页资产相同；后台预取、另行下载及 Service Worker 中的旧脚本不能替代实际加载。保存本案所需字段时排除 Cookie 和 Authorization。
@@ -352,7 +348,7 @@ PR 工作流的“远程会话回归证据校验测试”运行上述四组 Node
 
 remote_access 的授权夹具有 60/120 秒有效期，随机密钥共享单项 KDF 缓存；完整并行跑会产生缓存抖动与合法 heartbeat 时序导致的假失败。2026-10-31 原样对照：并行 27 passed/9 failed/1 ignored，串行 36 passed/0 failed/1 ignored，串行耗时 167.53 秒。CI 将其从 workspace 普通并行测试排除后单独串行运行，不修改产品授权期限。新增原生 outcomeUnknown 禁止 CLI 重发的回归已经历红灯复现与修复后绿灯。
 
-这些是源码回归结果。ignored 外网手工案例、真实 Chrome 全流程、Codex 桌面动作、故障注入、Android 安装/后台/通知/资源更新均须另有本轮运行报告，不因上述测试通过而自动完成。
+这些是源码回归结果。ignored 外网手工案例、真实 Chrome 全流程、独立引擎实际操作、故障注入、Android 安装/后台/通知/资源更新均须另有本轮运行报告，不因上述测试通过而自动完成。
 
 ## 2.5.3 的真实事件口径补充
 
