@@ -98,6 +98,31 @@ function claudeUsageResetText(resetAt, now = Date.now()) {
   return minutes >= 1440 ? `${Math.floor(minutes / 1440)}天后`
     : minutes >= 60 ? `${Math.floor(minutes / 60)}小时后` : `${Math.max(1, minutes)}分钟后`;
 }
+function claudeUsageTimeZone(value) {
+  const timeZone = typeof value?.timeZone === "string" ? value.timeZone.trim() : "";
+  if (!timeZone || timeZone.length > 128 || !/^[A-Za-z0-9._+-]+(?:\/[A-Za-z0-9._+-]+)*$/u.test(timeZone)
+      || timeZone !== "UTC" && !timeZone.includes("/")) return "";
+  try {
+    new Intl.DateTimeFormat("en-US", { timeZone }).format();
+    return timeZone;
+  } catch {
+    return "";
+  }
+}
+function claudeUsageResetTitle(value, resetAt) {
+  if (resetAt == null) return "";
+  const timeZone = claudeUsageTimeZone(value);
+  if (!timeZone) return "";
+  try {
+    const formatted = new Intl.DateTimeFormat("zh-CN", {
+      hour12: false, timeZone, timeZoneName: "short"
+    }).format(new Date(resetAt));
+    // 用户要求网页账号弹层与原生 Claude 使用同一目标 WSL 时区；明确显示 IANA 名称，避免浏览器本地时区误读。
+    return `${formatted}（${timeZone}）`;
+  } catch {
+    return "";
+  }
+}
 function claudeUsageNumber(value) {
   return typeof value === "number" && Number.isFinite(value) && value >= 0 && value <= Number.MAX_SAFE_INTEGER;
 }
@@ -288,7 +313,15 @@ function renderClaudeUsageTip(windows) {
       stats.append(item);
     }
     const reset = element("span", "claude-usage-reset", claudeUsageResetText(window.resetAt));
-    if (window.resetAt != null) reset.title = new Date(window.resetAt).toLocaleString("zh-CN", { hour12: false });
+    const resetTitle = claudeUsageResetTitle(claudeUsageState.value, window.resetAt);
+    if (resetTitle) {
+      reset.title = resetTitle;
+      reset.setAttribute("aria-label", `重置时间：${resetTitle}`);
+    } else if (window.resetAt != null) {
+      // 未能核对目标 WSL 时区时不能退回浏览器本地时间，避免显示看似精确但来源错误的时间。
+      reset.title = "目标 WSL 时区未知";
+      reset.setAttribute("aria-label", "重置时间：目标 WSL 时区未知");
+    }
     numbers.append(stats, reset); section.append(row, track, numbers); content.push(section);
   }
   tip.node.replaceChildren(...content);
@@ -372,7 +405,9 @@ export function syncClaudeUsage() {
         // 读取暂未返回有效窗口时保留该实例仍有效的快照；采集时间不更新，超时/重置仍按原边界失效。
         if (!windows.length && claudeUsageWindows(state.value).length) return;
         const account = claudeUsageAccount(value);
+        const timeZone = claudeUsageTimeZone(value);
         state.value = windows.length ? { source: value.source, observedAtMs: value.observedAtMs,
+          ...(timeZone ? { timeZone } : {}),
           ...(account ? { accountEmail: account } : {}),
           ...(Object.hasOwn(value, "subscriptionType") ? { subscriptionType: claudeUsageSubscription(value).type } : {}),
           ...Object.fromEntries(windows.map(window => [window.key,

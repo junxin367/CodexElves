@@ -1282,6 +1282,27 @@ test("Claude 额度详情仅点击开关，悬停和聚焦不展开，数据失�
   assert.equal(context.claudeUsageState.tip, null);
 });
 
+test("Claude 额度弹层的重置时间使用目标 WSL 时区，不退回浏览器本地时区", async () => {
+  const h = claudeUsageHarness(), value = h.usage();
+  value.timeZone = "America/Los_Angeles";
+  h.context.mountClaudeUsage(); h.context.syncClaudeUsage();
+  h.requests[0].resolve({ ok: true, backend: "claude", instanceId: h.context.instance, usage: value });
+  await new Promise(resolve => setImmediate(resolve));
+  h.trigger.onclick();
+  assert.match(h.nodes[0].children[1].children[2].children[1].title, /America\/Los_Angeles/);
+  assert.match(h.nodes[0].children[1].children[2].children[1].attributes["aria-label"], /重置时间：/);
+
+  const invalidHarness = claudeUsageHarness(), invalid = invalidHarness.usage();
+  invalid.timeZone = "PST8PDT";
+  invalidHarness.context.mountClaudeUsage(); invalidHarness.context.syncClaudeUsage();
+  invalidHarness.requests[0].resolve({
+    ok: true, backend: "claude", instanceId: invalidHarness.context.instance, usage: invalid
+  });
+  await new Promise(resolve => setImmediate(resolve));
+  invalidHarness.trigger.onclick();
+  assert.equal(invalidHarness.nodes[0].children[1].children[2].children[1].title, "目标 WSL 时区未知");
+});
+
 test("Claude 本地详情独立加载，不替换原生百分比，并按窗口校验金额和预估总额度", async () => {
   const { context, trigger, requests, nodes, usage, advance } = claudeUsageHarness();
   const flush = () => new Promise(resolve => setImmediate(resolve));

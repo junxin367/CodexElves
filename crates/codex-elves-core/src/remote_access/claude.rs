@@ -395,7 +395,7 @@ impl Conversation {
             "instanceLabel":super::instances::label("claude",&self.config.distribution,&self.config.user),
             "wslUser":self.config.user,
             "cliCommand":if self.shared && !self.native_job_id.is_empty() {
-                format!("wsl.exe --distribution '{}' --user '{}' --exec '{}' attach {}",
+                format!("wsl.exe --distribution '{}' --user '{}' --exec /bin/bash -lc 'exec \"$@\"' -- '{}' attach {}",
                     self.config.distribution.replace('\'', "''"),
                     self.config.user.replace('\'', "''"),
                     self.config.executable.replace('\'', "''"), self.native_job_id)
@@ -768,6 +768,14 @@ impl Claude {
         Ok(command)
     }
 
+    pub(super) fn wsl_login_exec(command: &mut Command, program: &str) {
+        // 用户要求通过 WSL 启动的 Claude 与 WSL 登录环境使用同一时区；直用 `wsl --exec`
+        // 不会加载 /etc/profile.d 等登录环境，统一经 bash 登录 shell 后 exec 实际程序，
+        // 保留原有 stdin/stdout、进程身份和信号转发，不读取 Windows 主机时区。
+        command.args(["--exec", "/bin/bash", "-lc", "exec \"$@\"", "--"]);
+        command.arg(program);
+    }
+
     async fn linux_cwd(config: &WslConfig, cwd: &str) -> anyhow::Result<String> {
         if let Some(distribution) = super::preferences::wsl_distribution(Path::new(cwd)) {
             anyhow::ensure!(
@@ -884,15 +892,8 @@ impl Claude {
         let linux_path =
             Self::linux_cwd(config, path.to_str().context("Claude 连接端路径编码无效")?).await?;
         let mut command = Self::wsl(config)?;
-        command.args([
-            "--exec",
-            "python3",
-            "-u",
-            &linux_path,
-            "--cli",
-            &config.executable,
-            "--discover",
-        ]);
+        Self::wsl_login_exec(&mut command, "python3");
+        command.args(["-u", &linux_path, "--cli", &config.executable, "--discover"]);
         let probe = Conversation {
             backend: claude_backend(),
             id: String::new(),
@@ -1437,16 +1438,9 @@ impl Claude {
         )
         .await?;
         let mut command = Self::wsl(&c.config)?;
-        command.args([
-            "--cd",
-            &c.linux_cwd,
-            "--exec",
-            "python3",
-            "-u",
-            &linux_path,
-            "--cli",
-            &c.config.executable,
-        ]);
+        command.args(["--cd", &c.linux_cwd]);
+        Self::wsl_login_exec(&mut command, "python3");
+        command.args(["-u", &linux_path, "--cli", &c.config.executable]);
         if c.resumed {
             command.args(["--native-id", &c.native_id]);
             if !c.native_job_id.is_empty() {
@@ -1459,11 +1453,9 @@ impl Claude {
     async fn spawn_stdio(self: &Arc<Self>, c: &Conversation) -> anyhow::Result<Arc<Process>> {
         let mut command = Self::wsl(&c.config)?;
         // 用户要求保持原生系统提示、MCP、Skills、Hooks 和权限；不传 bare、替代提示或跳过审批参数。
+        command.args(["--cd", &c.linux_cwd]);
+        Self::wsl_login_exec(&mut command, &c.config.executable);
         command.args([
-            "--cd",
-            &c.linux_cwd,
-            "--exec",
-            &c.config.executable,
             "--print",
             "--input-format",
             "stream-json",
@@ -1810,8 +1802,10 @@ impl Claude {
         )
         .await?;
         let mut command = Self::wsl(&config)?;
+        command.args(["--cd", &linux_cwd]);
+        Self::wsl_login_exec(&mut command, "python3");
+        command.args(["-u", &linux_script]);
         let mut child = command
-            .args(["--exec", "python3", "-u", &linux_script])
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -4621,6 +4615,28 @@ mod tests {
             assert!(config.validate().is_err());
             assert!(Claude::wsl(&config).is_err());
         }
+    }
+
+    #[test]
+    fn wsl_claude_commands_load_login_environment_before_exec() {
+        let mut command = Command::new("wsl.exe");
+        Claude::wsl_login_exec(&mut command, "/fixture/bin/claude");
+        let args: Vec<_> = command
+            .as_std()
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            args,
+            vec![
+                "--exec",
+                "/bin/bash",
+                "-lc",
+                "exec \"$@\"",
+                "--",
+                "/fixture/bin/claude"
+            ]
+        );
     }
 
     #[tokio::test]

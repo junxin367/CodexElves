@@ -21,6 +21,9 @@ const PRICE_SOURCE: &str =
 const PRICE_TTL_MS: u64 = 24 * 60 * 60 * 1000;
 const PRICE_RETRY: Duration = Duration::from_secs(5 * 60);
 const MAX_PRICE_BYTES: usize = 16 * 1024 * 1024;
+const TIMEZONE_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
+const MAX_TIMEZONE_PROBE_BYTES: usize = 16 * 1024;
+const TIMEZONE_PROBE: &str = r#"printf '__CODEX_ELVES_TZ__%s\n' "${TZ-}"; printf '__CODEX_ELVES_DATE__%s\n' "$(date '+%Y-%m-%d %H:%M:%S %Z %z' 2>/dev/null || true)"; printf '__CODEX_ELVES_LOCALTIME__%s\n' "$(readlink -f /etc/localtime 2>/dev/null || true)""#;
 
 pub(super) struct CachedUsage {
     config: WslConfig,
@@ -130,7 +133,16 @@ impl Claude {
         }
         let usage = match native_usage(config).await {
             Ok((value, account_email)) => {
-                normalize_usage_with_account(&value, now_ms(), account_email.as_deref())
+                let mut usage =
+                    normalize_usage_with_account(&value, now_ms(), account_email.as_deref());
+                if usage.is_object()
+                    && let Some(time_zone) = native_time_zone(config).await
+                {
+                    // 用户要求网页账号弹层与原生 Claude 文本使用同一目标 WSL 时区；
+                    // 时区探针与 Claude 使用相同的发行版、用户、Home 目录和登录启动路径。
+                    usage["timeZone"] = json!(time_zone);
+                }
+                usage
             }
             // 旧 CLI、不适用的认证或读取失败均保持未知；不回退到凭据读取、HTTP 或第三方服务。
             Err(_) => Value::Null,
@@ -374,16 +386,10 @@ async fn local_metrics(config: &WslConfig, windows: Value, prices: Value) -> any
     let mut command = Claude::wsl(config)?;
     // 独立只读 Python 采集器在目标 WSL 运行；不执行 Claude、不操作原生日志或配置。
     // 扫描预算 12 秒，外层 16 秒覆盖 WSL 启动；连同原生查询与价格下载不超过网页 60 秒读取上限。
+    command.args(["--cd", "~"]);
+    Claude::wsl_login_exec(&mut command, "python3");
+    command.args(["-I", "-c", include_str!("claude_usage_stats.py")]);
     let mut child = command
-        .args([
-            "--cd",
-            "~",
-            "--exec",
-            "python3",
-            "-I",
-            "-c",
-            include_str!("claude_usage_stats.py"),
-        ])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -416,11 +422,9 @@ async fn native_usage(config: &WslConfig) -> anyhow::Result<(Value, Option<Strin
     let mut command = Claude::wsl(config)?;
     // 用户要求所有额度读取经过原 WSL 的 Claude：仅初始化与 get_usage，不发送 user 帧、不恢复任务。
     // 此专用元数据进程不持久化会话；只在本进程关闭 Hooks/MCP，原实例设置及正常执行能力保持原样。
+    command.args(["--cd", "~"]);
+    Claude::wsl_login_exec(&mut command, &config.executable);
     command.args([
-        "--cd",
-        "~",
-        "--exec",
-        &config.executable,
         "--print",
         "--input-format",
         "stream-json",
@@ -472,6 +476,64 @@ async fn native_usage(config: &WslConfig) -> anyhow::Result<(Value, Option<Strin
         let _ = tokio::time::timeout(Duration::from_secs(2), child.wait()).await;
     }
     outcome.context("Claude 额度读取超时")?
+}
+
+fn valid_time_zone(value: &str) -> bool {
+    let value = value.trim();
+    !value.is_empty()
+        && value.len() <= 128
+        && !value.starts_with('/')
+        && !value.contains("..")
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"._+-/".contains(&byte))
+        && (value == "UTC" || value.contains('/'))
+}
+
+fn time_zone_from_probe(output: &str) -> Option<String> {
+    let mut environment = None;
+    let mut environment_present = false;
+    let mut date_present = false;
+    let mut localtime = None;
+    for line in output.lines() {
+        if let Some(value) = line.strip_prefix("__CODEX_ELVES_TZ__") {
+            let value = value.trim();
+            environment_present = !value.is_empty();
+            if valid_time_zone(value) {
+                environment = Some(value.to_owned());
+            }
+        } else if let Some(value) = line.strip_prefix("__CODEX_ELVES_DATE__") {
+            date_present = !value.trim().is_empty();
+        } else if let Some(value) = line.strip_prefix("__CODEX_ELVES_LOCALTIME__") {
+            let value = value.trim();
+            let value = value
+                .strip_prefix("/usr/share/zoneinfo/")
+                .or_else(|| value.strip_prefix("/usr/lib/zoneinfo/"))
+                .unwrap_or(value);
+            if valid_time_zone(value) {
+                localtime = Some(value.to_owned());
+            }
+        }
+    }
+    if !date_present {
+        return None;
+    }
+    environment.or_else(|| (!environment_present).then_some(localtime).flatten())
+}
+
+async fn native_time_zone(config: &WslConfig) -> Option<String> {
+    let mut command = Claude::wsl(config).ok()?;
+    command.args(["--cd", "~"]);
+    Claude::wsl_login_exec(&mut command, "sh");
+    command.args(["-c", TIMEZONE_PROBE]);
+    let output = tokio::time::timeout(TIMEZONE_PROBE_TIMEOUT, command.output())
+        .await
+        .ok()?
+        .ok()?;
+    if !output.status.success() || output.stdout.len() > MAX_TIMEZONE_PROBE_BYTES {
+        return None;
+    }
+    time_zone_from_probe(&String::from_utf8_lossy(&output.stdout))
 }
 
 async fn control(
@@ -635,6 +697,35 @@ mod tests {
         assert!(
             normalize_usage(&raw, 1234).get("accountEmail").is_none(),
             "未提供邮箱时保持旧额度输出形状"
+        );
+    }
+
+    #[test]
+    fn timezone_probe_prefers_login_environment_and_falls_back_to_localtime() {
+        assert_eq!(
+            time_zone_from_probe(
+                "profile output\n__CODEX_ELVES_TZ__America/Los_Angeles\n\
+                 __CODEX_ELVES_DATE__2026-11-14 21:33:37 PST -0800\n\
+                 __CODEX_ELVES_LOCALTIME__/usr/share/zoneinfo/Asia/Shanghai\n"
+            ),
+            Some("America/Los_Angeles".into())
+        );
+        assert_eq!(
+            time_zone_from_probe(
+                "__CODEX_ELVES_TZ__\n\
+                 __CODEX_ELVES_DATE__2026-11-14 13:33:37 CST +0800\n\
+                 __CODEX_ELVES_LOCALTIME__/usr/share/zoneinfo/Asia/Shanghai\n"
+            ),
+            Some("Asia/Shanghai".into())
+        );
+        assert_eq!(
+            time_zone_from_probe(
+                "__CODEX_ELVES_TZ__PST8PDT\n\
+                 __CODEX_ELVES_DATE__2026-11-14 21:33:37 PST -0800\n\
+                 __CODEX_ELVES_LOCALTIME__/usr/share/zoneinfo/Asia/Shanghai\n"
+            ),
+            None,
+            "无法由浏览器 Intl 识别的 POSIX TZ 不能静默改用其他时区"
         );
     }
 

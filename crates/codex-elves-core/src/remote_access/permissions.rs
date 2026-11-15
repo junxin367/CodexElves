@@ -193,9 +193,8 @@ pub(super) async fn claude_modes(config: &super::claude::WslConfig) -> Vec<Strin
             &config.distribution,
             "--user",
             &config.user,
-            "--exec",
-            &config.executable,
         ]);
+        super::claude::Claude::wsl_login_exec(&mut command, &config.executable);
         command
     };
     command.arg("--help");
