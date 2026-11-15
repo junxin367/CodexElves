@@ -6,6 +6,25 @@ use super::{ApiError, Harness, error};
 use crate::remote_access::{Receipt, RemoteAuthorization};
 
 impl Harness {
+    pub(in crate::remote_access) async fn protected_delete_receipts(
+        &self,
+    ) -> std::collections::HashSet<String> {
+        self.store
+            .lock()
+            .await
+            .data
+            .deletions
+            .values()
+            .filter(|deletion| deletion.state != "deleted" || deletion.cleanup_pending)
+            .filter_map(|deletion| {
+                deletion
+                    .request_id
+                    .as_ref()
+                    .map(|request| format!("{}:{request}", deletion.device_id))
+            })
+            .collect()
+    }
+
     pub(in crate::remote_access) async fn check_deletion_barrier(
         &self,
         id: &str,
@@ -38,6 +57,21 @@ impl Harness {
         if let Some(previous) = previous {
             if previous.state == "deleted" {
                 return Ok(self.confirm_thread_deleted(id).await);
+            }
+            // 清理文件失败后，独立的成功回执可能已落盘；重启后按原设备、请求和摘要恢复，不能再删一次。
+            if let Some(controller) = self.controller.get().and_then(std::sync::Weak::upgrade)
+                && let Some(request_id) = previous.request_id.as_ref()
+            {
+                let confirmed = controller
+                    .auth
+                    .lock()
+                    .await
+                    .receipts
+                    .get(&format!("{}:{request_id}", previous.device_id))
+                    .is_some_and(|receipt| receipt_confirms_deletion(receipt, id));
+                if confirmed {
+                    return Ok(self.confirm_thread_deleted(id).await);
+                }
             }
             self.check_deletion_barrier(id).await?;
         }
@@ -227,23 +261,47 @@ impl Harness {
 
     pub async fn recover_delete_receipt(&self, receipt: &Receipt, value: Value) -> Value {
         // 只用同一会话、设备、原请求和删除摘要对应的原生确认恢复回执；会话读不到不能证明删除成功。
-        if !matches!(receipt.state.as_str(), "pending" | "unknown") {
+        if !matches!(receipt.state.as_str(), "pending" | "unknown" | "completed") {
             return value;
         }
         let store = self.store.lock().await;
         for (id, deletion) in &store.data.deletions {
-            if deletion.state == "deleted"
-                && deletion.device_id == receipt.device_id
+            if deletion.device_id == receipt.device_id
                 && deletion.request_id.as_deref() == Some(&receipt.request_id)
                 && receipt.payload_hash
                     == super::super::hash(&json!(["deleteThread", {"threadId":id}]).to_string())
             {
-                return json!({"requestId":receipt.request_id,"state":"completed",
-                    "result":deletion_result(id, deletion.cleanup_pending)});
+                if receipt_confirms_deletion(receipt, id)
+                    && (deletion.state != "deleted" || deletion.cleanup_pending)
+                {
+                    let id = id.clone();
+                    drop(store);
+                    let lock = self.thread_lock(&id).await;
+                    let _serial = lock.lock().await;
+                    let result = self.confirm_thread_deleted(&id).await;
+                    return json!({"requestId":receipt.request_id,"state":"completed","result":result});
+                }
+                if deletion.state == "deleted" && receipt.state != "completed" {
+                    return json!({"requestId":receipt.request_id,"state":"completed",
+                        "result":deletion_result(id, deletion.cleanup_pending)});
+                }
+                break;
             }
         }
         value
     }
+}
+
+fn receipt_confirms_deletion(receipt: &Receipt, id: &str) -> bool {
+    let value = super::super::receipt_value(receipt);
+    let result = &value["result"];
+    receipt.state == "completed"
+        && receipt.payload_hash
+            == super::super::hash(&json!(["deleteThread", {"threadId":id}]).to_string())
+        && result["ok"] == true
+        && result["deleted"] == true
+        && result["threadId"] == id
+        && result["outcomeUnknown"] != true
 }
 
 impl Data {

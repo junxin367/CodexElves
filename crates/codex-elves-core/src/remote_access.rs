@@ -1699,6 +1699,8 @@ impl RemoteAccessController {
         }
         let key = format!("{}:{request_id}", device.id);
         let digest = hash(&serde_json::to_string(&json!([action, payload])).unwrap());
+        // 未完成删除清理仍依赖原成功回执；换设备或原授权过期不能先淘汰唯一的持久确认。
+        let protected_deletions = self.harness.protected_delete_receipts().await;
         {
             let mut auth = self.auth.lock().await;
             if !auth
@@ -1714,8 +1716,10 @@ impl RemoteAccessController {
                 .filter(|device| device.expires_at_ms > now_ms())
                 .map(|device| device.id.clone())
                 .collect::<std::collections::HashSet<_>>();
-            auth.receipts.retain(|_, receipt| {
-                receipt.state == "pending" || active_devices.contains(&receipt.device_id)
+            auth.receipts.retain(|key, receipt| {
+                receipt.state == "pending"
+                    || active_devices.contains(&receipt.device_id)
+                    || protected_deletions.contains(key)
             });
             if let Some(receipt) = auth.receipts.get(&key) {
                 if receipt.payload_hash != digest {
@@ -6850,6 +6854,43 @@ readline.createInterface({input:process.stdin}).on('line',line=>{
             directory.path().join("remote-harness-state.json"),
         )
         .unwrap();
+        // 模拟清理失败后重启：磁盘仍是 pending，但独立成功回执可证明原生删除已完成。
+        let original = controller.auth.lock().await.receipts
+            [&format!("{}:delete-cleanup", authorization.device.id)]
+            .clone();
+        let receipt_directory = tempfile::tempdir().unwrap();
+        std::fs::copy(
+            directory.path().join("remote-harness-state.json"),
+            receipt_directory.path().join("remote-harness-state.json"),
+        )
+        .unwrap();
+        let query_reopened = harness::Harness::new(receipt_directory.path()).unwrap();
+        assert!(
+            query_reopened
+                .protected_delete_receipts()
+                .await
+                .contains(&format!("{}:delete-cleanup", authorization.device.id))
+        );
+        let recovered = query_reopened
+            .recover_delete_receipt(&original, receipt_value(&original))
+            .await;
+        assert_eq!(recovered["state"], "completed");
+        assert_eq!(recovered["result"]["status"], "local_deleted");
+        let reopened = harness::Harness::new(directory.path()).unwrap();
+        reopened.attach(Arc::downgrade(controller));
+        assert_eq!(
+            reopened
+                .call("deleteThread", json!({"threadId":id}), Some(&authorization))
+                .await
+                .unwrap()["deleted"],
+            true
+        );
+        // 查询原成功回执同样只能补本地清理，不启动原生引擎。
+        let restored = reopened
+            .recover_delete_receipt(&original, receipt_value(&original))
+            .await;
+        assert_eq!(restored["state"], "completed");
+        assert_eq!(restored["result"]["deleted"], true);
         let again = controller
             .execute(
                 authorization.device.clone(),
