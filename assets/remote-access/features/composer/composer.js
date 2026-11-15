@@ -1,7 +1,7 @@
-// 输入区状态与发送：发送按钮/禁用状态更新、失败输入恢复、发送与停止生成。
+// 输入区状态与发送：发送按钮/禁用状态更新、失败输入恢复提示、发送与停止生成、输入区滚动挂载与统计同步；发送中标记与反馈计时在 send-state.js。
 
 import {
-  chooseComposerImages, composerAttachmentsLoading, composerAttachmentSnapshot,
+  chooseComposerImages, composerAttachmentSnapshot, composerAttachmentsLoading,
   composerAttachmentsPayload, composerCanAddImages, composerHasAttachments,
   setComposerAttachmentsDisabled
 } from "../../attachments.js";
@@ -14,6 +14,11 @@ import { notice } from "../../ui/notice.js";
 import { activePopup, fitPopup, renderPopup } from "../../ui/popup.js";
 import { setSelectOptions } from "../../ui/select.js";
 import {
+  applyQueuedSendResult, closeComposerMenus, loadModels, loadSidebar, mutate, reloadThread,
+  renderApprovals, renderGoalStatus, renderQueueArea, renderQueuedEditRecoveryControls,
+  resolvePending, scheduleMessages, selectThread
+} from "../../core/actions.js";
+import {
   busy, connected, creating, nativeConnectionVersion, pageLeaving, selectedId, selectionToken,
   selectionVersion, session, setBusy, setStopping, sidebar, stopping, thread
 } from "../../core/state.js";
@@ -21,91 +26,87 @@ import { recoveryStore } from "../../core/stores.js";
 import { randomId } from "../../core/util.js";
 import { api } from "../api.js";
 import { appearance } from "../appearance/theme.js";
-import { approvalReplies, questionReplyReceipts, renderApprovals, setApprovalSignature } from "../approvals.js";
+import { approvalReplies, questionReplyReceipts, setApprovalSignature } from "../approval-state.js";
 import { renderClaudeControlNotices } from "../claude-notices.js";
 import { syncClaudeUsage } from "./claude-usage.js";
-import { closeComposerMenus, refitComposerMenus } from "./composer-menus.js";
+import { refitComposerMenus } from "./composer-menus.js";
 import {
-  clearSubmittedDraft, draftKey, failedInputRecoveries, inputDraftEmpty, newDraftKey,
-  persistInputDraft, recoveryGeneration, restoreDraft, snapshotDraft, storeDraft, submittedDrafts
+  codexCreationDefaultsState, creationInstanceId, creationProject, syncNewChatProjectPicker
+} from "./creation-state.js";
+import { clearSubmittedDraft, restoreDraft } from "./draft-restore.js";
+import {
+  draftKey, failedInputRecoveries, inputDraftEmpty, newDraftKey, persistInputDraft,
+  recoveryGeneration, snapshotDraft, storeDraft, submittedDrafts
 } from "./drafts.js";
-import { compactUsageDescription, contextUsage, syncComposerMetrics, updateContextUsage } from "./metrics.js";
 import {
-  claudePendingSetting, currentEffort, currentModel, currentModelId, loadModels,
-  modelChoiceVersion, modelLoadError, modelsLoadedAt, modelsPromise, remoteFastKey,
-  remoteFastState, remoteFastWriting, selectedDraftFast, selectedEffort, selectedModel,
-  syncBackendModels, updateRemoteFast
-} from "./models.js";
+  compactUsageDescription, composerMetricsContext, composerMetricsHasTurn,
+  composerMetricsLatestTurn, composerMetricsState, contextUsage, normalizeComposerMetrics,
+  renderComposerMetrics, resetComposerMetrics, setComposerMetricsState, updateContextUsage
+} from "./metrics.js";
+import { claudePendingSetting, syncBackendModels } from "./model-catalog.js";
+import { currentEffort, currentModel, currentModelId, remoteFastKey, updateRemoteFast } from "./model-choice.js";
 import {
-  codexCreationDefaultsKey, codexCreationDefaultsState, creationInstanceId, creationProject,
-  loadCodexCreationDefaults, newChatPreferenceScope, newClaudePermissionMode,
-  newCodexPermissionMode, rememberedNewChatModel, rememberedNewChatSettings, selectCreatedThread,
-  syncNewChatProjectPicker
-} from "./new-chat.js";
-import { instancePermissionCatalogs, loadInstancePermissionCatalog, updateComposerPermissions } from "./permissions.js";
+  codexCreationDefaultsKey, loadCodexCreationDefaults, newChatPreferenceScope,
+  newClaudePermissionMode, newCodexPermissionMode, rememberedNewChatModel,
+  rememberedNewChatSettings, selectCreatedThread
+} from "./new-chat-settings.js";
+import {
+  instancePermissionCatalogs, modelChoiceVersion, modelLoadError, modelsLoadedAt, modelsPromise,
+  remoteFastState, remoteFastWriting, selectedDraftFast, selectedEffort, selectedModel
+} from "./options-state.js";
+import { loadInstancePermissionCatalog, updateComposerPermissions } from "./permissions.js";
 import { composerPrompt, effortLabels, resizeComposerInput } from "./prompt-editor.js";
 import { updatePromptOptimization } from "./prompt-optimization.js";
-import { compactCommandAvailable, renderSkillMenu, selectedSkills } from "./skills.js";
+import {
+  clearPendingFeedbackTimer, composerDiagnosticState, pendingFeedbackDelay, pendingFeedbackReady,
+  prepareClaudeProjectCreation, queuedEditHasOriginalImages, sending, setComposerDiagnosticState,
+  setPendingFeedbackTimer, setSending
+} from "./send-state.js";
+import { selectedSkills } from "./skill-catalog.js";
+import { compactCommandAvailable, renderSkillMenu } from "./skills.js";
 import {
   compactContext, compactionInProgress, compactionLocked, compactionQueueSendReason,
   currentCompaction, renderCompactionBanner
 } from "../conversation/compaction.js";
-import { scheduleMessages, updateScrollControl } from "../conversation/history-view.js";
-import { historyInitialized, reloadThread } from "../conversation/history.js";
+import { historyInitialized, setFollowMessages, updateScrollControl } from "../conversation/history-state.js";
+import { pending, pendingTimer, setPendingTimer } from "../conversation/pending-state.js";
+import { savePending } from "../conversation/pending-store.js";
 import {
-  mutate, pending, pendingTimer, resolvePending, savePending, setPendingTimer
-} from "../conversation/pending.js";
-import { selectThread } from "../conversation/selection.js";
+  applyGoalComposerReceipt, manuallyResolveGoalComposer, renderGoalComposerRecovery
+} from "../goal/composer-submission.js";
+import { goalComposerReason, goalPrefix, selectGoalCommand } from "../goal/composer.js";
 import {
-  applyGoalComposerReceipt, goalComposerAction, goalComposerPlaceholder, goalComposerReason,
-  goalComposerRecoveries, goalPrefix, goalRecordThreadId, manuallyResolveGoalComposer,
-  renderGoalComposerRecovery, selectedGoal, selectGoalCommand
-} from "../goal/composer.js";
-import { goalEditPending, goalVersion, renderGoalStatus } from "../goal/status.js";
+  goalComposerAction, goalComposerPlaceholder, goalComposerRecoveries, goalEditPending,
+  goalRecordThreadId, goalVersion, selectedGoal
+} from "../goal/state.js";
 import { editingMessage, queuedEditSubmittingAction, updateMessageEditor } from "../messages/message-edit.js";
-import { applyQueuedSendResult, queueVersion, renderQueueArea } from "../queue/queue.js";
-import {
-  editingQueuedMessage, queuedEditActions, renderQueuedEditRecoveryControls,
-  restoreUnfinishedQueuedMessageEdit, submitQueuedMessageEdit
-} from "../queue/queued-edit.js";
+import { restoreUnfinishedQueuedMessageEdit, submitQueuedMessageEdit } from "../queue/queued-edit.js";
 import { finishSendDisplay, rememberSendDisplay } from "../queue/sent-display.js";
+import { editingQueuedMessage, queueVersion, queuedEditActions } from "../queue/state.js";
+import { claudeCommandSupported } from "../session/action-capabilities.js";
 import {
-  activeBackend, backendCapability, claudeCommandSupported, claudeNativeQueue, isActiveThread,
-  isClaude, newChatBackendOptions, privateInputScope, queueCapability, serviceSideThread,
-  threadReadOnly, threadReadOnlyMessage
+  activeBackend, backendCapability, claudeNativeQueue, isActiveThread, isClaude, privateInputScope,
+  queueCapability, serviceSideThread, threadReadOnly, threadReadOnlyMessage
 } from "../session/capabilities.js";
-import { activeInstanceId, availableSessionInstances, sessionInstanceEnabled } from "../session/instances.js";
-import { recordRuntimeDiagnostic, stream } from "../session/lifecycle.js";
+import { recordRuntimeDiagnostic, stream } from "../session/connection-state.js";
 import {
-  ownsRelatedOperation, relatedThreadOperations, renderRelatedOperationStatus, sideCreationView,
-  syncRelatedSessionLayout, updateSideCreationStatus
+  activeInstanceId, availableSessionInstances, newChatBackendOptions, sessionInstanceEnabled
+} from "../session/instances.js";
+import { relatedThreadOperations, sideCreationView } from "../session/related-state.js";
+import {
+  ownsRelatedOperation, renderRelatedOperationStatus, syncRelatedSessionLayout,
+  updateSideCreationStatus
 } from "../session/related.js";
 import { syncWorkspaceSidePanelState } from "../session/side-panel.js";
-import { currentThreadDisplay, syncRelatedModelDisplay } from "../session/thread-cache.js";
-import { sessionTools } from "../shell.js";
+import { currentThreadDisplay } from "../session/thread-cache.js";
+import { rememberThreadDisplay, syncRelatedModelDisplay } from "../session/thread-display.js";
+import { sessionTools } from "../shell-state.js";
+import { sidebarBusy } from "../sidebar/actions.js";
 import {
-  checkThreadDeletion, sidebarBusy, threadDeleted, threadDeletionChecks, threadDeletionKey,
-  threadDeletionLocked, threadDeletions
-} from "../sidebar/actions.js";
-import { loadSidebar } from "../sidebar/list.js";
+  threadDeleted, threadDeletionChecks, threadDeletionKey, threadDeletionLocked, threadDeletions
+} from "../sidebar/deletion-state.js";
+import { checkThreadDeletion } from "../sidebar/thread-deletion.js";
 
-export let sending = null;
-export function setSending(value) { return sending = value; }
-let composerDiagnosticState = "";
-const pendingFeedbackDelayMs = 5000;
-let pendingFeedbackTimer = null;
-function pendingFeedbackDelay(record) {
-  // 用户要求：队列操作未确认满 8 秒才补充等待提醒；其他操作仍为 5 秒，不改变真实失败提示或回执轮询。
-  return ["steerQueued", "removeQueued", "reorderQueued", "beginQueuedEdit", "editQueued", "cancelQueuedEdit", "dismissQueuedEdit"]
-    .includes(record?.action) ? 8000 : pendingFeedbackDelayMs;
-}
-export function pendingFeedbackReady(record) {
-  return !Number.isFinite(record?.time) || Date.now() - record.time >= pendingFeedbackDelay(record);
-}
-export function clearPendingFeedbackTimer() {
-  clearTimeout(pendingFeedbackTimer);
-  pendingFeedbackTimer = null;
-}
 export function syncPendingFeedbackTimer() {
   clearPendingFeedbackTimer();
   if (!session || pageLeaving || document.hidden) return;
@@ -130,21 +131,14 @@ export function syncPendingFeedbackTimer() {
     .map(record => record.time + pendingFeedbackDelay(record) - Date.now()).filter(delay => delay > 0);
   if (!remaining.length) return;
   const version = selectionVersion, scope = privateInputScope(session);
-  pendingFeedbackTimer = setTimeout(() => {
-    pendingFeedbackTimer = null;
+  setPendingFeedbackTimer(setTimeout(() => {
+    setPendingFeedbackTimer(null);
     if (pageLeaving || document.hidden || version !== selectionVersion || scope !== privateInputScope(session)) return;
     if (sideCreationView) updateSideCreationStatus(sideCreationView.record);
     setApprovalSignature(null);
     renderApprovals();
     updateComposer();
-  }, Math.min(...remaining));
-}
-function queuedEditHasOriginalImages(edit) {
-  // 用户要求普通队列消息恢复到输入框后按普通消息编辑；只有原消息确实带图片时，
-  // 才显示“原图片会保留”提示，不能因为处于队列编辑态就误报图片限制。
-  return edit?.imageRemoval === true || edit?.imageEditing === true
-    || Array.isArray(edit?.originalImageSources) && edit.originalImageSources.length > 0
-    || Array.isArray(edit?.attachments) && edit.attachments.length > 0;
+  }, Math.min(...remaining)));
 }
 export function updateComposer() {
   sessionTools?.updateContext();
@@ -273,7 +267,7 @@ export function updateComposer() {
   send.disabled = blockedBy !== "ready";
   const diagnosticState = JSON.stringify([privateInputScope(session), selectedId, blockedBy, pageLeaving, connected, stream?.readyState]);
   if (diagnosticState !== composerDiagnosticState) {
-    composerDiagnosticState = diagnosticState;
+    setComposerDiagnosticState(diagnosticState);
     recordRuntimeDiagnostic("composer.state", { blockedBy, draftChars: prompt.length,
       attachmentCount: composerAttachmentSnapshot().length });
   }
@@ -400,24 +394,6 @@ function renderFailedInputRecovery(root) {
   restore.disabled = threadReadOnly() || !empty || busy || stopping || !!pending;
   box.append(restore); root.append(box);
 }
-async function prepareClaudeProjectCreation(payload, stillCurrent) {
-  const result = await api("/api/read/projectTrust", {
-    backend: "claude", instanceId: payload.instanceId, projectId: payload.projectId
-  });
-  if (!stillCurrent()) return false;
-  if (result?.instanceId !== payload.instanceId || typeof result?.trustPath !== "string" || !result.trustPath)
-    throw new Error("项目目录信任检查结果不匹配，草稿已保留，请重新选择项目后重试。");
-  if (result.trusted === true) return true;
-  // 用户要求在远程完成一次目录信任；明确显示实例和真实信任边界，取消和切换项目均不写入或发送。
-  const confirmed = await confirmAction("信任 Claude 项目目录",
-    `实例：${result.instanceLabel || payload.instanceId}\n目录：${result.trustPath}\n`
-      + "允许 Claude 加载此项目的规则和工具配置。仅确认你信任的项目；确认后继续发送当前消息。",
-    "信任并继续", false, "project-trust-confirmation");
-  if (!confirmed || !stillCurrent()) return false;
-  payload.trustProject = true;
-  payload.expectedProjectPath = result.trustPath;
-  return true;
-}
 export async function sendMessage() {
   // 用户要求未启用类型不可发起新输入；打开旧深链仍可查看历史，不会因此停止原生正在执行的任务。
   if (!sessionInstanceEnabled(activeInstanceId())) return;
@@ -536,7 +512,7 @@ export async function sendMessage() {
   } : null;
   const submission = { payload, phase: "sending" };
   const sendDisplay = action === "send" ? rememberSendDisplay(payload) : null;
-  sending = submission;
+  setSending(submission);
   setBusy(true); updateComposer();
   let requestStarted = false;
   try {
@@ -598,7 +574,7 @@ export async function sendMessage() {
     else notice(error.message, true);
   } finally {
     finishSendDisplay(sendDisplay);
-    if (sending === submission) { sending = null; setBusy(false); updateComposer(); }
+    if (sending === submission) { setSending(null); setBusy(false); updateComposer(); }
   }
 }
 export async function stopGeneration() {
@@ -614,4 +590,130 @@ export async function stopGeneration() {
     if (version === selectionVersion && selectedId === id) await reloadThread();
   } catch (error) { notice(error.message, true); }
   finally { setStopping(false); updateComposer(); }
+}
+
+export function mountComposerScroll() {
+  const form = $("#composer"), input = $(".composer-input", form), messages = $("#messages");
+  const mobile = matchMedia("(max-width: 760px)");
+  let reveal = 1, touch = null;
+  const setReveal = value => {
+    reveal = Math.max(0, Math.min(1, value));
+    if (reveal === 1) input.style.removeProperty("--composer-rows");
+    else input.style.setProperty("--composer-rows", `${reveal}fr`);
+    input.style.setProperty("--composer-reveal", String(reveal));
+    form.style.setProperty("--composer-toolbar-gap", `${Math.round(6 * reveal)}px`);
+    input.style.pointerEvents = reveal === 0 ? "none" : "";
+  };
+  const expand = () => setReveal(1);
+  const scroll = (delta, target) => {
+    if (!mobile.matches || !delta || !selectedId || creating || editingMessage || editingQueuedMessage
+        || document.activeElement === $("#prompt") || !$("#skill-menu").hidden || !$("#model-settings").hidden
+        || activePopup || document.querySelector("dialog[open]") || $(".workspace").classList.contains("sidebar-open")) return;
+    for (let node = target instanceof Element ? target : target.parentElement; node && node !== messages; node = node.parentElement) {
+      if (node.scrollHeight > node.clientHeight + 1 && /auto|scroll/.test(getComputedStyle(node).overflowY)
+          && (delta < 0 ? node.scrollTop > 0 : node.scrollTop + node.clientHeight < node.scrollHeight - 1)) return;
+    }
+    if (delta < 0) {
+      if (messages.scrollTop <= 0 || messages.scrollHeight <= messages.clientHeight + 1) return;
+      setFollowMessages(false);
+    }
+    const distance = Math.max(160, input.firstElementChild.scrollHeight * 2);
+    setReveal(reveal + delta / distance);
+  };
+  const onWheel = event => {
+    if (event.ctrlKey || event.defaultPrevented || Math.abs(event.deltaX) > Math.abs(event.deltaY)) return;
+    const unit = event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? messages.clientHeight : 1;
+    scroll(event.deltaY * unit, event.target);
+  };
+  const onTouchStart = event => {
+    touch = event.touches.length === 1 ? { x: event.touches[0].clientX, y: event.touches[0].clientY } : null;
+  };
+  const onTouchMove = event => {
+    const previous = touch;
+    onTouchStart(event);
+    if (!previous || !touch || event.defaultPrevented) return;
+    const delta = previous.y - touch.y;
+    if (Math.abs(delta) >= Math.abs(previous.x - touch.x)) scroll(delta, event.target);
+  };
+  const onTouchEnd = () => { touch = null; };
+  const onFormClick = event => {
+    if (reveal < 1 && event.target === form) {
+      expand(); $("#prompt").focus({ preventScroll: true });
+    }
+  };
+  const onMediaChange = () => { touch = null; expand(); resizeComposerInput(); };
+  messages.addEventListener("wheel", onWheel, { passive: true });
+  messages.addEventListener("touchstart", onTouchStart, { passive: true });
+  messages.addEventListener("touchmove", onTouchMove, { passive: true });
+  messages.addEventListener("touchend", onTouchEnd, { passive: true });
+  messages.addEventListener("touchcancel", onTouchEnd, { passive: true });
+  form.addEventListener("focusin", expand);
+  form.addEventListener("click", onFormClick);
+  mobile.addEventListener("change", onMediaChange);
+  return {
+    expand,
+    get collapsed() { return mobile.matches && reveal < 1; },
+    dispose() {
+      messages.removeEventListener("wheel", onWheel);
+      messages.removeEventListener("touchstart", onTouchStart);
+      messages.removeEventListener("touchmove", onTouchMove);
+      messages.removeEventListener("touchend", onTouchEnd);
+      messages.removeEventListener("touchcancel", onTouchEnd);
+      form.removeEventListener("focusin", expand);
+      form.removeEventListener("click", onFormClick);
+      mobile.removeEventListener("change", onMediaChange);
+    }
+  };
+}
+
+export function syncComposerMetrics() {
+  if (!$("#session-metrics")) return;
+  const context = composerMetricsContext();
+  if (!context) { resetComposerMetrics(); return; }
+  if (composerMetricsState?.key !== context.key) {
+    resetComposerMetrics();
+    setComposerMetricsState({ key: context.key, value: normalizeComposerMetrics(currentThreadDisplay()?.sessionMetrics),
+      checkedAt: 0, pending: false, controller: null, timer: null, fingerprint: "", retryAt: 0 });
+  }
+  const state = composerMetricsState, active = isActiveThread();
+  const fingerprint = JSON.stringify([composerMetricsLatestTurn(state)?.id, active]);
+  if (state.fingerprint !== fingerprint) { state.fingerprint = fingerprint; state.checkedAt = 0; }
+  renderComposerMetrics();
+  clearTimeout(state.timer); state.timer = null;
+  if (!connected) { state.controller?.abort(); return; }
+  if (state.pending) return;
+  // 统计只在可见的当前会话后台读取；执行中每 2 秒、空闲每 15 秒，发送与停止均不等待统计。
+  const interval = active ? 2000 : 15000;
+  const remaining = Math.max(state.retryAt - Date.now(), state.checkedAt + interval - Date.now());
+  if (remaining > 0) {
+    state.timer = setTimeout(() => { if (composerMetricsState === state) syncComposerMetrics(); }, remaining);
+    return;
+  }
+  state.pending = true;
+  const controller = new AbortController();
+  state.controller = controller;
+  void api("/api/read/sessionMetrics", context.payload, undefined, controller.signal, { resourcePriority: "background" })
+    .then(result => {
+      if (composerMetricsState !== state || state.controller !== controller || controller.signal.aborted
+          || composerMetricsContext()?.key !== state.key
+          || result?.ok !== true || result.threadId !== context.payload.threadId || result.backend !== context.payload.backend) return;
+      const value = normalizeComposerMetrics(result.metrics);
+      // 新轮次可能先只返回累计或空统计；这时保留上一轮快照，等本轮速度、步数或 Token 实测值到达再替换。
+      if (value && (!composerMetricsHasTurn(state.value) || composerMetricsHasTurn(value))) {
+        state.value = value;
+        if (thread?.id === result.threadId) thread.sessionMetrics = value;
+        rememberThreadDisplay({ id: result.threadId, sessionMetrics: value }, { persist: !isActiveThread() });
+      }
+      state.retryAt = 0;
+    })
+    .catch(() => {
+      if (composerMetricsState === state && state.controller === controller && !controller.signal.aborted)
+        state.retryAt = Date.now() + 15000;
+    })
+    .finally(() => {
+      if (composerMetricsState !== state || state.controller !== controller) return;
+      state.checkedAt = !controller.signal.aborted && state.fingerprint === fingerprint ? Date.now() : 0;
+      state.pending = false; state.controller = null;
+      syncComposerMetrics();
+    });
 }

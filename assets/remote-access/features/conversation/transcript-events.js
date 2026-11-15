@@ -1,7 +1,8 @@
-// 会话正文事件：Claude 事件与压缩完成等正文事件的合并与刷新。
+// 会话正文事件：Claude 事件与压缩完成等正文事件的合并与刷新，以及历史条目与远程图片投影的合并。
 
 import { turns } from "../../core/state.js";
-import { completedItem, itemVersions, mergeItemProjection } from "./history.js";
+import { completedItem, itemVersions } from "./history-state.js";
+import { messageImageMediaReads } from "../messages/media-state.js";
 
 export const transcriptEvents = new Map();
 // Claude 事件行（Rust claude_tools.rs 生成）：claudeTaskNotification 为后台命令、监控事件、后台子代理通知开启的
@@ -136,4 +137,41 @@ export function enrichTurnTranscriptEvents(turn) {
 }
 export function refreshTranscriptEvents() {
   for (const [id, turn] of turns) turns.set(id, enrichTurnTranscriptEvents(turn));
+}
+
+export function mergeRemoteImageProjection(previous, snapshot, item, mediaReadVersion = 0) {
+  const prior = previous && (messageImageMediaReads.get(previous) || messageImageMediaReads.get(previous.remoteImages)),
+    retained = messageImageMediaReads.get(item) || messageImageMediaReads.get(item.remoteImages);
+  if (!prior && !retained && !(mediaReadVersion > 0 && Array.isArray(snapshot?.remoteImages))) return item;
+  const assets = new Map((item.remoteImages || []).map(asset => [asset.source, asset]));
+  if (!assets.size) return item;
+  const reads = new Map(prior || []);
+  for (const [source, read] of retained || [])
+    if (!reads.has(source) || reads.get(source).version < read.version) reads.set(source, read);
+  // 用户要求已完成正文仍可恢复图片；媒体映射独立按读取发起序号更新，旧缓存/迟到历史不能撤回新 URL。
+  // 序号只保存在 WeakMap 中，不进入会话正文缓存，页面重载后首次真实读取仍能恢复服务重启后的注册。
+  if (mediaReadVersion > 0) for (const asset of snapshot?.remoteImages || []) {
+    if (!assets.has(asset?.source) || !/^\/api\/images\/[A-Za-z0-9_-]{20,128}$/.test(asset?.url || "")
+        || (reads.get(asset.source)?.version || 0) > mediaReadVersion) continue;
+    reads.set(asset.source, { version: mediaReadVersion, asset });
+  }
+  for (const [source, read] of reads) if (assets.has(source)) assets.set(source, read.asset);
+  const images = [...assets.values()];
+  const projected = JSON.stringify(images) === JSON.stringify(item.remoteImages) ? item : { ...item, remoteImages: images };
+  if (reads.size) {
+    messageImageMediaReads.set(projected, reads);
+    // 流式正文会浅拷贝条目；共享媒体数组也保留读取序号，复制正文不能丢失图片的新旧关系。
+    messageImageMediaReads.set(projected.remoteImages, reads);
+  }
+  return projected;
+}
+export function mergeItemProjection(previous, item) {
+  // 单条状态事件也可能晚于正文到达，不能用同 ID 的 steered 把已接受的引导内容改回空状态。
+  if (previous?.id === item.id && previous.type === "userMessage" && item.type === "steered") return previous;
+  const projection = {};
+  for (const field of ["messageMetadata", "sentAtMs", "startedAtMs", "completedAtMs", "completed",
+    "remoteImages", "remoteVideos", "clientId", "remoteCompactionInput", "remoteHistoryContext", "remoteItemCompleted"])
+    if (!Object.hasOwn(item, field) && Object.hasOwn(previous || {}, field)) projection[field] = previous[field];
+  const merged = mergeRemoteImageProjection(previous, null, { ...projection, ...item });
+  return previous && JSON.stringify(previous) === JSON.stringify(merged) ? previous : merged;
 }

@@ -3,9 +3,11 @@
 import { $ } from "../../ui/dom.js";
 import { icon } from "../../ui/icons.js";
 import { activePopup, renderPopup } from "../../ui/popup.js";
-import { appearance, applyAppearance } from "../appearance/theme.js";
+import { renderSidebar } from "../../core/actions.js";
+import { applyAppearance } from "../appearance/apply.js";
+import { appearance } from "../appearance/theme.js";
 import { availableSessionInstances, conversationInstanceId, sessionInstanceEnabled } from "../session/instances.js";
-import { projectVisibleThreadCounts, renderSidebar, setRecentLimit } from "./list.js";
+import { projectVisibleThreadCounts, setRecentLimit } from "./list-state.js";
 
 export function sessionFilterValue(preferences = appearance) {
   const filter = preferences.sessionFilter;

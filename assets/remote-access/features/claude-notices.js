@@ -2,8 +2,8 @@
 
 import { button, element } from "../ui/dom.js";
 import { notice } from "../ui/notice.js";
+import { reloadThread } from "../core/actions.js";
 import { selectedId, session, thread } from "../core/state.js";
-import { reloadThread } from "./conversation/history.js";
 import { isClaude, privateInputScope } from "./session/capabilities.js";
 
 let expandedClaudeGoalNotice = "";

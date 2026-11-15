@@ -99,6 +99,59 @@ class SharedQueueHistoryTests(unittest.TestCase):
             underscored, questions, {**answers, "仅有主分支怎么办？": "featurea"}),
             "答案中的下划线不是 Markdown 标记，不能在核对时丢掉")
 
+    def test_question_review_accepts_wrapped_lines_that_start_with_native_markers(self):
+        # 版式取自 2026-11-15 原版 2.1.325（120x40）汇总页实测：长问题在竖线内折行，续行行首可能恰好是正文里的“→ ”或“● ”。
+        questions = [
+            {"question": "要做到完全无环，需要把整个网页横向重新分层为“状态 → 视图 → 编排”：搬移或反转 200 个以上的声明。你希望怎么做？",
+             "options": [{"label": "完整分层重构（推荐）"}, {"label": "暂不处理"}]},
+            {"question": "列表前缀 ● 也可能出现在续行行首，这部分现在是否提交？",
+             "options": [{"label": "现在提交（推荐）"}, {"label": "先不提交"}]},
+        ]
+        screen = ["←  ☒ 循环依赖  ☒ 提交 a  ✔ Submit  →", "", "Review your answers", "",
+                  " │ ● 要做到完全无环，需要把整个网页横向重新分层为“状态",
+                  " │   → 视图 → 编排”：搬移或反转 200 个以上的声明。你希望怎么做？",
+                  "   → 完整分层重构（推荐）",
+                  " │ ● 列表前缀",
+                  " │   ● 也可能出现在续行行首，这部分现在是否提交？",
+                  "   → 这是一段较长的自定义回答，折行后",
+                  "   ● 出现在行首也属于同一个回答",
+                  "", "Ready to submit your answers?", "", "❯ 1. Submit answers", "  2. Cancel"]
+        page = namespace["native_question_page"](screen, questions)
+        self.assertEqual(page["index"], 2)
+        matches = namespace["native_question_review_matches"]
+        answers = {questions[0]["question"]: "完整分层重构（推荐）",
+                   questions[1]["question"]: "这是一段较长的自定义回答，折行后 ● 出现在行首也属于同一个回答"}
+        self.assertTrue(matches(page["review"], questions, answers), "续行以“→ ”“● ”开头时仍按完整问题与答案核对")
+        self.assertFalse(matches(page["review"], questions, {**answers, questions[0]["question"]: "暂不处理"}))
+        self.assertFalse(matches(page["review"], questions, {**answers, questions[1]["question"]: "这是一段较长的自定义回答"}),
+                         "答案只匹配开头时不能视为一致")
+        ready = page["review"].index("Ready to submit your answers?")
+        extra = page["review"][:ready] + ["多余内容"] + page["review"][ready:]
+        self.assertFalse(matches(extra, questions, answers), "汇总里出现预期之外的内容时不提交")
+        # 原版只列出已回答的问题并提示未答完；缺项时不能把下一问的内容当成本问的回答。
+        start = page["review"].index("Review your answers")
+        missing = (page["review"][:start + 1] + ["⚠ You have not answered all questions"]
+                   + page["review"][page["review"].index("● 列表前缀"):])
+        self.assertFalse(matches(missing, questions, answers))
+
+    def test_question_page_keeps_first_option_when_wrapped_description_starts_with_number(self):
+        # 版式取自 2026-11-15 原版 2.1.325（120x40）问题页实测：选项说明在缩进内折行，续行去掉缩进后以“1. ”开头。
+        questions = [
+            {"question": "选项说明折行后行首出现编号时，问题页能否正确识别选项？",
+             "options": [{"label": "按步骤处理"}, {"label": "暂不处理"}]},
+            {"question": "第二问：是否继续？", "options": [{"label": "继续"}, {"label": "停止"}]},
+        ]
+        screen = ["←  ☐ 编号说明  ☐ 继续  ✔ Submit  →", "", "选项说明折行后行首出现编号时，问题页能否正确识别选项？", "",
+                  "❯ 1. 按步骤处理", "     1. 先整理依赖关系 1. 先整理依赖关系 1. 先整理依赖关系",
+                  "     1. 先整理依赖关系 1. 先整理依赖关系", "  2. 暂不处理", "     保持现状", "  3. Type something.",
+                  "────────────", "  4. Chat about this", "",
+                  "Enter to select · Tab/Arrow keys to navigate · Esc to cancel"]
+        page = namespace["native_question_page"](screen, questions)
+        self.assertEqual(page["index"], 0)
+        self.assertEqual(page["choices"]["按步骤处理"], "1", "说明续行不能顶替真正的选项 1")
+        self.assertEqual(page["choices"]["暂不处理"], "2")
+        self.assertEqual(page["choices"]["Type something."], "3")
+
     def test_live_question_checkbox_display_enriches_multi_select_without_changing_request_id(self):
         native = self.waiting_questions()
         native.screen = namespace["Screen"]()
@@ -1591,6 +1644,53 @@ class SharedQueueHistoryTests(unittest.TestCase):
                          {"toolUseId": "w", "success": False})
         self.assertIsNone(tool_result({**single, "toolUseResult": {"structuredPatch": [{"oldStart": True}],
                                                                     "filePath": 3}}))
+
+    def test_question_answers_forward_reply_text_and_only_own_upload_images(self):
+        # 2026-11-15 实测：提问等待时从网页输入框发出的文字和截图被原生记为 AskUserQuestion 第一题的回答，
+        # 网页须在正文看到这段回复；截图只认本用户上传目录内的直接文件，其余“@”行按原文保留。
+        folder = tempfile.TemporaryDirectory()
+        self.addCleanup(folder.cleanup)
+        root = Path(folder.name)
+        uploads = root / "remote-attachments" / "web-client"
+        other = root / "remote-attachments" / "other-client"
+        uploads.mkdir(parents=True)
+        other.mkdir()
+        (uploads / "0.jpg").write_bytes(b"\xff\xd8\xff")
+        (other / "0.png").write_bytes(b"other")
+        outside = root / "secret.png"
+        outside.write_bytes(b"secret")
+        (uploads / "1.png").symlink_to(outside)
+        questions = [{"question": "需求 b 怎么做？", "header": "需求 b", "options": [{"label": "完整分层"}]},
+                     {"question": "需求 a 现在提交吗？", "header": "需求 a", "options": [{"label": "现在提交"}]},
+                     {"question": "保留测试吗？", "header": "测试", "options": [{"label": "保留"}]}]
+        kept = [f"@{uploads / '1.png'}", f"@{other / '0.png'}", f"@{outside}"]
+        answer = "\n".join(["按截图处理", f"@{uploads / '0.jpg'}", *kept, f"@{uploads / '0.jpg'}"])
+        rows = [
+            {"type": "user", "uuid": "u", "message": {"content": "开始"}},
+            {"type": "assistant", "uuid": "a", "parentUuid": "u", "message": {"id": "m", "content": [
+                {"type": "tool_use", "id": "q1", "name": "AskUserQuestion", "input": {"questions": questions}}]}},
+            {"type": "user", "uuid": "r", "parentUuid": "a", "message": {"content": [
+                {"type": "tool_result", "tool_use_id": "q1", "content": "The user answered: ..."}]},
+             "toolUseResult": {"questions": questions, "answers": {questions[0]["question"]: answer,
+                                                                    questions[2]["question"]: "保留"}}},
+        ]
+        log = root / "native.jsonl"
+        log.write_text("".join(json.dumps(row, ensure_ascii=False) + "\n" for row in rows), encoding="utf-8")
+        native = NativeSession("unused", "test-session")
+        native.root, native.log_path = root, log
+        native.read_messages()
+        result = next(row for row in native.messages if row["uuid"] == "r")["nativeToolResult"]
+        jpeg = "data:image/jpeg;base64," + namespace["base64"].b64encode(b"\xff\xd8\xff").decode()
+        self.assertEqual(result, {"toolUseId": "q1", "questionAnswers": [
+            {"question": questions[0]["question"], "answer": "\n".join(["按截图处理", *kept]),
+             "images": [{"url": jpeg}]},
+            {"question": questions[1]["question"], "answer": None, "images": []},
+            {"question": questions[2]["question"], "answer": "保留", "images": []}]})
+        # 子代理只读视图没有配置目录：不读取任何图片，回答原文完整保留。
+        bare = namespace["native_tool_result"](rows[2])["questionAnswers"][0]
+        self.assertEqual((bare["answer"], bare["images"]), (answer, []))
+        self.assertIsNone(namespace["native_tool_result"]({**rows[2], "toolUseResult": {"questions": "坏数据",
+                                                                                        "answers": {}}}))
 
     def test_task_notifications_start_auto_turns_and_are_never_user_messages(self):
         origin = {"kind": "task-notification", "producer": "session-task"}

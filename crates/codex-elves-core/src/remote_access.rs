@@ -4696,11 +4696,31 @@ fn canonical_item_image_sources(item: &Value) -> Vec<String> {
                 sources.push(path.to_string());
             }
         }
-        _ => {}
+        _ => {
+            for image in claude_question_answer_images(item) {
+                if let Some(url) = image["url"].as_str() {
+                    sources.push(url.to_string());
+                }
+            }
+        }
     }
     let mut seen = HashSet::new();
     sources.retain(|source| seen.insert(source.clone()));
     sources
+}
+
+/// 用户要求经远程会话发出的回复在正文中可见：Claude 提问回答里的截图由连接端读成 data URL，
+/// 与用户消息图片一样登记为受鉴权的 /api/images 地址，避免每次读取历史都把原图内联发给手机。
+fn claude_question_answer_images(item: &Value) -> impl Iterator<Item = &Value> {
+    let question = item["type"] == "dynamicToolCall"
+        && item["source"] == "claude"
+        && item["tool"] == "AskUserQuestion";
+    item["questionAnswers"]
+        .as_array()
+        .filter(|_| question)
+        .into_iter()
+        .flatten()
+        .flat_map(|reply| reply["images"].as_array().into_iter().flatten())
 }
 
 fn canonical_queue_image_sources(message: &Value) -> Vec<String> {
@@ -4717,6 +4737,19 @@ fn canonical_queue_image_sources(message: &Value) -> Vec<String> {
 }
 
 fn replace_item_inline_image_sources(item: &mut Value, replacements: &HashMap<String, String>) {
+    if claude_question_answer_images(item).next().is_some() {
+        // 提问回答的截图与用户消息相同：data URL 换成 inline:<id>，网页按 remoteImages 取受鉴权地址。
+        for reply in item["questionAnswers"].as_array_mut().into_iter().flatten() {
+            for image in reply["images"].as_array_mut().into_iter().flatten() {
+                if let Some(replacement) =
+                    image["url"].as_str().and_then(|url| replacements.get(url))
+                {
+                    image["url"] = Value::String(replacement.clone());
+                }
+            }
+        }
+        return;
+    }
     if item["type"] != "userMessage" {
         return;
     }
@@ -11779,6 +11812,48 @@ readline.createInterface({input:process.stdin}).on('line',line=>{
         controller.auth.lock().await.devices.clear();
         assert_eq!(invoke(state, headers, payload).await.unwrap_err().code, 401);
         assert_eq!(native.calls.lock().await.len(), 3);
+    }
+
+    #[test]
+    fn claude_question_answer_images_use_authorized_image_urls() {
+        let directory = tempfile::tempdir().unwrap();
+        let controller = RemoteAccessController::new(directory.path().to_owned()).unwrap();
+        let mut encoded = Cursor::new(Vec::new());
+        image::RgbaImage::new(1, 1)
+            .write_to(&mut encoded, ImageFormat::Png)
+            .unwrap();
+        let data_url = format!(
+            "data:image/png;base64,{}",
+            STANDARD.encode(encoded.get_ref())
+        );
+        let question = |tool: &str| {
+            json!({"scope":"items","data":[{"id":"q1","type":"dynamicToolCall","source":"claude",
+                "tool":tool,"status":"completed","questionAnswers":[
+                    {"question":"第一题？","answer":"按截图处理","images":[{"url":data_url}]},
+                    {"question":"第二题？","answer":null,"images":[]}]}]})
+        };
+        let mut history = question("AskUserQuestion");
+        controller.attach_history_images(&mut history);
+        let item = &history["data"][0];
+        let source = item["questionAnswers"][0]["images"][0]["url"]
+            .as_str()
+            .unwrap();
+        assert!(source.starts_with("inline:"), "原图 data URL 不随条目下发");
+        assert_eq!(item["remoteImages"][0]["source"], source);
+        assert!(
+            item["remoteImages"][0]["url"]
+                .as_str()
+                .unwrap()
+                .starts_with("/api/images/")
+        );
+        // 只有 Claude 提问条目登记回答截图；其他工具的同名字段保持原样。
+        let mut other = question("Read");
+        controller.attach_history_images(&mut other);
+        assert!(other["data"][0]["remoteImages"].is_null());
+        assert_eq!(
+            other["data"][0]["questionAnswers"][0]["images"][0]["url"],
+            data_url
+        );
     }
 
     #[test]

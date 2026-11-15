@@ -4,7 +4,8 @@ import { element } from "../../ui/dom.js";
 import { notice } from "../../ui/notice.js";
 import { selectedId } from "../../core/state.js";
 import { subagentsEnabled, validRelatedThreadId } from "../session/capabilities.js";
-import { openRelatedThread, relatedSessionView } from "../session/related.js";
+import { relatedSessionView } from "../session/related-state.js";
+import { openRelatedThread } from "../session/related.js";
 
 export function isSubagentItem(item) {
   return ["sub_agent_activity", "collab_agent_tool_call", "multi_agent_action"].includes(subagentToken(item.type));

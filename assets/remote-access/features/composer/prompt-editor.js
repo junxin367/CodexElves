@@ -1,16 +1,8 @@
-// 消息输入编辑器：Skill/目标标记、选区与纯文本换算、撤销历史、输入框尺寸与滚动折叠。
+// 消息输入编辑器：Skill/目标标记、选区与纯文本换算、输入框尺寸；撤销历史与输入框装配在 prompt-edit-history.js，输入区滚动挂载在 composer.js。
 
 import { $, element } from "../../ui/dom.js";
-import { activePopup } from "../../ui/popup.js";
-import { creating, selectedId, session } from "../../core/state.js";
-import { randomId } from "../../core/util.js";
-import { draftKey } from "./drafts.js";
-import { goalComposerIcon, handlePromptInput, selectedSkills, setSelectedSkills } from "./skills.js";
-import { setFollowMessages } from "../conversation/history-view.js";
-import { selectedGoal, setSelectedGoal } from "../goal/composer.js";
-import { editingMessage } from "../messages/message-edit.js";
-import { editingQueuedMessage } from "../queue/queued-edit.js";
-import { privateInputScope } from "../session/capabilities.js";
+import { goalComposerIcon, selectedSkills, setSelectedSkills } from "./skill-catalog.js";
+import { selectedGoal, setSelectedGoal } from "../goal/state.js";
 
 export const effortLabels = { none: "无", minimal: "最低", low: "轻度", medium: "中", high: "高", xhigh: "极高", max: "Max", ultra: "Ultra" };
 export const skillIdentity = skill => `${skill.name}\0${skill.path}`;
@@ -60,7 +52,7 @@ export function promptDomText(prompt) {
   for (const child of prompt.childNodes) visit(child);
   return text;
 }
-function promptPlainText(prompt = $("#prompt")) {
+export function promptPlainText(prompt = $("#prompt")) {
   if (!prompt) return "";
   return promptCanonicalText.has(prompt) ? promptCanonicalText.get(prompt) : promptDomText(prompt);
 }
@@ -265,7 +257,7 @@ export function syncSelectedSkillsFromPrompt(prompt = $("#prompt")) {
   }
   setSelectedSkills(next);
 }
-function replacePromptRange(prompt, replacement, start, end, selectionMode = "preserve") {
+export function replacePromptRange(prompt, replacement, start, end, selectionMode = "preserve") {
   prompt.editHistory?.begin("replace");
   const text = promptPlainText(prompt), selection = promptSelection(prompt);
   const first = Math.min(Math.max(0, start), text.length), last = Math.min(Math.max(first, end), text.length);
@@ -298,144 +290,6 @@ function replacePromptRange(prompt, replacement, start, end, selectionMode = "pr
           };
   setPromptSelection(prompt, next.start, next.end);
 }
-function createPromptEditHistory(prompt, getScope, now = () => Date.now()) {
-  // 用户要求 Ctrl+Z 撤销编辑内容：DOM 重绘不能依赖浏览器原生历史；只记录文字、Skill、目标与光标，不回滚附件或已发送消息。
-  // 每个草稿独立保留最多 100 次编辑、约 4MiB 快照；连续输入在 1 秒内合并，粘贴、换行、选区替换与输入法提交各自独立。
-  const entries = [], limit = 100, memoryLimit = 4 * 1024 * 1024;
-  let owner = getScope(), index = 0, current = null, pending = null, scheduled = false;
-  let composing = false, applying = false, generation = 0, bytes = 0, canGroup = false;
-  const capture = () => {
-    const selection = promptSelection(prompt);
-    const skills = selectedSkills.map(skill => ({ ...skill }));
-    return {
-      text: promptPlainText(prompt), skills, goalMode: !!selectedGoal,
-      signature: JSON.stringify([skills.map(skill => [skillIdentity(skill), skill._offset ?? 0]), !!selectedGoal]),
-      selection: { ...selection, startTokens: new Set(selection.startTokens || []), endTokens: new Set(selection.endTokens || []) },
-      scrollTop: prompt.scrollTop || 0, scrollLeft: prompt.scrollLeft || 0
-    };
-  };
-  const same = (left, right) => left.text === right.text && left.signature === right.signature;
-  const caret = selection => JSON.stringify([selection.start, selection.end,
-    [...selection.startTokens].sort(), [...selection.endTokens].sort()]);
-  const size = snapshot => snapshot.text.length * 2 + JSON.stringify(snapshot.skills).length * 2 + 128;
-  function reset() {
-    entries.length = 0; index = 0; current = pending = null; bytes = 0;
-    composing = applying = scheduled = canGroup = false; ++generation; owner = getScope();
-  }
-  function ensureScope() {
-    if (owner !== getScope()) reset();
-  }
-  function commit() {
-    ensureScope(); scheduled = false;
-    if (applying || composing) return;
-    const after = capture(), before = pending?.before || current, type = pending?.type || "replace";
-    pending = null;
-    if (!before || same(before, after)) { current = after; return; }
-    const previous = entries[index - 1], time = now(), hasRedo = index < entries.length;
-    const grouped = canGroup && !hasRedo && previous && previous.type === type
-      && ["insertText", "deleteContentBackward", "deleteContentForward"].includes(type)
-      && time - previous.time <= 1000 && before.selection.start === before.selection.end
-      && same(previous.after, before) && caret(previous.after.selection) === caret(before.selection);
-    if (hasRedo) {
-      for (const entry of entries.splice(index)) bytes -= entry.bytes;
-    }
-    if (grouped) {
-      bytes -= previous.bytes; previous.after = after; previous.time = time;
-      previous.bytes = size(previous.before) + size(after); bytes += previous.bytes;
-    } else {
-      const entry = { before, after, type, time, bytes: size(before) + size(after) };
-      entries.push(entry); bytes += entry.bytes; ++index;
-    }
-    while (entries.length > 1 && (entries.length > limit || bytes > memoryLimit)) {
-      bytes -= entries.shift().bytes; --index;
-    }
-    current = after; canGroup = true;
-  }
-  function begin(type = "replace", scheduleCommit = true) {
-    ensureScope();
-    if (applying) return;
-    if (!pending) {
-      const actual = capture();
-      pending = { before: current && !same(current, actual) ? current : actual, type: composing ? "composition" : type };
-    }
-    if (type === "token") pending.type = type;
-    // beforeinput 与浏览器实际改写 DOM 之间可能执行微任务，原生输入必须等 input 后再提交。
-    if (!scheduleCommit || scheduled) return;
-    scheduled = true;
-    const version = generation;
-    queueMicrotask(() => { if (version === generation) commit(); });
-  }
-  function step(direction) {
-    ensureScope();
-    if (applying || composing || prompt.disabled) return false;
-    commit();
-    const entry = direction < 0 ? entries[index - 1] : entries[index];
-    if (!entry) return false;
-    const snapshot = direction < 0 ? entry.before : entry.after;
-    index += direction;
-    applying = true; pending = null; scheduled = false; canGroup = false; ++generation;
-    try {
-      setSelectedSkills(snapshot.skills.map(skill => ({ ...skill })));
-      // 恢复目标标签时使用当前/新草稿标识，不复活旧请求的目标标识而让迟到回执清空新输入。
-      setSelectedGoal(snapshot.goalMode ? selectedGoal || randomId() : null);
-      writePromptContent(prompt, snapshot.text);
-      prompt.focus({ preventScroll: true });
-      setPromptSelection(prompt, snapshot.selection.start, snapshot.selection.end, snapshot.selection);
-      prompt.scrollTop = snapshot.scrollTop; prompt.scrollLeft = snapshot.scrollLeft;
-      handlePromptInput({ inputType: direction < 0 ? "historyUndo" : "historyRedo" }, { preserveCanonical: true });
-      current = capture();
-    } finally { applying = false; }
-    return true;
-  }
-  return {
-    begin, commit, reset, undo: () => step(-1), redo: () => step(1),
-    startComposition() { commit(); begin("composition", false); composing = true; },
-    endComposition() { composing = false; },
-    get composing() { return composing; }
-  };
-}
-export function configurePromptEditor(prompt) {
-  Object.defineProperties(prompt, {
-    value: {
-      configurable: true,
-      get: () => promptPlainText(prompt),
-      set: value => {
-        setSelectedGoal(null);
-        writePromptContent(prompt, String(value ?? ""), [], false);
-        // 载入其他草稿或发送后清空均建立新基线，不能用撤销找回上一会话或已发送的内容。
-        prompt.editHistory?.reset();
-      }
-    },
-    selectionStart: { configurable: true, get: () => promptSelection(prompt).start },
-    selectionEnd: { configurable: true, get: () => promptSelection(prompt).end },
-    placeholder: {
-      configurable: true,
-      get: () => prompt.dataset.placeholder || "",
-      set: value => {
-        prompt.dataset.placeholder = String(value ?? "");
-        prompt.setAttribute("aria-placeholder", prompt.dataset.placeholder);
-      }
-    },
-    disabled: {
-      configurable: true,
-      get: () => prompt.getAttribute("contenteditable") !== "true",
-      set: value => {
-        const disabled = !!value;
-        prompt.setAttribute("contenteditable", String(!disabled));
-        prompt.setAttribute("aria-disabled", String(disabled));
-        prompt.tabIndex = disabled ? -1 : 0;
-        if (disabled && document.activeElement === prompt) prompt.blur();
-      }
-    }
-  });
-  prompt.setRangeText = (replacement, start = prompt.selectionStart, end = prompt.selectionEnd, mode = "preserve") =>
-    replacePromptRange(prompt, replacement, start, end, mode);
-  prompt.editHistory = createPromptEditHistory(prompt, () => JSON.stringify([
-    privateInputScope(session), draftKey(), editingQueuedMessage?.editId || null
-  ]));
-  prompt.placeholder = prompt.dataset.placeholder;
-  prompt.disabled = false;
-}
 export function composerPrompt(text = $("#prompt")?.value || "", skills = selectedSkills, goalMode = false) {
   const body = String(text ?? "");
   // 每个内联 Skill 对应一个标记，正文中手写的同名标记仍保留原位。
@@ -464,77 +318,4 @@ export function resizeEditorInput(input) {
 }
 export function resizeComposerInput() {
   resizeEditorInput($("#prompt"));
-}
-export function mountComposerScroll() {
-  const form = $("#composer"), input = $(".composer-input", form), messages = $("#messages");
-  const mobile = matchMedia("(max-width: 760px)");
-  let reveal = 1, touch = null;
-  const setReveal = value => {
-    reveal = Math.max(0, Math.min(1, value));
-    if (reveal === 1) input.style.removeProperty("--composer-rows");
-    else input.style.setProperty("--composer-rows", `${reveal}fr`);
-    input.style.setProperty("--composer-reveal", String(reveal));
-    form.style.setProperty("--composer-toolbar-gap", `${Math.round(6 * reveal)}px`);
-    input.style.pointerEvents = reveal === 0 ? "none" : "";
-  };
-  const expand = () => setReveal(1);
-  const scroll = (delta, target) => {
-    if (!mobile.matches || !delta || !selectedId || creating || editingMessage || editingQueuedMessage
-        || document.activeElement === $("#prompt") || !$("#skill-menu").hidden || !$("#model-settings").hidden
-        || activePopup || document.querySelector("dialog[open]") || $(".workspace").classList.contains("sidebar-open")) return;
-    for (let node = target instanceof Element ? target : target.parentElement; node && node !== messages; node = node.parentElement) {
-      if (node.scrollHeight > node.clientHeight + 1 && /auto|scroll/.test(getComputedStyle(node).overflowY)
-          && (delta < 0 ? node.scrollTop > 0 : node.scrollTop + node.clientHeight < node.scrollHeight - 1)) return;
-    }
-    if (delta < 0) {
-      if (messages.scrollTop <= 0 || messages.scrollHeight <= messages.clientHeight + 1) return;
-      setFollowMessages(false);
-    }
-    const distance = Math.max(160, input.firstElementChild.scrollHeight * 2);
-    setReveal(reveal + delta / distance);
-  };
-  const onWheel = event => {
-    if (event.ctrlKey || event.defaultPrevented || Math.abs(event.deltaX) > Math.abs(event.deltaY)) return;
-    const unit = event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? messages.clientHeight : 1;
-    scroll(event.deltaY * unit, event.target);
-  };
-  const onTouchStart = event => {
-    touch = event.touches.length === 1 ? { x: event.touches[0].clientX, y: event.touches[0].clientY } : null;
-  };
-  const onTouchMove = event => {
-    const previous = touch;
-    onTouchStart(event);
-    if (!previous || !touch || event.defaultPrevented) return;
-    const delta = previous.y - touch.y;
-    if (Math.abs(delta) >= Math.abs(previous.x - touch.x)) scroll(delta, event.target);
-  };
-  const onTouchEnd = () => { touch = null; };
-  const onFormClick = event => {
-    if (reveal < 1 && event.target === form) {
-      expand(); $("#prompt").focus({ preventScroll: true });
-    }
-  };
-  const onMediaChange = () => { touch = null; expand(); resizeComposerInput(); };
-  messages.addEventListener("wheel", onWheel, { passive: true });
-  messages.addEventListener("touchstart", onTouchStart, { passive: true });
-  messages.addEventListener("touchmove", onTouchMove, { passive: true });
-  messages.addEventListener("touchend", onTouchEnd, { passive: true });
-  messages.addEventListener("touchcancel", onTouchEnd, { passive: true });
-  form.addEventListener("focusin", expand);
-  form.addEventListener("click", onFormClick);
-  mobile.addEventListener("change", onMediaChange);
-  return {
-    expand,
-    get collapsed() { return mobile.matches && reveal < 1; },
-    dispose() {
-      messages.removeEventListener("wheel", onWheel);
-      messages.removeEventListener("touchstart", onTouchStart);
-      messages.removeEventListener("touchmove", onTouchMove);
-      messages.removeEventListener("touchend", onTouchEnd);
-      messages.removeEventListener("touchcancel", onTouchEnd);
-      form.removeEventListener("focusin", expand);
-      form.removeEventListener("click", onFormClick);
-      mobile.removeEventListener("change", onMediaChange);
-    }
-  };
 }

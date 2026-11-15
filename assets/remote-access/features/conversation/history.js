@@ -1,74 +1,59 @@
-// 历史读取：分页读取、Claude 历史排序、增量合并与重新读取会话。
+// 历史读取：分页读取、Claude 历史排序、增量合并、重新读取会话，以及历史加载占位与调度；读取进度与正文视图状态在 history-state.js。
 
 import { recordDiagnostic } from "../../diagnostics.js";
-import { $ } from "../../ui/dom.js";
+import { $, button, element } from "../../ui/dom.js";
 import { notice } from "../../ui/notice.js";
+import { renderApprovals, renderMessages, updateComposer } from "../../core/actions.js";
 import {
-  pageLeaving, selectedId, selectionVersion, setThread, setTurns, sidebar, thread, turns
+  pageLeaving, selectedId, selectionVersion, session, setSelectionVersion, setThread, setTurns,
+  sidebar, thread, turns
 } from "../../core/state.js";
+import { transcriptCache } from "../../core/stores.js";
 import { api } from "../api.js";
-import {
-  blockingRequestState, mergeBlockingRequestsRead, notifiedQuestions, questionVersion,
-  renderApprovals, replaceAsyncQuestions
-} from "../approvals.js";
+import { mergeBlockingRequestsRead } from "../approval-requests.js";
+import { blockingRequestState, notifiedQuestions, questionVersion, replaceAsyncQuestions } from "../approval-state.js";
 import { renderModelMenu } from "../composer/composer-menus.js";
-import { updateComposer } from "../composer/composer.js";
-import { fastModeVersion, reconcileRemoteFastPreference } from "../composer/models.js";
+import { reconcileRemoteFastPreference } from "../composer/model-catalog.js";
+import { fastModeVersion } from "../composer/options-state.js";
 import { compactionVersion, currentCompaction, normalizeCompaction, reconcileCompaction } from "./compaction.js";
-import { notifiedStatus, notifiedTokenUsage, statusVersion, tokenUsageVersion } from "./events.js";
-import { rememberTranscript, renderMessages, setRecentHistoryPage, syncHistoryButtons } from "./history-view.js";
-import { setThreadReadFailed, setThreadReadVersion, syncThreadHash, threadReadVersion } from "./selection.js";
+import { notifiedStatus, notifiedTokenUsage, statusVersion, tokenUsageVersion } from "./event-sync.js";
 import {
-  enrichTurnTranscriptEvents, mergeTranscriptEvents, refreshTranscriptEvents,
-  replaceTranscriptEvents, transcriptEvents
+  claudeHistoryCursor, completedItem, historyAutoFailed, historyController, historyCursor,
+  historyError, historyInitialized, historyLoadFrame, historyLoadVisibleItems, historyLoading,
+  historyRequest, itemVersions, mergeLiveText, messageVersion, normalizeDisplayedTurnItems,
+  orderClaudeHistoryTurns, partialItems, setHistoryAutoFailed, setHistoryController,
+  setHistoryCursor, setHistoryError, setHistoryInitialized, setHistoryLoadFrame,
+  setHistoryLoadVisibleItems, setHistoryLoading, setHistoryLoadingOlder, setHistoryLoadingTurnId,
+  setHistoryLoadingVersion, setHistoryRequest, setLatestHistoryReadFailed, setMessageVersion,
+  setRecentHistoryPage, setThreadRequest, setTranscriptChecking, syncHistoryButtons, threadRequest,
+  transcriptChecking, turnFieldVersions, turnVersions
+} from "./history-state.js";
+import { setThreadReadFailed, setThreadReadVersion, syncThreadHash, threadReadVersion } from "./selection-state.js";
+import {
+  enrichTurnTranscriptEvents, mergeItemProjection, mergeRemoteImageProjection,
+  mergeTranscriptEvents, refreshTranscriptEvents, replaceTranscriptEvents, transcriptEvents
 } from "./transcript-events.js";
-import { goalVersion, notifiedGoal } from "../goal/status.js";
-import { messageImageMediaReads, messageImageReadSequence, setMessageImageReadSequence } from "../messages/media.js";
+import { rememberTranscript, resetMessages } from "./transcript.js";
+import { goalVersion, notifiedGoal } from "../goal/state.js";
+import { messageImageReadSequence, setMessageImageReadSequence } from "../messages/media-state.js";
 import { markVisibleThreadRead } from "../messages/user-content.js";
-import { applyQueueRead, notifiedQueue, notifiedQueueEdits, queueVersion } from "../queue/queue.js";
-import { syncEditableMessageMetadata } from "../queue/queued-edit.js";
-import { claudeThreadId, normalizeRelatedView, threadLocation } from "../session/capabilities.js";
+import { applyQueueRead } from "../queue/queue.js";
+import { notifiedQueue, notifiedQueueEdits, queueVersion, syncEditableMessageMetadata } from "../queue/state.js";
+import { claudeThreadId, normalizeRelatedView } from "../session/capabilities.js";
 import {
   foregroundReadGeneration, recoveryErrorSilenceDepth, refreshTimer, setRefreshTimer
-} from "../session/lifecycle.js";
+} from "../session/connection-state.js";
+import { threadLocation } from "../session/instances.js";
+import { relatedSessionView, relatedThreadViews, setRelatedSessionView } from "../session/related-state.js";
 import {
-  applyRelatedThreadMetadata, clearMissingThreadSelection, isMissingThreadError,
-  relatedSessionView, relatedThreadViews, setRelatedSessionView, sideThreadExpired
+  applyRelatedThreadMetadata, clearMissingThreadSelection, isMissingThreadError, sideThreadExpired
 } from "../session/related.js";
 import {
-  discardPersistentThreadDisplay, rememberThreadDisplay, retireMissingEphemeralTranscript,
-  threadEphemeralState
+  discardPersistentThreadDisplay, threadDisplayKey, threadDisplays, threadEphemeralState
 } from "../session/thread-cache.js";
-import { threadDeleted } from "../sidebar/actions.js";
+import { rememberThreadDisplay } from "../session/thread-display.js";
+import { threadDeleted } from "../sidebar/deletion-state.js";
 
-export let historyCursor = null, historyLoading = false;
-export function setHistoryCursor(value) { return historyCursor = value; }
-export function setHistoryLoading(value) { return historyLoading = value; }
-export let historyLoadingVersion = -1;
-export function setHistoryLoadingVersion(value) { return historyLoadingVersion = value; }
-export let historyInitialized = false;
-export function setHistoryInitialized(value) { return historyInitialized = value; }
-export let historyError = "", historyController = null, historyLoadingTurnId = null;
-export function setHistoryError(value) { return historyError = value; }
-export function setHistoryController(value) { return historyController = value; }
-export function setHistoryLoadingTurnId(value) { return historyLoadingTurnId = value; }
-export let latestHistoryReadFailed = false;
-export function setLatestHistoryReadFailed(value) { return latestHistoryReadFailed = value; }
-export let historyLoadingOlder = false;
-export function setHistoryLoadingOlder(value) { return historyLoadingOlder = value; }
-export let historyAutoFailed = false;
-export function setHistoryAutoFailed(value) { return historyAutoFailed = value; }
-export let transcriptChecking = false;
-export function setTranscriptChecking(value) { return transcriptChecking = value; }
-export let messageVersion = 0;
-export function setMessageVersion(value) { return messageVersion = value; }
-let claudeHistoryOrder = null;
-export let threadRequest = null, historyRequest = null;
-export function setThreadRequest(value) { return threadRequest = value; }
-export function setHistoryRequest(value) { return historyRequest = value; }
-export const itemVersions = new Map(), turnVersions = new Map();
-export const turnFieldVersions = new Map();
-export const partialItems = new Set();
 export async function loadHistory(older = false, version = selectionVersion, itemsTurnId = null) {
   if (pageLeaving || document.hidden || version !== selectionVersion || !selectedId || threadDeleted(selectedId)) return;
   const generation = foregroundReadGeneration;
@@ -86,9 +71,9 @@ export async function loadHistory(older = false, version = selectionVersion, ite
       older = false; itemsTurnId = null;
     } while (request.latestPending && generation === foregroundReadGeneration && version === selectionVersion && selectedId === id);
   });
-  historyRequest = request;
+  setHistoryRequest(request);
   try { await request.promise; }
-  finally { if (historyRequest === request) historyRequest = null; }
+  finally { if (historyRequest === request) setHistoryRequest(null); }
 }
 async function readHistoryPage(older, version, itemsTurnId, generation = foregroundReadGeneration) {
   if (pageLeaving || document.hidden || generation !== foregroundReadGeneration
@@ -96,10 +81,10 @@ async function readHistoryPage(older, version, itemsTurnId, generation = foregro
   // 执行过期不等于历史不可读取；仍从后台补齐最终回复和分页内容，不恢复发送能力。
   const itemTurn = itemsTurnId ? turns.get(itemsTurnId) : null;
   if ((itemsTurnId && !itemTurn?.itemsNextCursor) || (older && !itemsTurnId && !historyCursor)) return;
-  historyLoading = true; historyLoadingVersion = version;
+  setHistoryLoading(true); setHistoryLoadingVersion(version);
   const latestPage = !older && !itemsTurnId;
-  historyLoadingTurnId = itemsTurnId; historyLoadingOlder = older; historyAutoFailed = false;
-  if (latestPage) historyError = "";
+  setHistoryLoadingTurnId(itemsTurnId); setHistoryLoadingOlder(older); setHistoryAutoFailed(false);
+  if (latestPage) setHistoryError("");
   syncHistoryButtons();
   if (!historyInitialized) renderMessages();
   const id = selectedId, readVersion = messageVersion, checkingCached = transcriptChecking && latestPage,
@@ -108,7 +93,7 @@ async function readHistoryPage(older, version, itemsTurnId, generation = foregro
   const controller = new AbortController();
   const historyStartedAt = performance.now();
   recordDiagnostic("remote.history", { phase: "request" });
-  historyController = controller;
+  setHistoryController(controller);
   const cursorAnchor = itemTurn?.itemsCursorAnchor || itemTurn?.items?.[0]?.id;
   try {
     const payload = itemsTurnId ? {
@@ -154,7 +139,7 @@ async function readHistoryPage(older, version, itemsTurnId, generation = foregro
         : typeof threadEphemeralState(id) === "boolean" ? { ephemeral: threadEphemeralState(id) } : {}),
       ...(result.sideHistoryVersion === 1 ? { sideHistoryVersion: 1 } : {})
     });
-    if (checkingCached && !pruneCachedHistory(result.data, readVersion)) historyCursor = result.nextCursor;
+    if (checkingCached && !pruneCachedHistory(result.data, readVersion)) setHistoryCursor(result.nextCursor);
     mergeTranscriptEvents(result.transcriptEvents);
     if (itemsTurnId) {
       const merged = mergeHistoryTurn({
@@ -178,15 +163,15 @@ async function readHistoryPage(older, version, itemsTurnId, generation = foregro
         const later = known.filter(turn => !pageIds.has(turn.id) && !earlierIds.has(turn.id));
         setTurns(new Map([...earlier, ...chronological, ...later].map(turn => [turn.id, turn])));
       }
-      if (older || !historyInitialized) historyCursor = result.nextCursor;
+      if (older || !historyInitialized) setHistoryCursor(result.nextCursor);
     }
     if (!itemsTurnId && claudeThreadId(id)) {
       const order = orderClaudeHistoryTurns(result.turnIds, readVersion);
       const cursor = claudeHistoryCursor(order);
-      if (cursor !== undefined) historyCursor = cursor;
+      if (cursor !== undefined) setHistoryCursor(cursor);
     }
-    historyInitialized = true;
-    if (latestPage) { transcriptChecking = false; latestHistoryReadFailed = false; }
+    setHistoryInitialized(true);
+    if (latestPage) { setTranscriptChecking(false); setLatestHistoryReadFailed(false); }
     syncEditableMessageMetadata();
     renderMessages(!older);
     recordDiagnostic("remote.history", {
@@ -209,18 +194,18 @@ async function readHistoryPage(older, version, itemsTurnId, generation = foregro
       return;
     }
     if (!itemsTurnId && error.code === 404) retireMissingEphemeralTranscript(id, error);
-    if (latestPage) latestHistoryReadFailed = true;
+    if (latestPage) setLatestHistoryReadFailed(true);
     if (recoveryErrorSilenceDepth) {
-      historyAutoFailed = false;
+      setHistoryAutoFailed(false);
       return;
     }
-    historyAutoFailed = true;
+    setHistoryAutoFailed(true);
     if (!historyInitialized) {
-      historyError = `最新消息加载失败：${error.message}`;
+      setHistoryError(`最新消息加载失败：${error.message}`);
       renderMessages();
     } else {
       if (latestPage) {
-        historyError = `最新消息加载失败：${error.message}`;
+        setHistoryError(`最新消息加载失败：${error.message}`);
         renderMessages();
       }
       notice(error.message, true);
@@ -228,7 +213,7 @@ async function readHistoryPage(older, version, itemsTurnId, generation = foregro
   }
   finally {
     if (historyController === controller) {
-      historyController = null; historyLoading = false; historyLoadingTurnId = null; historyLoadingOlder = false;
+      setHistoryController(null); setHistoryLoading(false); setHistoryLoadingTurnId(null); setHistoryLoadingOlder(false);
       syncHistoryButtons();
     }
   }
@@ -246,32 +231,8 @@ export function retireClaudeHistoryTurns(ids, readVersion, version) {
     }
     for (const [eventId, event] of transcriptEvents) if (event.turnId === key) transcriptEvents.delete(eventId);
   }
-  if (changed) messageVersion = Math.max(messageVersion, version);
+  if (changed) setMessageVersion(Math.max(messageVersion, version));
   return changed;
-}
-export function orderClaudeHistoryTurns(ids, readVersion = messageVersion) {
-  const sameSelection = claudeHistoryOrder?.threadId === selectedId
-    && claudeHistoryOrder.selectionVersion === selectionVersion;
-  // 用户要求长历史与实时消息保持原生顺序；较早 HTTP 回包不能撤回新通知给出的顺序。
-  if (Array.isArray(ids) && (!sameSelection || readVersion >= claudeHistoryOrder.version)) {
-    claudeHistoryOrder = { threadId: selectedId, selectionVersion, version: readVersion, ids: [...ids] };
-  } else if (!sameSelection) return ids;
-  const order = claudeHistoryOrder.ids, known = new Set(order);
-  const entries = order.filter(id => turns.has(id)).map(id => [id, turns.get(id)]);
-  // 原生列表尚未包含的实时输入或本地预览继续保留，不能把补历史等同删除。
-  entries.push(...[...turns].filter(([id]) => !known.has(id)));
-  turns.clear();
-  for (const [id, turn] of entries) turns.set(id, turn);
-  return order;
-}
-export function claudeHistoryCursor(ids) {
-  if (!Array.isArray(ids)) return undefined;
-  if (!ids.length) return null;
-  if (!ids.some(id => turns.has(id))) return undefined;
-  // 从最新轮次向前寻找连续已加载区间；零散旧缓存不能让中间未读取的轮次被跳过。
-  let first = ids.length;
-  while (first > 0 && turns.has(ids[first - 1])) --first;
-  return first === 0 ? null : String(first);
 }
 function pruneCachedHistory(snapshots, readVersion) {
   const ids = new Set(snapshots.map(turn => turn.id)), known = [...turns.values()];
@@ -297,95 +258,6 @@ function pruneCachedHistory(snapshots, readVersion) {
     turns.set(current.id, { ...current, items });
   }
   return earlier.length > 0;
-}
-function mergeLiveText(snapshot, live, partial = false, newer = true) {
-  snapshot = String(snapshot || ""); live = String(live || "");
-  if (!live || snapshot.startsWith(live) || (partial && snapshot.includes(live))) return snapshot;
-  if (!snapshot || live.startsWith(snapshot)) return live;
-  if (!newer) return snapshot;
-  if (!partial) return live;
-  const prefix = new Uint32Array(live.length);
-  for (let index = 1, matched = 0; index < live.length; index++) {
-    while (matched && live[index] !== live[matched]) matched = prefix[matched - 1];
-    if (live[index] === live[matched]) matched++;
-    prefix[index] = matched;
-  }
-  let overlap = 0;
-  for (const character of snapshot.slice(-live.length).split("")) {
-    while (overlap && (overlap === live.length || character !== live[overlap])) overlap = prefix[overlap - 1];
-    if (character === live[overlap]) overlap++;
-  }
-  // 此处仅处理读取开始后收到的未知开头增量；即使零重叠，也要保留历史前缀。
-  return snapshot + live.slice(overlap);
-}
-export function normalizeDisplayedUserMessage(item) {
-  if (!item || item.type !== "steeringUserMessage"
-      || item.status !== "accepted" && typeof item.serverUserMessageId !== "string") return item;
-  const id = typeof item.serverUserMessageId === "string" && item.serverUserMessageId
-    ? item.serverUserMessageId : item.id;
-  if (typeof id !== "string" || !id) return item;
-  const content = Array.isArray(item.input) ? item.input
-    : Array.isArray(item.content) ? item.content : [];
-  return {
-    ...item,
-    type: "userMessage",
-    id,
-    ...(typeof (item.clientUserMessageId ?? item.clientId) === "string"
-      ? { clientId: item.clientUserMessageId ?? item.clientId } : {}),
-    content
-  };
-}
-export function normalizeDisplayedTurnItems(items) {
-  const byId = new Map();
-  for (const source of items) {
-    const item = normalizeDisplayedUserMessage(source);
-    // 原生正文和 steered 确认共用消息 ID；分页、实时轮次与重进缓存必须一致保留一份正文。
-    if (byId.get(item.id)?.type === "userMessage" && item.type === "steered") continue;
-    byId.set(item.id, item);
-  }
-  return [...byId.values()];
-}
-export function completedItem(item) {
-  // 普通消息的 completed 可能仅为原生展示推导，不能证明这份正文已经定稿。
-  return item?.remoteItemCompleted === true || Number.isFinite(item?.completedAtMs)
-    || item?.type === "contextCompaction" && item.completed === true
-    || ["completed", "failed", "interrupted"].includes(item?.status);
-}
-export function mergeRemoteImageProjection(previous, snapshot, item, mediaReadVersion = 0) {
-  const prior = previous && (messageImageMediaReads.get(previous) || messageImageMediaReads.get(previous.remoteImages)),
-    retained = messageImageMediaReads.get(item) || messageImageMediaReads.get(item.remoteImages);
-  if (!prior && !retained && !(mediaReadVersion > 0 && Array.isArray(snapshot?.remoteImages))) return item;
-  const assets = new Map((item.remoteImages || []).map(asset => [asset.source, asset]));
-  if (!assets.size) return item;
-  const reads = new Map(prior || []);
-  for (const [source, read] of retained || [])
-    if (!reads.has(source) || reads.get(source).version < read.version) reads.set(source, read);
-  // 用户要求已完成正文仍可恢复图片；媒体映射独立按读取发起序号更新，旧缓存/迟到历史不能撤回新 URL。
-  // 序号只保存在 WeakMap 中，不进入会话正文缓存，页面重载后首次真实读取仍能恢复服务重启后的注册。
-  if (mediaReadVersion > 0) for (const asset of snapshot?.remoteImages || []) {
-    if (!assets.has(asset?.source) || !/^\/api\/images\/[A-Za-z0-9_-]{20,128}$/.test(asset?.url || "")
-        || (reads.get(asset.source)?.version || 0) > mediaReadVersion) continue;
-    reads.set(asset.source, { version: mediaReadVersion, asset });
-  }
-  for (const [source, read] of reads) if (assets.has(source)) assets.set(source, read.asset);
-  const images = [...assets.values()];
-  const projected = JSON.stringify(images) === JSON.stringify(item.remoteImages) ? item : { ...item, remoteImages: images };
-  if (reads.size) {
-    messageImageMediaReads.set(projected, reads);
-    // 流式正文会浅拷贝条目；共享媒体数组也保留读取序号，复制正文不能丢失图片的新旧关系。
-    messageImageMediaReads.set(projected.remoteImages, reads);
-  }
-  return projected;
-}
-export function mergeItemProjection(previous, item) {
-  // 单条状态事件也可能晚于正文到达，不能用同 ID 的 steered 把已接受的引导内容改回空状态。
-  if (previous?.id === item.id && previous.type === "userMessage" && item.type === "steered") return previous;
-  const projection = {};
-  for (const field of ["messageMetadata", "sentAtMs", "startedAtMs", "completedAtMs", "completed",
-    "remoteImages", "remoteVideos", "clientId", "remoteCompactionInput", "remoteHistoryContext", "remoteItemCompleted"])
-    if (!Object.hasOwn(item, field) && Object.hasOwn(previous || {}, field)) projection[field] = previous[field];
-  const merged = mergeRemoteImageProjection(previous, null, { ...projection, ...item });
-  return previous && JSON.stringify(previous) === JSON.stringify(merged) ? previous : merged;
 }
 function mergeHistoryTurn(snapshot, readVersion, { older = false, beforeId = null, cached = false, mediaReadVersion = 0 } = {}) {
   if (Array.isArray(snapshot?.items)) {
@@ -599,7 +471,61 @@ export async function reloadThread() {
       await historyRead;
     } while (request.again && generation === foregroundReadGeneration && version === selectionVersion && selectedId === id);
   })();
-  threadRequest = request;
+  setThreadRequest(request);
   try { await request.promise; }
-  finally { if (threadRequest === request) threadRequest = null; }
+  finally { if (threadRequest === request) setThreadRequest(null); }
+}
+
+export function retireMissingEphemeralTranscript(id, error) {
+  if (id !== selectedId || threadEphemeralState(id) !== true
+      || relatedSessionView?.kind === "side" || relatedThreadViews.get(id)?.kind === "side"
+      || thread?.id === id && thread.viewKind === "side"
+      || /thread not loaded:/i.test(error?.message || "")) return;
+  // 原生已确认不存在：使同轮回包失效，并允许重新选择同一 ID 核对原生状态。
+  setSelectionVersion(selectionVersion + 1);
+  resetMessages();
+  setThread(null);
+  threadDisplays.delete(threadDisplayKey(id));
+  transcriptCache.remove(session?.device.id, id);
+  discardPersistentThreadDisplay(id);
+  turns.clear(); transcriptEvents.clear(); setRecentHistoryPage(null); setHistoryCursor(null);
+  setHistoryInitialized(false); setTranscriptChecking(false);
+  setHistoryError("此原生临时会话已关闭或不存在");
+  renderMessages();
+}
+
+export function historyPlaceholder() {
+  const node = element("div", "empty-conversation");
+  if (historyError) {
+    node.append(element("p", "error-text", historyError),
+      button("重试", "重试加载最新消息", () => void loadHistory(), "text-button"));
+  } else {
+    node.setAttribute("role", "status");
+    node.append(element("span", "spinner"), document.createTextNode(" 正在加载最新消息…"));
+  }
+  return node;
+}
+export function scheduleHistoryLoad(visibleItems = false) {
+  (historyLoadVisibleItems || setHistoryLoadVisibleItems(visibleItems));
+  if (historyLoadFrame != null) return;
+  setHistoryLoadFrame(requestAnimationFrame(() => {
+    setHistoryLoadFrame(null);
+    const includeVisibleItems = historyLoadVisibleItems;
+    setHistoryLoadVisibleItems(false);
+    const root = $("#messages");
+    if (!root || !selectedId || !historyInitialized || transcriptChecking || historyLoading || historyAutoFailed || pageLeaving) return;
+    const box = root.getBoundingClientRect();
+    for (const node of root.querySelectorAll(".history-load[data-history-page]")) {
+      if (node.dataset.turnId && node.closest("details:not([open])")) continue;
+      const rect = node.getBoundingClientRect();
+      if (!node.disabled && rect.height && rect.bottom >= box.top - 120
+          && rect.top <= (includeVisibleItems && node.dataset.turnId ? box.bottom : Math.min(box.bottom, box.top + 120))) {
+        const version = selectionVersion;
+        void loadHistory(true, version, node.dataset.turnId || null).then(() => {
+          if (version === selectionVersion) scheduleHistoryLoad(includeVisibleItems);
+        });
+        break;
+      }
+    }
+  }));
 }

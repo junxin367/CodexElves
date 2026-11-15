@@ -1,10 +1,8 @@
-// 会话能力与访问限制：后端类型与实例能力、授权范围键、关联视图校验，以及只读/侧边/子代理等访问限制的统一查询。
+// 会话能力与访问限制：后端类型与实例能力、授权范围键、关联视图校验，以及只读/侧边/子代理等访问限制的统一查询；依赖模型目录与关联视图的动作能力在 action-capabilities.js。
 
 import { creating, selectedId, session, thread } from "../../core/state.js";
-import { modelContextKey, modelDefaults, modelsScope } from "../composer/models.js";
-import { creationBackend } from "../composer/new-chat.js";
-import { availableSessionInstances, sessionInstanceEnabled } from "./instances.js";
-import { relatedNavigationOwner, relatedSessionView, relatedThreadViews, relatedViewForThread } from "./related.js";
+import { creationBackend } from "../composer/creation-state.js";
+import { relatedNavigationOwner, relatedSessionView, relatedThreadViews } from "./related-state.js";
 
 export function claudeThreadId(id) {
   // 子代理 ID 绑定远程主会话及原生 agentId，仍走 Claude 读取路由，不能误投 Codex。
@@ -14,25 +12,6 @@ export function activeBackend() {
   return creating ? creationBackend : conversationBackend(thread || { id: selectedId });
 }
 export function isClaude() { return activeBackend() === "claude"; }
-export function claudeCommandSupported(name) {
-  // 原生命令只接入共享 CLI 会话，旧 print 会话不能借用实例目录的能力开放入口。
-  if (!creating && thread?.capabilities?.queue !== true) return false;
-  const catalog = modelsScope === modelContextKey() ? modelDefaults.nativeCapabilities : null;
-  return typeof catalog?.[name] === "boolean" ? catalog[name]
-    : !creating && thread?.capabilities?.[name === "goal" ? "goalComposer" : name] === true;
-}
-export function newChatBackendOptions() {
-  // 用户要求类型与环境实例分别控制；未接通的执行适配器只在设置中展示，不能悄悄改投默认实例。
-  return availableSessionInstances().filter(instance => instance.ready && sessionInstanceEnabled(instance.id))
-    .map(instance => ({ value: instance.id, backend: instance.backend, label: instance.label,
-      icon: ["codex", "claude"].includes(instance.backend) ? instance.backend : "allSessions" }));
-}
-export function threadLocation(value) {
-  // 用户要求顶部路径前仅显示非本机实例的实际环境名（如发行版名），不拼接类型、“本机”或“WSL”标签。
-  const distribution = value?.wslDistribution
-    || availableSessionInstances().find(instance => instance.id === value?.instanceId)?.distribution;
-  return [distribution, value?.cwd].filter(Boolean).join(" · ");
-}
 export function claudeNativeQueue() { return isClaude() && thread?.capabilities?.queue === true; }
 export function queueCapability(name, id = selectedId) {
   // Claude 队列能力由当前会话报告；Codex 桌面离线时也必须保留已支持的图片编辑与回执恢复。
@@ -103,13 +82,6 @@ export function threadActionReadOnly(action, id = selectedId) {
 }
 export function threadReadOnlyMessage() {
   return session?.readOnly ? "当前设备为只读模式" : "当前会话仅支持只读查看";
-}
-export function threadSentMessageEditAllowed(id = selectedId) {
-  if (claudeThreadId(id)) return thread?.id === id && thread.capabilities?.messageEdit === true
-    && thread.messageEditReady === true && !threadReadOnly(id);
-  if (!id) return false;
-  const view = relatedViewForThread(id);
-  return view?.kind !== "side" && !(thread?.id === id && thread.viewKind === "side");
 }
 export function isActiveThread() {
   const status = thread?.status?.status || thread?.status;

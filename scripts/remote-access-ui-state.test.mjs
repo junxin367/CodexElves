@@ -163,7 +163,7 @@ function clientUnreadBadgeHarness() {
       return request.promise;
     },
   });
-  nodeVm.runInContext(sourceSection("let clientUnreadBadgeTimer =", "async function loadSidebar("), context);
+  nodeVm.runInContext((sourceSection("let clientUn", "function set") + "\n" + sourceSection("function clientUnreadBad", "async function l") + "\n" + sourceSection("function clientUnreadThr", "function sid")), context);
   return { context, counts, requests, intervals };
 }
 
@@ -248,9 +248,9 @@ function claudeHistoryEditHarness() {
     messageCopyText: item => item.text, randomId: () => "edit-client", closeComposerMenus() {},
     updateComposer() {}, renderMessages() {},
   });
-  nodeVm.runInContext(sourceSection("function threadSentMessageEditAllowed(", "function isActiveThread(")
+  nodeVm.runInContext(sourceSection("function threadS")
     + sourceSection("function beginMessageEdit(", "function updateMessageEditor(")
-    + sourceSection("function syncEditableMessageMetadata("), context);
+    + sourceSection("function syncEdi", "let queueVer"), context);
   return { context, id, first };
 }
 
@@ -298,7 +298,7 @@ test("Claude 历史编辑的未知回执只核对同一新消息，排队证据�
       return { confirmed: true, threadId: id, clientUserMessageId: payload.clientUserMessageId, deliveryState: state };
     },
   });
-  nodeVm.runInContext(sourceSection("async function confirmPendingSend(", "async function resolvePending("), context);
+  nodeVm.runInContext(sourceSection("async function confi"), context);
   const current = { action: "editMessage", deviceId: "device",
     payload: { threadId: id, clientUserMessageId: "edit-client" } };
   assert.equal(await context.confirmPendingSend(current), null);
@@ -318,8 +318,8 @@ test("设置 Select 的调试代理只放行固定设置接口，不扩大到任
     assert.equal(context.allowedApi(method, path), false);
 });
 // 旧回归用例只加载待测函数；补齐来自真实页面源码的后端上下文，默认仍使用 Codex。
-const backendHelpers = (sourceSection("function availableSessionInstances(") + sourceSection("function rememberPermissionSelection(")
-  + sourceSection("function claudeThreadId(", "function privateInputScope(") + sourceSection("function newDraftKey(", "function snapshotDraft(")
+const backendHelpers = ((sourceSection("function ava", "function new") + "\n" + sourceSection("function applySe")) + (sourceSection("function rememberPer", "let modelQue") + "\n" + sourceSection("async function loadI"))
+  + (sourceSection("function claudeThrea", "function pri") + "\n" + sourceSection("function claudeC", "function thr") + "\n" + sourceSection("function newChatBack")) + sourceSection("function newDraftKey(", "function snapshotDraft(")
   + sourceSection("function modelContext(", "function syncBackendModels("))
   + (sourceSection("function conversationBackend(", "function privateInputScope(") + sourceSection("function sessionFilterValue("));
 const vm = {
@@ -363,7 +363,7 @@ const vm = {
     const result = nodeVm.createContext(context, options);
     nodeVm.runInContext(backendHelpers, result);
     nodeVm.runInContext(sourceSection("function compactionInProgress(", "function compactionQueueSendReason("), result);
-    nodeVm.runInContext(sourceSection("function retireClaudeHistoryTurns(", "function pruneCachedHistory("), result);
+    nodeVm.runInContext((sourceSection("function retireC", "function pru") + "\n" + sourceSection("function orderCl", "function mer")), result);
     return result;
   },
 };
@@ -390,7 +390,7 @@ function desktopObservationHarness() {
       return request.promise;
     },
   });
-  vm.runInContext(sourceSection("function desktopObservationIds()", "function renderSidebar()"), context);
+  vm.runInContext(sourceSection("function des"), context);
   return { context, requests, scheduled, root };
 }
 
@@ -677,8 +677,8 @@ function remoteFastHarness() {
     loadModels: async () => refreshes.push("models"), reloadThread: async () => refreshes.push("thread"),
     notice: message => notices.push(message),
   });
-  nodeVm.runInContext(sourceSection("function threadDisplayKey(", "function rememberBackgroundThreadDisplay("), context);
-  nodeVm.runInContext(sourceSection("function remoteFastKey("), context);
+  nodeVm.runInContext((sourceSection("function threadDispl", "function own") + "\n" + sourceSection("function syncRelatedMode", "function rememberBac")), context);
+  nodeVm.runInContext((sourceSection("function remoteF") + "\n" + sourceSection("function rememberRem") + "\n" + sourceSection("async function t")), context);
   for (const id of ["thread-fast-a", "thread-fast-b"])
     context.rememberThreadDisplay({ id, model: "gpt-6.1-sol", fastMode: false });
   context.updateComposer = () => context.updateRemoteFast();
@@ -1073,7 +1073,7 @@ test("Claude 完整历史同步移除旧摘要轮次，迟到的历史响应不�
     mergeHistoryTurn: value => turns.get(value.id) || value,
     threadEphemeralState: () => false, isMissingThreadError: () => false, recoveryErrorSilenceDepth: 0,
     api: () => new Promise(resolve => { respond = resolve; }), notice: message => assert.fail(message) });
-  vm.runInContext(sourceSection("async function readHistoryPage(", "function pruneCachedHistory("), context);
+  vm.runInContext((sourceSection("async function readH", "function pru") + "\n" + sourceSection("function orderCl", "function mer")), context);
   const oldRead = context.readHistoryPage(false, 1);
   vm.runInContext(sourceSection("function receiveClaudeHistory(", "function receive(event)"), context);
   context.params = { threadId: id, thread: { id, queuedMessages: [] }, turnIds: ["real"],
@@ -1129,7 +1129,7 @@ function claudeUsageHarness() {
       return promise;
     },
   });
-  nodeVm.runInContext((sourceSection("function claudeUsageContext(") + sourceSection("function composerMetricsNumber(", "function tokenCount(")), context);
+  nodeVm.runInContext((sourceSection("function claudeUsageContext(") + (sourceSection("function composerMet", "function tok") + "\n" + sourceSection("function syncCom"))), context);
   context.fitClaudeUsageTip = () => {};
   const usage = (percent = 24) => ({ source: "claude-native-usage", observedAtMs: tick, subscriptionType: "max",
     fiveHour: { usedPercentage: percent, resetsAt: new Date(tick + 2 * 3600000 + 18 * 60000).toISOString() },
@@ -2962,7 +2962,7 @@ test("设置强制切换新建类型时保留文字图片，清理旧模型目�
     randomId: () => "new-selection",
   });
   vm.runInContext(sourceSection("function draftKey()", "function storedDraft("), context);
-  vm.runInContext(sourceSection("function changeCreationBackend(", "function selectCreatedThread("), context);
+  vm.runInContext(sourceSection("function changeCreationB", "function res"), context);
   context.setCreationBackend("claude");
   assert.equal(context.creationProject, "original-project");
   assert.equal(context.creationBackend, "claude");
@@ -3155,7 +3155,7 @@ const recapRecord = (id, enabled = true, revision = "r1") =>
 
 test("Claude 回顾默认关闭失败按实例提示，不冒充成功并按授权隔离重复提示", () => {
   const notices = [], context = nodeVm.createContext({ notice: (...value) => notices.push(value) });
-  nodeVm.runInContext(sourceSection("const claudeRecapDefaultWarnings =", "async function loadSessionInstances("), context);
+  nodeVm.runInContext(sourceSection("const claudeRecapDef", "function new"), context);
   const result = {
     instances: [{ id: "claude-a", label: "Claude · A" }],
     claudeRecapDefaults: [{ instanceId: "claude-a", initialized: false, error: "配置为只读" }]
@@ -3181,7 +3181,7 @@ test("Claude 回顾实例目录的迟到结果不能向新授权显示默认关�
     privateInputScope: value => value.scope, api: () => response.promise,
     applySessionCatalog: result => catalogs.push(result), notice: (...value) => notices.push(value)
   });
-  nodeVm.runInContext(sourceSection("const claudeRecapDefaultWarnings =", "function renderSessionInstances("), context);
+  nodeVm.runInContext((sourceSection("const claudeRecapDef", "function new") + "\n" + sourceSection("async function loadSessi", "function ren")), context);
   const reading = context.loadSessionInstances();
   context.session.scope = "authorization-b";
   response.resolve({ claudeRecapDefaults: [{ instanceId: "claude-a", error: "旧授权失败" }] });
@@ -3383,7 +3383,7 @@ function composerPermissionHarness({ creating = false, backend = "codex" } = {})
     },
     updateComposer: () => context.updateComposerPermissions()
   });
-  nodeVm.runInContext(sourceSection("function rememberPermissionSelection("), context);
+  nodeVm.runInContext((sourceSection("function rememberPer", "let modelQue") + "\n" + sourceSection("async function loadI")), context);
   return { context, button, requests, notices, attributes };
 }
 
@@ -4055,7 +4055,7 @@ function newChatBranchHarness() {
   });
   vm.runInContext(sessionFiles.slice(sessionFiles.indexOf("export function workspaceBranchLabel("),
     sessionFiles.indexOf("export function createWorkspaceBranch(")).replace(/^export /gm, "")
-    + "\n" + sourceSection("function resetNewChatBranch()", "function changeCreationProject()"), context);
+    + "\n" + (sourceSection("function resetNe") + "\n" + sourceSection("function refreshNewC", "function sel")), context);
   return { context, reads, badge, label, attributes, advance: ms => { now += ms; } };
 }
 
@@ -4460,7 +4460,7 @@ async function themeDiagnosticsHarness({ android = true } = {}) {
     subscribeAndroidAmbientLight: callback => { ambient = callback; }
   });
   h.load((sourceSection("const appearancePresets =", "let ambientLightStatus =") + sourceSection("function conversationBackend(", "function privateInputScope(") + sourceSection("function sessionFilterValue(")));
-  h.load(sourceSection("const automaticThemeStableMs =", "function mixColor("));
+  h.load((sourceSection("const automaticThemeStab", "function set") + "\n" + sourceSection("let automaticThemeLu", "function set") + "\n" + sourceSection("let automaticThemeSh", "function set") + "\n" + sourceSection("function aut", "function mix") + "\n" + sourceSection("function applyAu", "function app")));
   h.load(sourceSection("setInterval(() => {\n    applyAutomaticAppearance(true);", "\n}\n"));
   return {
     ...h, appearance: h.context.appearance, hour: value => { hour = value; },
@@ -4807,7 +4807,7 @@ function goalControlHarness({ status = "active", readOnly = false } = {}) {
   };
   vm.createContext(context);
   context.nativeConnectionVersion ??= 1;
-  vm.runInContext(sourceSection("const goalEditStorageKey =", "function renderGoalEditor("), context);
+  vm.runInContext((sourceSection("const goalEd", "function set") + "\n" + sourceSection("function setGoalEditDraf", "function upd") + "\n" + sourceSection("function scheduleGoa", "function ren")), context);
   return { context, calls, notices, disk,
     pending: () => vm.runInContext("goalEditPending", context) };
 }
@@ -4958,8 +4958,8 @@ function queueDeliveryHarness(messages) {
   vm.createContext(context);
   context.nativeConnectionVersion ??= 1;
   for (const [start, end] of [
-    ["function queueReorderAvailable()", "function moveQueueItem("],
-    ["function applyQueuedSendResult(", "function queueMessageText("],
+    ["function queueRe", "function que"],
+    ["function applyQueued", "function con"],
     ["function renderQueuedMessages(", "function renderQueueArea("],
     ["function isActiveThread()", null],
     ["let expandedClaudeGoalNotice", null],
@@ -5166,7 +5166,7 @@ function draftOwnerHarness() {
   };
   vm.createContext(context);
   context.nativeConnectionVersion ??= 1;
-  vm.runInContext(sourceSection("function rememberDraft()", "function restoreDraft("), context);
+  vm.runInContext(sourceSection("function rememberDra", "function per"), context);
   return { context, stored, writes, queued };
 }
 
@@ -5243,9 +5243,9 @@ function queuedEditPersistenceHarness({ storageFails = false } = {}) {
   });
   vm.runInContext([
     sourceSection("function persistQueuedEditDraft(", "function persistQueuedEdits("),
-    sourceSection("function persistQueuedEdits(", "function restoreQueuedMessageEdit("),
+    sourceSection("function persistQueuedEdits(", "function mat"),
     sourceSection("function handlePromptInput("),
-    sourceSection("async function submitQueuedMessageEdit(", "function syncEditableMessageMetadata("),
+    sourceSection("async function submitQue"),
   ].join("\n"), context);
   return { context, prompt, edit, attachments, persisted, notices, submissions, draftWrites };
 }
@@ -5371,7 +5371,7 @@ function unfinishedQueueEditHarness() {
   nodeVm.runInContext([
     sourceSection("function inputDraftEmpty(", "function persistInputDraft("),
     sourceSection("function persistQueuedEditDraft(", "function persistQueuedEdits("),
-    sourceSection("function persistQueuedEdits(", "function matchingDraft("),
+    (sourceSection("function persistQueuedEdits(", "function mat") + "\n" + sourceSection("function restoreQueuedMe", "function cle")),
     sourceSection("function restoreUnfinishedQueuedMessageEdit(", "async function beginQueuedMessageEdit("),
   ].join("\n"), context);
   return { context, prompt, summary, disk, notices, writes };
@@ -5396,7 +5396,7 @@ test("未完成队列编辑在重新打开后直接恢复原输入和 editId，�
 
 test("普通队列消息恢复编辑不显示图片保留提示，原消息有图片时才显示资格", () => {
   const context = vm.createContext({});
-  vm.runInContext(sourceSection("function queuedEditHasOriginalImages(", "function updateComposer("), context);
+  vm.runInContext(sourceSection("function queuedEditH", "async functi"), context);
   assert.equal(context.queuedEditHasOriginalImages({
     state: "editing", imageRemoval: false, imageEditing: false,
     attachments: [], originalImageSources: []
@@ -5536,7 +5536,7 @@ test("客户端丢失会话存储后，从持久草稿恢复最新队列修改�
   first.context.composerAttachmentSnapshot = () => first.context.currentAttachments;
   nodeVm.runInContext([
     sourceSection("function persistQueuedEditDraft(", "function persistQueuedEdits("),
-    sourceSection("function persistQueuedEdits(", "function restoreQueuedMessageEdit("),
+    sourceSection("function persistQueuedEdits(", "function mat"),
   ].join("\n"), first.context);
   first.prompt.value = "重启前最后修改的内容";
   first.context.currentAttachments = [{ kind: "inline", name: "草稿.png", dataUrl: "data:image/png;base64,AQID" }];
@@ -5570,8 +5570,8 @@ test("客户端丢失会话存储后，从持久草稿恢复最新队列修改�
   };
   nodeVm.runInContext([
     sourceSection("function validQueuedMessageEdit(", "function restoreQueuedEdits("),
-    sourceSection("async function restorePrivateInputs(", "function restoreSmallInputRecoveries("),
-    sourceSection("function restoreDraft(", "function matchingDraft("),
+    sourceSection("async function restorePr", "async functi"),
+    (sourceSection("function restoreDraf", "function cle") + "\n" + sourceSection("function persistQueu", "function mat")),
     sourceSection("function finishQueuedMessageEdit(", "function completeQueuedEditAction("),
   ].join("\n"), context);
   await context.restorePrivateInputs(context.session);
@@ -5643,7 +5643,7 @@ function queuedEditFeedbackHarness() {
   vm.runInContext([
     sourceSection("function queuedEditSubmittingAction(", "async function submitMessageEdit("),
     sourceSection("function reportMutationError(", "function acceptedSendItem("),
-    sourceSection("const pendingFeedbackDelayMs =", "function clearPendingFeedbackTimer("),
+    (sourceSection("const pendingFee", "function set") + "\n" + sourceSection("function pen", "function cle")),
     `function renderSendFeedback(){${sourceSection("  const queuedEditAction = queuedEditSubmittingAction();",
       '  $("#prompt").disabled =')}}`,
     `function renderComposerPlaceholder(){${sourceSection('  $("#prompt").placeholder =',
@@ -5663,7 +5663,7 @@ function compactionComposerHarness() {
     currentCompaction: () => context.compaction, isActiveThread: () => context.active,
     updateComposer: () => context.renderSendFeedback(),
   });
-  vm.runInContext(sourceSection("async function stopGeneration("), context);
+  vm.runInContext(sourceSection("async function stopG", "function mou"), context);
   context.updateComposer();
   return h;
 }
@@ -5873,7 +5873,7 @@ function questionReceiptHarness(readReceipt) {
   };
   vm.createContext(context);
   context.nativeConnectionVersion ??= 1;
-  vm.runInContext(sourceSection("function replaceAsyncQuestions(", "function renderAsyncQuestion("), context);
+  vm.runInContext((sourceSection("function replaceAsyn", "function com") + "\n" + sourceSection("async function applyQues")), context);
   return { context, key, record, writes, calls, reloads };
 }
 
@@ -5986,7 +5986,7 @@ function toolRenderer() {
   };
   vm.createContext(context);
   context.nativeConnectionVersion ??= 1;
-  vm.runInContext(sourceSection("function renderItem(", "function reconcileChildren("), context);
+  vm.runInContext(sourceSection("function renderItem("), context);
   return context.renderItem;
 }
 
@@ -6041,7 +6041,7 @@ test("Claude 目标统计只显示显式返回值，等待期间不自行累计�
     Number.isFinite(goal.timeUsedSeconds) ? `${goal.timeUsedSeconds}s` : null, syncGoalLiveTimer() {} });
   vm.runInContext(sourceSection("function formatGoalTokens(", "let goalLiveTimer =")
     + sourceSection("function goalDurationSeconds(", "function stopGoalLiveTimer(")
-    + sourceSection("function updateGoalLiveView(", "function renderGoalStatus("), context);
+    + sourceSection("function updateGoalL", "let selected"), context);
   const goal = { source: "claude", status: "active", updatedAt: 100, tokensUsed: 134, timeUsedSeconds: 28.29, iterations: 1 };
   assert.equal(context.goalDurationSeconds(goal, 200000), 28.29);
   context.updateGoalLiveView(root, goal);
@@ -6107,8 +6107,8 @@ test("Claude 首次生效提示位于对应问题前，中途变更保持原生�
   vm.createContext(context);
   context.nativeConnectionVersion ??= 1;
   vm.runInContext([
-    sourceSection("const transcriptEventTypes ="),
-    sourceSection("function completedItem(", "function mergeHistoryTurn("),
+    sourceSection("const transcriptEventTyp", "function mergeRe"),
+    (sourceSection("function completedIt") + "\n" + sourceSection("function mergeRe")),
   ].join("\n"), context);
   const input = { id: "input", type: "userMessage" }, first = { id: "first", type: "agentMessage" },
     second = { id: "second", type: "agentMessage" };
@@ -6126,8 +6126,8 @@ test("手动压缩完成事件误插到最终回复前时，重排到该轮末�
   vm.createContext(context);
   context.nativeConnectionVersion ??= 1;
   vm.runInContext([
-    sourceSection("const transcriptEventTypes ="),
-    sourceSection("function completedItem(", "function mergeHistoryTurn("),
+    sourceSection("const transcriptEventTyp", "function mergeRe"),
+    (sourceSection("function completedIt") + "\n" + sourceSection("function mergeRe")),
   ].join("\n"), context);
   const input = { id: "input", type: "userMessage" };
   const reply = { id: "reply", type: "agentMessage", text: "已完成回复" };
@@ -6165,8 +6165,8 @@ test("切回会话的迟到快照不能抹掉压缩完成事件或把它恢复�
   vm.createContext(context);
   context.nativeConnectionVersion ??= 1;
   vm.runInContext([
-    sourceSection("const transcriptEventTypes ="),
-    sourceSection("function completedItem(", "function mergeHistoryTurn("),
+    sourceSection("const transcriptEventTyp", "function mergeRe"),
+    (sourceSection("function completedIt") + "\n" + sourceSection("function mergeRe")),
   ].join("\n"), context);
   const completed = { turnId: "compact-turn", item: {
     type: "contextCompaction", id: "compact", completed: true, completedAtMs: 2000,
@@ -6197,8 +6197,8 @@ test("服务历史先补回继续消息，再翻页时保留顺序且不重复�
   vm.createContext(context);
   context.nativeConnectionVersion ??= 1;
   vm.runInContext([
-    sourceSection("const transcriptEventTypes ="),
-    sourceSection("function mergeLiveText(", "async function reloadThread("),
+    sourceSection("const transcriptEventTyp", "function mergeRe"),
+    (sourceSection("function mergeLi") + "\n" + sourceSection("function mergeRe") + "\n" + sourceSection("function mergeHi", "async functi")),
   ].join("\n"), context);
   const items = Array.from({ length: 114 }, (_, index) => ({
     id: `item-${String(index).padStart(3, "0")}`,
@@ -6260,7 +6260,7 @@ test("失败与中断的工具条目不能渲染成功勾号", () => {
 test("Claude 内置工具按原生动作展示，工作摘要不把内置工具称为集成", () => {
   const context = nodeVm.createContext({ nativeConnectionVersion: 1, URL, skillReadInfo: () => null, reasoningPreviewText: () => "" });
   nodeVm.runInContext(sourceSection("function readableToolName(", "function reasoningPreviewText("), context);
-  nodeVm.runInContext(sourceSection("function workGroupSummary(", "function renderCommandGroup("), context);
+  nodeVm.runInContext(sourceSection("function wor"), context);
   const claude = (tool, args = {}) => ({ type: "dynamicToolCall", source: "claude", tool, arguments: args, status: "completed" });
   const shown = item => {
     const { icon, description, explore } = context.genericToolPresentation(item);
@@ -6537,8 +6537,8 @@ function messageImageRefreshHarness() {
   });
   vm.runInContext([
     sourceSection("function privateInputScope(", "function validRelatedThreadId("),
-    sourceSection("function completedItem(", "function mergeItemProjection("),
-    sourceSection("function messageImageOwner(", "function bindMessageImages("),
+    (sourceSection("function completedIt") + "\n" + sourceSection("function mergeRe", "function mer")),
+    (sourceSection("function messageImageOwn", "function sch") + "\n" + sourceSection("async function refreshMe", "function bin")),
   ].join("\n"), context);
   h.context = context;
   h.owner = (imageSource = source) => ({ threadId: context.selectedId, turnId: turn.id, itemId: item.id,
@@ -6554,7 +6554,7 @@ function messageImageRefreshHarness() {
 
 test("完成正文继续保护内容，新历史可恢复同源图片且旧缓存和迟到历史不能退回媒体 URL", () => {
   const h = messageImageRefreshHarness(), c = h.context;
-  vm.runInContext(sourceSection("function mergeLiveText(", "async function reloadThread("), c);
+  vm.runInContext((sourceSection("function mergeLi") + "\n" + sourceSection("function mergeRe") + "\n" + sourceSection("function mergeHi", "async functi")), c);
   const history = { id: h.turn.id, status: "completed", items: [{
     id: h.item.id, type: h.item.type, text: "较早的不完整正文", completed: true,
     remoteImages: [{ source: h.source, url: h.newUrl }]
@@ -6873,7 +6873,7 @@ function installSentMessageDisplayHarness(context) {
   context.turns ??= new Map();
   vm.runInContext([
     sourceSection("function rememberSendDisplay("),
-    sourceSection("function queueMessageIdentity(", "function applyQueueSnapshot("),
+    (sourceSection("function queueMe", "function queueMe") + "\n" + sourceSection("function reconcileQu", "function app")),
   ].join("\n"), context);
 }
 test("显式历史回退后迟到成功回执不能复活旧输入，新消息仍可正常确认", () => {
@@ -6939,9 +6939,9 @@ function queueReloadHarness() {
   context.nativeConnectionVersion ??= 1;
   installSentMessageDisplayHarness(context);
   vm.runInContext([
-    sourceSection("function queueSnapshotIsVersioned(", "async function reloadQueue("),
+    (sourceSection("function queueSn", "function queueMessageTex") + "\n" + sourceSection("function reconcileQu", "async functi")),
     sourceSection("async function steerQueuedMessage("),
-    sourceSection("async function reloadThread()"),
+    sourceSection("async function reloadThr", "function ret"),
     sourceSection("function scheduleReload()", "function scheduleSidebarRefresh("),
   ].join("\n"), context);
   const runTimers = () => {
@@ -7040,18 +7040,18 @@ function queuedReceiptHarness({ disk = storage(), refresh = async () => {} } = {
   installSentMessageDisplayHarness(context);
   vm.runInContext([
     sourceSection("function threadActionReadOnly(", "function threadReadOnlyMessage("),
-    sourceSection("const pendingFeedbackDelayMs =", "function clearPendingFeedbackTimer("),
-    sourceSection("function savePending(", "async function mutate("),
-    sourceSection("function ordinaryInputRecord(", "function rememberDraft("),
-    sourceSection("async function mutate(", "function acceptedSendItem("),
+    (sourceSection("const pendingFee", "function set") + "\n" + sourceSection("function pen", "function cle")),
+    sourceSection("function savePen"),
+    (sourceSection("function ordinar", "function rem") + "\n" + sourceSection("async function recoverFa", "function res")),
+    (sourceSection("async function mutat", "async functi") + "\n" + sourceSection("function reportM", "function acc")),
     sourceSection("async function resolvePending()"),
     sourceSection("function confirmQueuedSteerDisplay(", "function renderQueuedMessages("),
     sourceSection("async function removeQueuedMessage("),
-    sourceSection("async function stopGeneration()"),
+    sourceSection("async function stopG", "function mou"),
     `function renderPending(){${sourceSection("  if (pending && (!sending || pending.payload !== sending.payload)",
       "  renderFailedInputRecovery(")}}`,
   ].join("\n"), context);
-  context.pending = vm.runInContext(`(()=>{${sourceSection("let pending = null;", "function savePending(")}
+  context.pending = vm.runInContext(`(()=>{${(sourceSection("let pending = null;", "function rep") + "\n" + sourceSection("function restoreStor", "function sav"))}
     restoreStoredPending(); return pending;})()`, context);
   const receipt = (index, state, result = {}) => requests[index].resolve({
     requestId: requests[index].requestId || context.pending?.id, state, result,
@@ -7136,7 +7136,7 @@ test("已收到原生消息时回执立即确认，慢查询、旧授权和发�
     selectedId: "thread-a", turns: new Map(), pendingSendRequest: null,
     api: async (...args) => { reads.push(args); return late.promise; },
   });
-  vm.runInContext(sourceSection("function acceptedSendItem(", "async function resolvePending("), context);
+  vm.runInContext(sourceSection("function acc"), context);
   const waiting = context.confirmPendingSend(current);
   assert.equal(reads.length, 1);
   context.turns.set("turn", { id: "turn", items: [
@@ -7168,7 +7168,7 @@ test("侧边引导在实时轮次、重进历史与迟到旧状态中只显示�
     turns: new Map(), itemVersions: new Map(), turnVersions: new Map(), turnFieldVersions: new Map(),
     partialItems: new Map(), enrichTurnTranscriptEvents: value => value,
   });
-  vm.runInContext(sourceSection("function normalizeDisplayedUserMessage(", "async function reloadThread("), h);
+  vm.runInContext((sourceSection("function normalizeDi") + "\n" + sourceSection("function mergeRe") + "\n" + sourceSection("function mergeHi", "async functi")), h);
   const steer = { id: "local", type: "steeringUserMessage", status: "accepted",
     serverUserMessageId: "server", clientUserMessageId: "logical", input: [{ type: "text", text: "补充正文" }] };
   const marker = { id: "server", type: "steered" };
@@ -7399,8 +7399,8 @@ function sidebarReadHarness() {
   vm.createContext(context);
   context.nativeConnectionVersion ??= 1;
   vm.runInContext([
-    sourceSection("function mergeIncompleteSidebar(", "async function loadSidebar("),
-    sourceSection("async function loadSidebar(", "function sidebarUpdatedAt("),
+    (sourceSection("function mergeIn", "function set") + "\n" + sourceSection("function clientUnreadBad", "async function l") + "\n" + sourceSection("function clientUnreadThr", "function sid")),
+    (sourceSection("async function loadSideb", "function ren") + "\n" + sourceSection("function sidebarTime", "function sid")),
     sourceSection("async function changeSidebar("),
   ].join("\n"), context);
   const snapshot = pinned => ({
@@ -7487,7 +7487,7 @@ function lifecycle() {
   context.nativeConnectionVersion ??= 1;
   vm.runInContext([
     sourceSection("async function loadHistory(", "async function readHistoryPage("),
-    sourceSection("async function refreshAll(", "function openStream("),
+    sourceSection("async function refreshAl", "function rec"),
     sourceSection("function retireForegroundReads(", "function suspendPage("),
   ].join("\n"), context);
   return { context, reads, refreshes, pendingWrite };
@@ -7615,12 +7615,12 @@ function sideExpiryHarness(response) {
     clearTimeout(token) { if (!scheduled.delete(token)) clearTimeout(token); },
   });
   vm.runInContext([
-    sourceSection("function privateInputScope(", "function threadSentMessageEditAllowed("),
-    sourceSection("function syncRelatedSessionLayout()", "function finishRelatedSessionExit("),
+    sourceSection("function pri", "function isA"),
+    (sourceSection("function syncRelatedSess", "function fin") + "\n" + sourceSection("function syncSid", "function ses")),
     sourceSection("function scheduleRelatedSessionCheck()", "function resetRelatedSessions("),
-    sourceSection("function threadEphemeralState(", "function persistentThreadDisplayAllowed("),
-    sourceSection("async function reloadThread()"),
-    sourceSection("async function readHistoryPage(", "function pruneCachedHistory("),
+    (sourceSection("function threadE", "function per") + "\n" + sourceSection("function retireM", "function his")),
+    sourceSection("async function reloadThr", "function ret"),
+    (sourceSection("async function readH", "function pru") + "\n" + sourceSection("function orderCl", "function mer")),
   ].join("\n"), context);
   context.syncRelatedSessionLayout();
   const retained = { turns: context.turns, turnsJson: JSON.stringify([...context.turns]),
@@ -7713,7 +7713,7 @@ test("过期侧边阅读后提交已读，清除父会话蓝点并保留其它�
   });
   vm.runInContext([
     sourceSection("function threadReadOnly(", "function threadReadOnlyMessage("),
-    sourceSection("async function mutate(", "function reportMutationError("),
+    sourceSection("async function mutat", "async functi"),
     sourceSection("function markSidebarThreadReadLocally(", "function sidebarAttentionState("),
     sourceSection("async function markVisibleThreadRead(")
   ].join("\n"), context);
@@ -7926,7 +7926,7 @@ function sidebarDeletionHarness() {
   vm.runInContext([
     sourceSection("function clearSentMessageDisplays(", "function sentMessageIdentities("),
     sourceSection("function deleteDraft(", "function inputDraftEmpty("),
-    sourceSection("function threadDeletionKey(", "async function checkThreadDeletion("),
+    (sourceSection("function threadDeletionK") + "\n" + sourceSection("function filterS", "function res") + "\n" + sourceSection("function applyTh", "async function c")),
   ].join("\n"), context);
   const failReply = () => reply.reject(Object.assign(new TypeError("Failed to fetch"),
     { outcomeUnknown: true, operationState: "unknown" }));
@@ -8011,7 +8011,7 @@ test("旧服务删除回执恢复后只核对原回执，不再次派发删除",
       ok: true, threadId: h.target.id, deleted: true, status: "local_deleted", executionTransport: "app-server-stdio",
     } };
   };
-  vm.runInContext(sourceSection("async function checkThreadDeletion(", "function restoreSidebarPreferences("), h.context);
+  vm.runInContext(sourceSection("async function checkThre"), h.context);
   await h.context.checkThreadDeletion(record);
   assert.deepEqual(reads, ["/api/receipts/original-delete-receipt"]);
   assert.equal(h.calls.length, 0);
@@ -8091,8 +8091,8 @@ function sendRecoveryHarness() {
     sourceSection("function privateInputScope(", "function validRelatedThreadId("),
     sourceSection("function clearPrivateInputs(", "async function restorePrivateInputs("),
     sourceSection("function deleteDraft(", "function inputDraftEmpty("),
-    sourceSection("function matchingDraft(", "function resetComposerOptions("),
-    sourceSection("async function mutate(", "function acceptedSendItem("),
+    (sourceSection("function mat") + "\n" + sourceSection("function clearSu")),
+    (sourceSection("async function mutat", "async functi") + "\n" + sourceSection("function reportM", "function acc")),
     sourceSection("async function sendMessage(", "async function stopGeneration("),
   ].join("\n"), context);
   const complete = index => actions[index].resolve({
@@ -8193,8 +8193,8 @@ test("Claude 新建发送等待完整目录与同一权限读取，恢复 Max �
       permissionRequests.push({ path, payload });
       return permissionRead.promise;
     };
-    vm.runInContext(sourceSection("function rememberInstancePermissionCatalog(", "function updateComposerPermissions("), c);
-    vm.runInContext((sourceSection("function rememberedNewChatModel(") + sourceSection("function defaultModelEffort(") + sourceSection("function renderModelMenu(", "function fitComposerMenu(")), c);
+    vm.runInContext((sourceSection("function rememberIns", "let modelQue") + "\n" + sourceSection("async function loadI", "function upd")), c);
+    vm.runInContext(((sourceSection("function rememberedN") + "\n" + sourceSection("function rememberNewChatMode")) + (sourceSection("function defaultMode") + "\n" + sourceSection("function currentMode") + "\n" + sourceSection("function modelFo") + "\n" + sourceSection("async function t")) + sourceSection("function renderModelMenu(", "function fitComposerMenu(")), c);
     c.rememberNewChatSettings({ model: "gpt-6.1-sol", reasoningEffort: "max",
       permissionMode: scenario === "unsupported-permission" ? "bypassPermissions" : "plan" });
     c.newChatModels.clear();
@@ -8338,7 +8338,7 @@ test("Claude 目录信任检查只在明确确认后附加精确目录，取消�
         return state === "confirm";
       },
     });
-    vm.runInContext(sourceSection("async function prepareClaudeProjectCreation(", "async function sendMessage("), context);
+    vm.runInContext(sourceSection("async function prepa"), context);
     const payload = { backend: "claude", instanceId: "claude:fixture", projectId: "project", prompt: "原消息" };
     assert.equal(await context.prepareClaudeProjectCreation(payload, () => true), state !== "cancel");
     assert.equal(calls[0].path, "/api/read/projectTrust");
@@ -8360,7 +8360,7 @@ test("Claude 信任结果实例不匹配或确认期间切换选择时不能继�
     api: async () => ({ ok: true, trusted: false, instanceId: "claude:fixture", trustPath: "/project" }),
     confirmAction: async () => { selected = false; return true; },
   });
-  vm.runInContext(sourceSection("async function prepareClaudeProjectCreation(", "async function sendMessage("), context);
+  vm.runInContext(sourceSection("async function prepa"), context);
   const payload = { backend: "claude", instanceId: "claude:fixture", projectId: "project" };
   assert.equal(await context.prepareClaudeProjectCreation(payload, () => selected), false);
   assert.equal(payload.trustProject, undefined);
@@ -8380,7 +8380,7 @@ test("Claude 新建入口先等待目录信任，确认才提交一次创建，�
     context.selectCreatedThread = async () => {};
     const query = context.$;
     context.$ = (selector, root) => selector === "#project-select" ? { value: "project" } : query(selector, root);
-    vm.runInContext(sourceSection("async function prepareClaudeProjectCreation(", "async function sendMessage("), context);
+    vm.runInContext(sourceSection("async function prepa"), context);
     const sending = context.sendMessage();
     assert.equal(h.actions.length, 1);
     assert.equal(h.actions[0].path, "/api/read/projectTrust");
@@ -8426,8 +8426,8 @@ function idleSendDisplayHarness(mode = "native") {
   });
   vm.runInContext([
     sourceSection("function acceptedSendItem(", "async function confirmPendingSend("),
-    sourceSection("function queueSnapshotIsVersioned(", "async function reloadQueue("),
-    sourceSection("function applyQueuedSendResult(", "function queueMessageText("),
+    (sourceSection("function queueSn", "function queueMessageTex") + "\n" + sourceSection("function reconcileQu", "async functi")),
+    sourceSection("function applyQueued", "function con"),
   ].join("\n"), context);
   const snapshot = (messages, revision) => ({
     ok: true, threadId: "main", queuedMessages: messages, queuedEdits: [],
@@ -8535,7 +8535,7 @@ function sentDisplayWindowHarness() {
     session: { device: { id: "device" } }, selectedId: "main", privateInputScope: () => "scope",
   });
   installSentMessageDisplayHarness(context);
-  vm.runInContext(sourceSection("function queueMessageText(", "function confirmQueuedSteerDisplay("), context);
+  vm.runInContext(sourceSection("function queueMessageTex"), context);
   const user = (id, clientId, text, extra = {}) => ({ id: `${id}-user`, type: "userMessage", clientId,
     content: [{ type: "text", text }], ...extra });
   const turn = (id, clientId, text, status = "completed") => ({ id, status, items: [
@@ -8615,7 +8615,7 @@ test("离开会话时只缓存已加载轮次和未见原生正文的成功投�
     transcriptCache: { put: (_device, _id, snapshot, view) => { saved.push({ snapshot, view }); return snapshot; } },
     cacheDisplayData: (_kind, _id, value) => persisted.push(value),
   });
-  vm.runInContext(sourceSection("function rememberTranscript(", "function restoreTranscript("), context);
+  vm.runInContext((sourceSection("function rememberTranscr") + "\n" + sourceSection("function leg", "let historyC")), context);
   context.turns = new Map([["turn-x", turn("turn-x", "x", "已接替消息")], ["latest", turn("latest", "latest-client", "最近一轮")]]);
   context.confirmSendDisplay({ threadId: "main", clientUserMessageId: "x", prompt: "已接替消息" },
     { ok: true, threadId: "main", clientUserMessageId: "x", deliveryState: "accepted", turnId: "turn-x" });
@@ -8662,7 +8662,7 @@ test("升级后恢复旧缓存时剔除旧版补插的提问轮次，真实轮�
     normalizeRelatedView: () => null, syncRelatedSessionLayout() {}, replaceTranscriptEvents() {},
     renderMessages() {}, $: () => null,
   });
-  vm.runInContext(sourceSection("function legacySentDisplayTurn("), context);
+  vm.runInContext((sourceSection("function leg", "let historyC") + "\n" + sourceSection("function restoreTran")), context);
   assert.equal(context.restoreTranscript("main"), cached);
   assert.deepEqual([...context.turns.keys()], ["latest", "question-only", "remote-confirmed-turn:p"]);
   assert.deepEqual(texts(), ["最近一轮", "只有提问的真实轮次", "尚未同步的成功消息"]);
@@ -8844,7 +8844,7 @@ function answeredQuestionReadHarness({ loading = false } = {}) {
     renderApprovals: () => frames.push({ ids: (context.thread?.requests || []).map(request => request.id),
       locked: context.questionReplyReceipts.has(key) }),
   });
-  vm.runInContext(sourceSection("function replaceAsyncQuestions(", "async function recoverQuestionReceipts("), context);
+  vm.runInContext((sourceSection("function replaceAsyn", "function com") + "\n" + sourceSection("async function applyQues", "async functi")), context);
   const completeRead = (index, requests) => threadReads[index].resolve({
     thread: { id: "main", title: "测试问答", cwd: "", requests },
   });
@@ -8894,7 +8894,7 @@ test("实际offline再online回调立即退役旧显示读取并启动新读，�
   vm.runInContext([
     sourceSection("async function refreshConnectedSession(", "function setConnection("),
     sourceSection("function withRecoveryErrorSilence(", "async function refreshAll("),
-    sourceSection("function probeConnectionRecovery(", "function installPageLifecycle("),
+    (sourceSection("function probeCo") + "\n" + sourceSection("function retryCo", "function ins")),
     sourceSection('window.addEventListener("online",', 'document.addEventListener("visibilitychange", () => {\n    if (document.hidden) {\n      stopCatalogRefresh();'),
   ].join("\n"), context);
   const oldRefresh = context.refreshAll();
@@ -8984,15 +8984,15 @@ function connectionRecoveryHarness() {
   });
   context.document.addEventListener = (name, callback) => listeners.set(name, callback);
   vm.runInContext([
-    sourceSection("function connectionErrorMessage(", "function showConnectionRecovery("),
+    sourceSection("function connectionE", "let sessionR"),
     sourceSection("async function syncConnectionState(", "function setConnection("),
     sourceSection("function withRecoveryErrorSilence(", "async function refreshAll("),
-    sourceSection("async function refreshAll(", "function openStream("),
+    sourceSection("async function refreshAl", "function rec"),
     sourceSection("function openStream(", "function stopConnectionPoll("),
-    sourceSection("function stopConnectionPoll(", "function retireForegroundReads("),
-    sourceSection("function retireForegroundReads(", "function resumePage()"),
-    sourceSection("function resumePage()", "async function connect("),
-    sourceSection("function probeConnectionRecovery(", "function installPageLifecycle("),
+    (sourceSection("function stopCon", "function ret") + "\n" + sourceSection("function selectedThreadR")),
+    (sourceSection("function retireF", "async functi") + "\n" + sourceSection("function recordR")),
+    sourceSection("function resumePage(", "function ret"),
+    (sourceSection("function probeCo") + "\n" + sourceSection("function retryCo", "function ins")),
     `${sourceSection("function receive(event) {", "  const params = { ...event.params || {} };")}\n}`,
     sourceSection('  $("#connection-state").onclick =', "  const toolsTrigger ="),
     sourceSection('window.addEventListener("online",', 'document.addEventListener("visibilitychange", () => {\n    if (document.hidden) {\n      stopCatalogRefresh();'),
@@ -9096,8 +9096,8 @@ function transportRecoveryHarness() {
   vm.runInContext(channels.replace(/^import .*;\r?\n/gm, "").replace(/^export /gm, ""), context);
   vm.runInContext([
     sourceSection("function threadActionReadOnly(", "function threadReadOnlyMessage("),
-    (sourceSection("async function api(") + sourceSection("function readConnectionSession(", "async function refreshConnectedSession(")),
-    sourceSection("function currentChannelMeasurements(", "function installChannelConfigurationObserver("),
+    (sourceSection("async function api(") + (sourceSection("function readCon", "async function r") + "\n" + sourceSection("function cancelC", "function cur"))),
+    sourceSection("function currentChan", "let stream ="),
   ].join("\n"), context);
   context.createRemoteEventStream = () => context.createChannelEventStream();
   context.sharedEventsAvailable = () => false;
@@ -9659,18 +9659,18 @@ function sideCreationNavigationHarness() {
   context.nativeConnectionVersion ??= 1;
   vm.runInContext([
     sourceSection("function snapshotDraft()", "function inputDraftEmpty("),
-    sourceSection("function privateInputScope(", "function threadSentMessageEditAllowed("),
+    sourceSection("function pri", "function isA"),
     sourceSection("function rememberRelatedView(", "function syncRelatedSessionLayout("),
-    sourceSection("function conversationHistoryPosition(", "function rememberTransientHistory("),
+    sourceSection("function conversationHis", "function sto"),
     sourceSection("async function openRelatedThread(", "function updateSideCreationStatus("),
-    sourceSection("function updateSideCreationStatus(", "function renderRelatedOperationStatus("),
-    sourceSection("function rememberDraft()", "function persistQueuedEdits("),
-    sourceSection("function filterSideThreadSidebar(", "function applyThreadDeletion("),
-    sourceSection("async function selectThread(", "function syncNewChatHash("),
+    (sourceSection("function updateSideC", "function ren") + "\n" + sourceSection("function persistRela")),
+    (sourceSection("function rememberDra", "function persistQueuedEdits(") + "\n" + sourceSection("function restoreDraf", "function res")),
+    sourceSection("function filterS", "function res"),
+    (sourceSection("async function selec", "function sho") + "\n" + sourceSection("function syncThr", "function syn")),
     sourceSection("function syncNewChatHash()", "function welcomeNode()"),
-    sourceSection("function showWelcome("),
-    (sourceSection("function selectedThreadProjectId()", "async function selectThread(") + sourceSection("function mergeIncompleteSidebar(", "async function loadSidebar(")),
-    sourceSection("function selectedThreadReadIncomplete()", "function retireForegroundReads("),
+    sourceSection("function showWel", "function sel"),
+    ((sourceSection("function selectedThreadP", "function syn") + "\n" + sourceSection("async function start", "async functi")) + (sourceSection("function mergeIn", "function set") + "\n" + sourceSection("function clientUnreadBad", "async function l") + "\n" + sourceSection("function clientUnreadThr", "function sid"))),
+    sourceSection("function selectedThreadR"),
     sourceSection("function closeDialogsForNotification()", "function drainPendingNotificationOpen("),
     sourceSection('window.addEventListener("popstate", event => {\n    const target =', "\n}\n"),
     sourceSection('window.addEventListener("popstate", event => {\n    if (!session) return;', "\n}\n"),
@@ -10264,10 +10264,10 @@ function sharedOrdinaryDraftHarness(initial = null) {
   context.nativeConnectionVersion ??= 1;
     vm.runInContext([
       sourceSection("const skillIdentity =", "const skillNodeKey ="),
-      sourceSection("function snapshotDraft()", "function clearPrivateInputs("),
-      sourceSection("function rememberDraft()", "function restoreDraft("),
+      sourceSection("function sna", "function res"),
+      sourceSection("function rememberDra", "function per"),
       sourceSection("function handlePromptInput("),
-      sourceSection("function suspendPage()", "function resumePage()"),
+      (sourceSection("function suspendPage", "async functi") + "\n" + sourceSection("function recordR")),
     ].join("\n"), context);
     const settled = () => Promise.all([...context.draftWrites.values()].map(write => write.promise));
     const input = async value => {
@@ -10364,8 +10364,8 @@ function threadDisplayCacheHarness(existing = null) {
   if (!Object.hasOwn(context, "readScope")) context.readScope = context.privateInputScope(context.session);
   vm.runInContext([
     sourceSection("function threadEphemeralState(", "function discardPersistentThreadDisplay("),
-    sourceSection("function persistentThreadDisplayAllowed(", "function syncRelatedModelDisplay("),
-    sourceSection("function rememberThreadDisplay(", "function ownsWorkspaceCache("),
+    sourceSection("function persistentT", "function own"),
+    sourceSection("function rememberThr", "async functi"),
     sourceSection("function queueSnapshotIsVersioned(", "function queueMessageIdentity("),
   ].join("\n"), context);
   return { context, persisted };
@@ -10404,8 +10404,8 @@ function cachedControlsHarness(existing = null) {
     queueMessageText: message => message.text || message.context?.prompt || "",
   });
   vm.runInContext([
-    sourceSection("function queueMessageIdentity(", "function applyQueueSnapshot("),
-    (sourceSection("function queueReorderAvailable()", "function applyQueueReorderResult(") + sourceSection("function rememberSendDisplay(")),
+    (sourceSection("function queueMe", "function queueMe") + "\n" + sourceSection("function reconcileQu", "function app")),
+    ((sourceSection("function queueRe", "function app") + "\n" + sourceSection("function moveQue", "function mov")) + sourceSection("function rememberSendDisplay(")),
     sourceSection("function renderQueuedMessages(", "async function removeQueuedMessage("),
     (sourceSection("function isActiveThread()") + sourceSection("let expandedClaudeGoalNotice")),
     sourceSection("const goalStatusLabels =", "function formatGoalTokens("),
@@ -10574,11 +10574,11 @@ function delayFeedbackHarness() {
   vm.createContext(context);
   context.nativeConnectionVersion ??= 1;
   vm.runInContext([
-    sourceSection("const pendingFeedbackDelayMs =", "function updateComposer("),
-    sourceSection("function savePending(", "async function mutate("),
+    (sourceSection("const pendingFee", "function set") + "\n" + sourceSection("function pen", "async functi") + "\n" + sourceSection("function syncPen", "function upd")),
+    sourceSection("function savePen"),
     sourceSection("function renderRelatedOperationStatus("),
-    sourceSection("function renderAsyncQuestion(", "function commandApprovalPresentation("),
-    sourceSection("function updateBlockingApprovalControls(", "function renderApprovals("),
+    sourceSection("function renderAsync", "function ren"),
+    sourceSection("function updateB"),
     sourceSection("function renderCompactionBanner(", "async function applyCompactionReceipt("),
     sourceSection("async function applyCompactionReceipt(", "async function resolveCompactionReceipt("),
     `function renderFeedback(){${sourceSection("  const deletion = threadDeletions.get(threadDeletionKey(selectedId));",
@@ -10862,7 +10862,7 @@ test("模型目录统一保存 Fast 档位、实例限制和缓存身份，Ultra
   };
   vm.createContext(context);
   context.nativeConnectionVersion ??= 1;
-  vm.runInContext(sourceSection("async function loadModels(", "function defaultModelEffort("), context);
+  vm.runInContext(sourceSection("async function loadM", "async functi"), context);
   const models = await context.loadModels(true);
   assert.deepEqual(Array.from(models[0].supportedReasoningEfforts, effort => effort.reasoningEffort), ["xhigh", "max"]);
   assert.equal(writes[0][2].version, currentModelCatalogCacheVersion);
@@ -10929,7 +10929,7 @@ test("Fast 环境暂不可读时复用目录重试，不清空模型；普通目
   };
   vm.createContext(context);
   context.nativeConnectionVersion ??= 1;
-  vm.runInContext(sourceSection("async function loadModels(", "function defaultModelEffort(")
+  vm.runInContext(sourceSection("async function loadM", "async functi")
     + sourceSection("function scheduleCatalogRefresh(", "function refreshCachedCatalogs("), context);
   await context.loadModels(true);
   assert.equal(context.models.length, 1);
@@ -10972,7 +10972,7 @@ function initialPageHarness({ readOnly = false, suppress = false } = {}) {
   });
   h.context.location.hash = "";
   vm.runInContext([
-    sourceSection("async function refreshAll(", "function openStream("),
+    sourceSection("async function refreshAl", "function rec"),
     sourceSection("async function connectPage(", "function probeConnectionRecovery("),
   ].join("\n"), h.context);
   return { ...h, sidebarRead };
@@ -11026,7 +11026,7 @@ test("服务连接变化后，旧模型读取晚到不能覆盖新目录", async
   };
   vm.createContext(context);
   context.nativeConnectionVersion ??= 1;
-  vm.runInContext(sourceSection("async function loadModels(", "function defaultModelEffort("), context);
+  vm.runInContext(sourceSection("async function loadM", "async functi"), context);
   const oldRead = context.loadModels(true);
   ++context.nativeConnectionVersion;
   context.modelsPromise = null;
@@ -11106,7 +11106,7 @@ function claudeExecutionFeedbackHarness(turn) {
   });
   nodeVm.runInContext(sourceSection("function completedManualCompactionAfterReply(", "function enrichTurnTranscriptEvents(")
     + sourceSection("function finalMessageIndex(", "function updateActivitySummary(")
-    + sourceSection("function renderMessages(", "function rememberTranscript("), context);
+    + sourceSection("function renderMessa", "function res"), context);
   return { context, activities, root, render() { activities.length = 0; context.renderMessages(); return activities; } };
 }
 
@@ -11258,7 +11258,7 @@ test("Claude 实时多问复用问答输入，完整发送选项及自由回答�
 test("Claude 补齐多选显示不清除问答草稿，新问题和已提交状态仍有独立身份", () => {
   const context = nodeVm.createContext({ nativeConnectionVersion: 1, session: { device: { id: "device" } },
     blockingRequestState: () => ({ sourceVersion: 1 }), approvalDrafts: new Map() });
-  nodeVm.runInContext(sourceSection("function approvalReplyKey(", "function applyBlockingRequestsSnapshot("), context);
+  nodeVm.runInContext(sourceSection("function approvalRep", "function rep"), context);
   const request = { id: "native-question-one", method: "item/tool/requestUserInput",
     params: { nativeQuestion: { id: "native-question-one", state: "waiting" },
       questions: [{ id: "q", question: "选择？", options: [{ label: "A" }, { label: "B" }] }] } };
@@ -11432,7 +11432,7 @@ test("Claude HTTP 完整历史接替预览且迟到读取不能复活旧预览",
     turns: new Map(), itemVersions: new Map(), turnVersions: new Map(), turnFieldVersions: new Map(),
     partialItems: new Set(), enrichTurnTranscriptEvents: value => value,
   });
-  vm.runInContext(sourceSection("function mergeLiveText(", "async function reloadThread("), context);
+  vm.runInContext((sourceSection("function mergeLi") + "\n" + sourceSection("function mergeRe") + "\n" + sourceSection("function mergeHi", "async functi")), context);
   const base = { id: "turn", _nativeUserId: "native-user", _process: "generation",
     _nativePreviewBasis: "a".repeat(64), status: "inProgress", itemsComplete: true, itemsView: "full",
     items: [{ id: "user", type: "userMessage", text: "question" }] };
@@ -11507,7 +11507,7 @@ test("新建类型切换后，迟到 Codex 模型不覆盖 Claude，项目 ID �
   };
   vm.createContext(context);
   context.nativeConnectionVersion ??= 1;
-  vm.runInContext(sourceSection("async function loadModels(", "function defaultModelEffort("), context);
+  vm.runInContext(sourceSection("async function loadM", "async functi"), context);
   const codex = context.loadModels(true);
   context.creationBackend = "claude";
   context.creationInstanceId = "claude:wsl:test";
@@ -11564,7 +11564,7 @@ function claudeHistoryModelMenuHarness({ cached = false, stale = false } = {}) {
       menu.replaceChildren(...Array.from(context.models, model => element("button", "", model.model)));
     },
   });
-  vm.runInContext(sourceSection("async function loadModels(", "function defaultModelEffort("), context);
+  vm.runInContext(sourceSection("async function loadM", "async functi"), context);
   vm.runInContext(sourceSection('  $("#model-button").onclick = async () => {', '  $("#model-settings").onkeydown ='), context);
   return { context, reads, cacheWrites, menu, trigger, catalog, settle: () => new Promise(resolve => setImmediate(resolve)) };
 }
@@ -11615,7 +11615,7 @@ function claudeAliasModelMenuHarness() {
       : selector === "#model-settings" ? menu : selector === "#prompt" ? prompt : null,
     updateComposer() {}, fitComposerMenu() {}, closeComposerMenus() { menu.hidden = true; },
   });
-  vm.runInContext((sourceSection("function rememberedNewChatModel(") + sourceSection("function defaultModelEffort(") + sourceSection("function renderModelMenu(", "function fitComposerMenu(")), context);
+  vm.runInContext(((sourceSection("function rememberedN") + "\n" + sourceSection("function rememberNewChatMode")) + (sourceSection("function defaultMode") + "\n" + sourceSection("function currentMode") + "\n" + sourceSection("function modelFo") + "\n" + sourceSection("async function t")) + sourceSection("function renderModelMenu(", "function fitComposerMenu(")), context);
   const choices = group => menu.querySelector(`.${group}`).children.filter(node => node.tag === "button");
   return { context, menu, choices };
 }
@@ -11731,7 +11731,7 @@ test("Claude 权限按钮恢复新建记忆，已有会话切换权限不覆盖�
   function open() {
     const h = composerPermissionHarness({ creating: true, backend: "claude" }), c = h.context;
     Object.assign(c, { localStorage: disk, newChatModels: new Map(), selectedId: null, thread: null });
-    nodeVm.runInContext((sourceSection("function rememberedNewChatModel(") + sourceSection("function defaultModelEffort(") + sourceSection("function renderModelMenu(", "function fitComposerMenu(")), c);
+    nodeVm.runInContext(((sourceSection("function rememberedN") + "\n" + sourceSection("function rememberNewChatMode")) + (sourceSection("function defaultMode") + "\n" + sourceSection("function currentMode") + "\n" + sourceSection("function modelFo") + "\n" + sourceSection("async function t")) + sourceSection("function renderModelMenu(", "function fitComposerMenu(")), c);
     c.instancePermissionCatalogs.get(c.activeInstanceId()).defaultMode = "acceptEdits";
     return h;
   }
@@ -11821,7 +11821,7 @@ test("Codex 新建权限优先显式草稿和有效记忆，再采用 App 默认
     newChatModels: new Map(), localStorage: storage(), creationProject: "project-a", selectionVersion: 1,
     selectedModel: "", selectedEffort: "", models: [], modelDefaults: {},
   });
-  nodeVm.runInContext((sourceSection("function rememberedNewChatModel(") + sourceSection("function defaultModelEffort(") + sourceSection("function renderModelMenu(", "function fitComposerMenu(")), c);
+  nodeVm.runInContext(((sourceSection("function rememberedN") + "\n" + sourceSection("function rememberNewChatMode")) + (sourceSection("function defaultMode") + "\n" + sourceSection("function currentMode") + "\n" + sourceSection("function modelFo") + "\n" + sourceSection("async function t")) + sourceSection("function renderModelMenu(", "function fitComposerMenu(")), c);
   c.session.capabilities.codexSessionDefaults = true;
   c.codexCreationDefaultsState = { key: c.codexCreationDefaultsKey(), value: {
     model: "gpt-fixture", reasoningEffort: "medium", permissionMode: "full-access",
@@ -11919,7 +11919,7 @@ test("Claude 发送回执释放已提交的模型草稿，迟到回执不清除�
     selectedModel: "opus", selectedEffort: "max", modelChoiceVersion: 3,
   });
   c.submittedDrafts.set(payload, { modelChoice: { version: 3, model: "opus", effort: "max" } });
-  vm.runInContext(sourceSection("function clearSubmittedDraft(", "function resetComposerOptions("), c);
+  vm.runInContext(sourceSection("function clearSu"), c);
   c.clearSubmittedDraft(payload, true);
   assert.equal(c.selectedModel, "");
   assert.equal(c.selectedEffort, "");
@@ -11965,7 +11965,7 @@ test("新建会话发送成功后，显式权限草稿和图片不会阻止编�
   context.submittedDrafts.set(payload, { text: prompt.value, skills: [], attachments: [image],
     goalMode: null, permissionMode: "guardian-approvals" });
   context.payload = payload;
-  vm.runInContext(sourceSection("function matchingDraft(", "function resetComposerOptions("), context);
+  vm.runInContext((sourceSection("function mat") + "\n" + sourceSection("function clearSu")), context);
   context.clearSubmittedDraft(payload, true);
   assert.equal(prompt.value, "", "清理草稿前删除权限选择不能阻止编辑框清空");
   assert.equal(cleared, 1);
@@ -12105,7 +12105,7 @@ test("服务部分侧栏保留旧会话展示，完整目录及其他后端不�
   const context = {};
   vm.createContext(context);
   context.nativeConnectionVersion ??= 1;
-  vm.runInContext(sourceSection("function mergeIncompleteSidebar(", "async function loadSidebar("), context);
+  vm.runInContext((sourceSection("function mergeIn", "function set") + "\n" + sourceSection("function clientUnreadBad", "async function l") + "\n" + sourceSection("function clientUnreadThr", "function sid")), context);
   const merged = context.mergeIncompleteSidebar(previous, current);
   assert.deepEqual(Array.from(merged.recent, row => row.id), ["known", "unpin", "old", "loose"]);
   assert.equal(merged.recent[0].title, "新名");
@@ -12128,7 +12128,7 @@ test("原生置顶完整时不被部分最近目录恢复，取消的旧会话�
   const context = {};
   vm.createContext(context);
   context.nativeConnectionVersion ??= 1;
-  vm.runInContext(sourceSection("function mergeIncompleteSidebar(", "async function loadSidebar("), context);
+  vm.runInContext((sourceSection("function mergeIn", "function set") + "\n" + sourceSection("function clientUnreadBad", "async function l") + "\n" + sourceSection("function clientUnreadThr", "function sid")), context);
   const merged = context.mergeIncompleteSidebar(previous, current);
   assert.deepEqual(Array.from(merged.pinnedThreads, row => row.id), ["new-pin"]);
   assert.equal(merged.recent.find(row => row.id === "unpin").pinned, false);
@@ -12274,7 +12274,7 @@ test("主会话保留背景透明度与铺法，侧边页不重绘图片或叠�
     remoteBackground: { dataUrl: "data:image/png;base64,cHJldmlldw==" },
     appearance: { backgroundOpacity: 30, backgroundFit: "cover" },
   });
-  nodeVm.runInContext(sourceSection("function syncRemoteBackground(", "function readRemoteBackgroundFile("), context);
+  nodeVm.runInContext(sourceSection("function syncRem", "function app"), context);
   context.syncRemoteBackground();
   assert.equal(image.hidden, false);
   assert.equal(image.style.opacity, "0.3");
@@ -12297,7 +12297,7 @@ test("主会话保留背景透明度与铺法，侧边页不重绘图片或叠�
 
 test("外观表面与原生 Codex 默认调色一致，并区分输入框、控件及浅色普通提示", () => {
   const context = nodeVm.createContext();
-  nodeVm.runInContext(sourceSection("function mixColor(", "function applyAppearance("), context);
+  nodeVm.runInContext(sourceSection("function mix"), context);
   const dark = context.appearanceSurfaceColors("dark", { background: "#181818", foreground: "#ffffff" });
   assert.equal(dark["composer-bg"], "#363636");
   assert.equal(dark["control-bg"], "#2d2d2d");
@@ -12313,7 +12313,7 @@ test("外观表面与原生 Codex 默认调色一致，并区分输入框、控�
 
 test("自定义背景和前景分别参与明暗调色，不复用默认主题色或透明表面", () => {
   const context = nodeVm.createContext();
-  nodeVm.runInContext(sourceSection("function mixColor(", "function applyAppearance("), context);
+  nodeVm.runInContext(sourceSection("function mix"), context);
   const dark = context.appearanceSurfaceColors("dark", { background: "#102030", foreground: "#f0e0d0" });
   assert.equal(dark["control-bg"], "#24313e");
   assert.equal(dark["composer-bg"], "#2d3944");
@@ -12328,7 +12328,7 @@ test("自定义背景和前景分别参与明暗调色，不复用默认主题�
 
 test("模型按钮 hover 在输入框上合成，深色分组线增强，浅色仍沿用原线色", () => {
   const context = nodeVm.createContext();
-  nodeVm.runInContext(sourceSection("function mixColor(", "function applyAppearance("), context);
+  nodeVm.runInContext(sourceSection("function mix"), context);
   const dark = context.appearanceSurfaceColors("dark", { background: "#1e1e1e", foreground: "#d4d4d4" });
   assert.equal(dark["composer-bg"], "#353535");
   assert.equal(dark["composer-hover"], "#414141", "模型按钮应高亮，不能变成更暗的页面 hover");
@@ -12419,7 +12419,7 @@ test("外观切换会重新写入全部表面变量，保存时不修改用户�
     resizeEditorInput() {}, refitComposerMenus() {}, clearTimeout() {}, setTimeout: () => 1,
     localStorage: { setItem: (_key, value) => saved.push(JSON.parse(value)) },
   });
-  nodeVm.runInContext(sourceSection("function mixColor(", "function startAppearance("), context);
+  nodeVm.runInContext((sourceSection("function mix") + "\n" + sourceSection("function applyAp", "function sta")), context);
   context.applyAppearance(true);
   assert.equal(styles.get("--control-bg"), "#24313e");
   appearance.theme = "light";
@@ -12552,7 +12552,7 @@ function composerMetricsHarness({ animate = false, reducedMotion = false } = {})
       requests.push({ path, payload, signal, options, resolve, reject }); return promise;
     },
   });
-  nodeVm.runInContext(sourceSection("function composerMetricsNumber(", "function tokenCount("), context);
+  nodeVm.runInContext((sourceSection("function composerMet", "function tok") + "\n" + sourceSection("function syncCom")), context);
   const value = overrides => ({ source: "codex-rollout", turnId: "turn-current",
     inputTokens: 999952, outputTokens: 48, turnTokens: 1000000, steps: 20, totalTokens: 5000000,
     durationMs: 1000, tokensPerSecond: 48, ...overrides });
@@ -12843,10 +12843,10 @@ function claudeSlashMenuHarness() {
       calls.push(request); return request.promise;
     },
   });
-  vm.runInContext(sourceSection("function slashQuery()", "function compactCommandAvailable(")
-    + sourceSection("function slashMenuEntries(", "function compactCommandIcon(")
-    + sourceSection("function normalizeSlashIndex(", "function catalogFresh(")
-    + sourceSection("function catalogFresh(", "function selectCompactCommand("), context);
+  vm.runInContext(sourceSection("function slashQu", "function com")
+    + sourceSection("function slashMe", "function ren")
+    + (sourceSection("function normalizeSl", "function cat") + "\n" + sourceSection("function renderSkillMenu", "function act"))
+    + (sourceSection("function cat") + "\n" + sourceSection("function activeS", "function sel") + "\n" + sourceSection("function selectS", "function rem")), context);
   const skill = name => ({ name, command: name, path: `claude-skill:${name}`, backend: "claude",
     scope: "native", description: `说明 ${name}`, argumentHint: "[参数]" });
   const response = (name, instanceId = "claude:wsl:test") => ({ ok: true, backend: "claude", instanceId,

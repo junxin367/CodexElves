@@ -1,32 +1,31 @@
-// 连接状态：会话探测、线路延迟测量与连接指示器。
+// 连接状态：会话探测与连接状态切换、线路配置变化观测；线路延迟测量与连接指示器在 connection-state.js。
 
-import { observeChannelConfiguration, remoteChannelRoutes, setRemoteChannelMeasurements } from "../../channels.js";
-import { $ } from "../../ui/dom.js";
+import { observeChannelConfiguration, remoteChannelRoutes } from "../../channels.js";
+import {
+  reconnectChangedAuthorization, renderApprovals, scheduleMessages, updateComposer
+} from "../../core/actions.js";
 import {
   connected, nativeConnectionVersion, pageLeaving, session, setConnected, setSession, thread
 } from "../../core/state.js";
 import { recoveryStore } from "../../core/stores.js";
 import { api, promoteReadPriority } from "../api.js";
-import { renderApprovals } from "../approvals.js";
-import { updateComposer } from "../composer/composer.js";
 import { recoveryGeneration } from "../composer/drafts.js";
-import { messageSkillLoadScope, setMessageSkillLoadScope, skillLoading, skillScope } from "../composer/skills.js";
-import { scheduleMessages } from "../conversation/history-view.js";
-import { stopGoalLiveTimer } from "../goal/status.js";
+import {
+  messageSkillLoadScope, setMessageSkillLoadScope, skillLoading, skillScope
+} from "../composer/skill-catalog.js";
+import { stopGoalLiveTimer } from "../goal/state.js";
 import { backendAvailable, privateInputScope } from "./capabilities.js";
 import {
-  connectionRecoveryRequest, reconnectChangedAuthorization, recordRuntimeDiagnostic, refreshAll,
+  channelRtts, connectionCycleVersion, connectionLatencyFloor, connectionLatencyRefresh,
+  connectionLatencyVersion, connectionPollVersion, connectionRouteSignature, connectionRtt,
+  recordRuntimeDiagnostic, refreshAll, renderConnectionIndicator, sessionRecoveryReads,
+  sessionRequest, setConnectionCycleVersion, setConnectionLatencyFloor, setConnectionLatencyRefresh,
+  setConnectionLatencyVersion, setConnectionRouteSignature, setConnectionRtt, setSessionRequest,
   stream
-} from "./lifecycle.js";
-import { scheduleRelatedOperationCheck, stopRelatedSessionTimers } from "./related.js";
+} from "./connection-state.js";
+import { stopRelatedSessionTimers } from "./related-state.js";
+import { scheduleRelatedOperationCheck } from "./related.js";
 
-export let sessionRequest = null, connectionPollVersion = 0;
-export function setConnectionPollVersion(value) { return connectionPollVersion = value; }
-export const sessionRecoveryReads = new WeakMap();
-export let connectionCycleVersion = 0, connectionRtt = null;
-let connectionLatencyVersion = 0, connectionLatencyFloor = 0, connectionRouteSignature = "", connectionLatencyRefresh = null;
-const channelRtts = new Map();
-export const connectionRttDescription = "点击探测连接并刷新会话。网页到接入服务的 /api/session HTTP 完整往返时长；存在两条已授权线路时分别测量，不代表模型响应耗时或端到端原生执行延迟。消息使用此处可用线路中延迟最低的一路发送，发出后不自动换路重发。";
 export function readConnectionSession(signal, recoveryObservation = undefined, { resourcePriority = "foreground", recoveryProbe = false } = {}) {
   const deviceId = session?.device.id;
   const source = stream;
@@ -40,7 +39,7 @@ export function readConnectionSession(signal, recoveryObservation = undefined, {
     return sessionRequest.promise;
   }
   const controller = new AbortController();
-  const latencyVersion = ++connectionLatencyVersion;
+  const latencyVersion = setConnectionLatencyVersion(connectionLatencyVersion + 1);
   const abort = () => controller.abort();
   if (signal?.aborted) abort();
   else signal?.addEventListener("abort", abort, { once: true });
@@ -75,7 +74,7 @@ export function readConnectionSession(signal, recoveryObservation = undefined, {
           && nativeVersion === nativeConnectionVersion && connectionVersion === connectionCycleVersion
           && typeof latest.device?.id === "string"
           && Number.isFinite(elapsed) && elapsed >= 0) {
-        connectionRtt = { deviceId: latest.device.id, nativeVersion, connectionVersion, milliseconds: elapsed };
+        setConnectionRtt({ deviceId: latest.device.id, nativeVersion, connectionVersion, milliseconds: elapsed });
       }
       const result = session && session.device.id === deviceId && nativeVersion !== nativeConnectionVersion
         ? { ...latest, serviceConnected: session.serviceConnected } : latest;
@@ -85,17 +84,10 @@ export function readConnectionSession(signal, recoveryObservation = undefined, {
     .finally(() => {
       signal?.removeEventListener("abort", abort);
       request.releasePriority?.();
-      if (sessionRequest === request) sessionRequest = null;
+      if (sessionRequest === request) setSessionRequest(null);
     });
-  sessionRequest = request;
+  setSessionRequest(request);
   return request.promise;
-}
-export function cancelConnectionProbe() {
-  connectionLatencyFloor = ++connectionLatencyVersion;
-  channelRtts.clear();
-  sessionRequest?.controller.abort();
-  sessionRequest = null;
-  connectionRtt = null;
 }
 export async function syncConnectionState(source = stream, { recoveryProbe = false } = {}) {
   const deviceId = session?.device.id;
@@ -133,7 +125,7 @@ export async function refreshConnectedSession(source = stream) {
 export function setConnection(value) {
   const changed = connected !== value;
   const restored = !connected && value;
-  if (connected && !value) ++connectionCycleVersion;
+  if (connected && !value) setConnectionCycleVersion(connectionCycleVersion + 1);
   setConnected(value);
   if (changed) recordRuntimeDiagnostic("connection.state");
   if (!value) stopRelatedSessionTimers();
@@ -142,79 +134,13 @@ export function setConnection(value) {
     setMessageSkillLoadScope(""); scheduleMessages();
   }
   if (!value) stopGoalLiveTimer();
-  if (!value) { connectionRtt = null; channelRtts.clear(); }
+  if (!value) { setConnectionRtt(null); channelRtts.clear(); }
   else if (connectionRtt && (connectionRtt.deviceId !== session?.device.id
       || connectionRtt.nativeVersion !== nativeConnectionVersion
-      || connectionRtt.connectionVersion !== connectionCycleVersion)) connectionRtt = null;
+      || connectionRtt.connectionVersion !== connectionCycleVersion)) setConnectionRtt(null);
   renderConnectionIndicator();
   updateComposer();
   if (thread?.requests?.some(request => request.method === "remote/requestUserInputAsync")) renderApprovals();
-}
-export function currentChannelMeasurements() {
-  return remoteChannelRoutes().map(route => {
-    const measurement = channelRtts.get(route.origin);
-    const current = connected && measurement?.deviceId === session?.device.id
-      && measurement.nativeVersion === nativeConnectionVersion
-      && measurement.connectionVersion === connectionCycleVersion
-      && measurement.latencyVersion >= connectionLatencyFloor
-      && route.origin === measurement.origin;
-    return current ? measurement : { ...route, status: "unknown", deviceId: session?.device.id,
-      nativeVersion: nativeConnectionVersion, connectionVersion: connectionCycleVersion, latencyVersion: connectionLatencyVersion };
-  });
-}
-export function markMessageChannelUnavailable(origin, observed) {
-  if (!connected || pageLeaving) return;
-  const previous = observed.find(measurement => measurement.origin === origin);
-  if (!previous || previous.deviceId !== session?.device.id
-      || previous.nativeVersion !== nativeConnectionVersion || previous.connectionVersion !== connectionCycleVersion
-      || previous.latencyVersion < connectionLatencyFloor) return;
-  const latest = currentChannelMeasurements().find(measurement => measurement.origin === origin);
-  // 旧发送结果不能覆盖后续已完成的连接测量，也不能污染新入口。
-  if (!latest || latest.status !== "unknown" && latest !== previous) return;
-  channelRtts.set(previous.origin, { ...previous, status: "unavailable", latencyVersion: ++connectionLatencyVersion });
-  renderConnectionIndicator();
-}
-export function renderConnectionIndicator() {
-  setRemoteChannelMeasurements(currentChannelMeasurements());
-  const node = $("#connection-state"); if (!node) return;
-  const measured = connected && connectionRtt?.deviceId === session?.device.id
-    && connectionRtt.nativeVersion === nativeConnectionVersion
-    && connectionRtt.connectionVersion === connectionCycleVersion ? connectionRtt : null;
-  const activeRoutes = remoteChannelRoutes();
-  const dual = activeRoutes.length > 1;
-  const currentMeasurements = currentChannelMeasurements();
-  const measurements = dual ? activeRoutes.map(route => {
-    const measurement = currentMeasurements.find(measurement => measurement.origin === route.origin);
-    return { name: route.name, measurement: measurement?.status === "unknown" ? null : measurement };
-  }) : [];
-  const probing = connectionRecoveryRequest?.scope === privateInputScope(session);
-  node.disabled = probing;
-  node.setAttribute("aria-busy", String(probing));
-  renderConnectionLatency(node, { connected, measured, measurements, dual, probing });
-}
-function renderConnectionLatency(node, { connected, measured, measurements, dual, probing = false }) {
-  const ready = measurement => measurement?.status === "ready"
-    && Number.isFinite(measurement.milliseconds) && measurement.milliseconds >= 0;
-  if (dual) {
-    const rows = measurements.map(({ name, measurement }) => {
-      const row = document.createElement("span");
-      const status = !connected ? probing ? "正在探测…" : "连接中断" : ready(measurement) ? `${Math.round(measurement.milliseconds)} ms`
-        : measurement?.status === "unavailable" ? "暂不可用" : "测量中…";
-      row.className = `connection-route ${ready(measurement) ? "online" : measurement?.status === "unavailable" || !connected ? "unavailable" : "pending"}`;
-      row.textContent = `${name} ${status}`;
-      return row;
-    });
-    node.replaceChildren(...rows);
-  } else {
-    node.textContent = !connected ? probing ? "正在探测…" : "连接中断 · 自动重连"
-      : measured ? `${Math.round(measured.milliseconds)} ms` : "连接中…";
-  }
-  const online = dual ? connected && measurements.some(({ measurement }) => ready(measurement)) : !!measured;
-  node.classList.toggle("dual-channel", dual);
-  node.title = connectionRttDescription;
-  node.setAttribute("aria-label", `${dual ? measurements.map((_, index) => node.children[index].textContent).join("；") : node.textContent}。${connectionRttDescription}`);
-  node.classList.toggle("online", online);
-  node.classList.toggle("pending", connected && !online);
 }
 // 线路配置变化时重置延迟测量；存在多条线路时立即重新探测。
 export function installChannelConfigurationObserver() {
@@ -222,14 +148,14 @@ export function installChannelConfigurationObserver() {
     const routes = remoteChannelRoutes();
     const signature = [configuration?.serverId || "", ...routes.map(route => route.origin)].join("\n");
     if (signature === connectionRouteSignature) return;
-    connectionRouteSignature = signature;
-    connectionLatencyFloor = ++connectionLatencyVersion;
+    setConnectionRouteSignature(signature);
+    setConnectionLatencyFloor(setConnectionLatencyVersion(connectionLatencyVersion + 1));
     channelRtts.clear();
-    connectionRtt = null;
+    setConnectionRtt(null);
     renderConnectionIndicator();
     clearTimeout(connectionLatencyRefresh);
-    if (routes.length > 1) connectionLatencyRefresh = setTimeout(() => {
+    if (routes.length > 1) setConnectionLatencyRefresh(setTimeout(() => {
       if (session && !pageLeaving && !document.hidden) void syncConnectionState().catch(() => {});
-    }, 0);
+    }, 0));
   });
 }

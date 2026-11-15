@@ -1,69 +1,22 @@
-// 侧栏会话操作：行菜单与长按、删除会话及其回执核对、侧栏视图偏好、重命名与独立窗口。
+// 侧栏会话操作：行菜单与长按、侧栏视图偏好、重命名、工作区文件菜单与独立窗口；删除会话在 thread-deletion.js，删除记录在 deletion-state.js。
 
 import { isAndroidContainer } from "../../platform.js";
 import { createSidebarPreferenceStore } from "../../recovery-store.js";
 import { normalizeWorkspacePreview, openWorkspacePreviewWindow } from "../../workspace-preview.js";
-import { confirmAction } from "../../ui/dialog.js";
 import { $, button, element } from "../../ui/dom.js";
 import { icon } from "../../ui/icons.js";
 import { notice } from "../../ui/notice.js";
 import { closePopup, openPopup, togglePopup } from "../../ui/popup.js";
-import { busy, connected, selectedId, session, sidebar, stopping, thread } from "../../core/state.js";
-import { readCache, recoveryStore, transcriptCache } from "../../core/stores.js";
-import { randomId } from "../../core/util.js";
-import { api } from "../api.js";
-import {
-  approvalDrafts, approvalReplies, blockingRequestStates, questionDrafts, questionReplyReceipts,
-  renderApprovals
-} from "../approvals.js";
-import { closeComposerMenus } from "../composer/composer-menus.js";
-import { updateComposer } from "../composer/composer.js";
-import { deleteDraft, persistQueuedEdits, recoveryGeneration, recoveryScope } from "../composer/drafts.js";
-import { cancelPromptOptimization, promptOptimizations } from "../composer/prompt-optimization.js";
-import { compactionLocked, compactions, persistCompactions } from "../conversation/compaction.js";
-import { mutate, pending, savePending } from "../conversation/pending.js";
-import { showWelcome } from "../conversation/selection.js";
-import {
-  goalComposerAction, goalComposerRecoveries, goalRecordThreadId, persistGoalComposerRecoveries
-} from "../goal/composer.js";
-import {
-  goalEditDraft, goalEditPending, setGoalEditDraft, setGoalEditPending, stopGoalLiveTimer
-} from "../goal/status.js";
-import { readMarkRequests } from "../messages/user-content.js";
-import { queuedActionBusy } from "../queue/queue.js";
-import { queuedEditChecks, queuedEdits } from "../queue/queued-edit.js";
-import { clearSentMessageDisplays } from "../queue/sent-display.js";
-import {
-  claudeThreadId, normalizeRelatedView, privateInputScope, validRelatedThreadId
-} from "../session/capabilities.js";
-import { relatedThreadViews } from "../session/related.js";
-import {
-  cacheDisplayData, readScope, sidebarSnapshot, threadDisplayKey, threadDisplays
-} from "../session/thread-cache.js";
-import { sessionMenu } from "../shell.js";
-import {
-  loadSidebar, recentPriorityIds, recentPriorityKnownIds, recentPrioritySelectionSuppressions,
-  renderSidebar
-} from "./list.js";
+import { closeComposerMenus, loadSidebar, mutate, renderSidebar } from "../../core/actions.js";
+import { connected, selectedId, session, sidebar, thread } from "../../core/state.js";
+import { recoveryGeneration } from "../composer/drafts.js";
+import { normalizeRelatedView, privateInputScope, validRelatedThreadId } from "../session/capabilities.js";
+import { relatedThreadViews } from "../session/related-state.js";
+import { cacheDisplayData, sidebarSnapshot } from "../session/thread-cache.js";
+import { threadDeleted, threadDeletionLocked } from "./deletion-state.js";
 
 export let sidebarBusy = false;
 export function setSidebarBusy(value) { return sidebarBusy = value; }
-export const threadDeletions = new Map(), threadDeletionChecks = new Set();
-export const threadDeletionStorageKey = "codex-elves-thread-deletions";
-// 从会话存储恢复删除会话的待核对记录；提交中的记录恢复为结果未知。
-export function restoreThreadDeletions() {
-  try {
-    const records = JSON.parse(sessionStorage.getItem(threadDeletionStorageKey) || "[]");
-    if (Array.isArray(records)) for (const record of records) {
-      if (typeof record?.deviceId !== "string" || typeof record.threadId !== "string"
-          || !/^[a-zA-Z0-9_-]{1,120}$/.test(record.threadId)
-          || !["submitting", "pending", "unknown", "deleted"].includes(record.state)
-          || record.state !== "deleted" && (typeof record.id !== "string" || !/^[a-zA-Z0-9-]{1,100}$/.test(record.id))) continue;
-      threadDeletions.set(JSON.stringify([record.deviceId, record.threadId]),
-        { ...record, state: record.state === "submitting" ? "unknown" : record.state });
-    }
-  } catch {}
-}
 export let sidebarFilters = { mode: null, chats: null, projects: null, pinned: null };
 const sidebarPreferenceStore = createSidebarPreferenceStore();
 export let sidebarPreferenceScope = null;
@@ -158,38 +111,6 @@ export function bindSidebarRowMenu(container, menu) {
     event.preventDefault(); sidebarLongPress?.dispose(); openPopup(menu);
   });
 }
-export function threadDeletionKey(id, deviceId = session?.device.id) {
-  return JSON.stringify([deviceId, id]);
-}
-export function threadDeleted(id, deviceId = session?.device.id) {
-  return threadDeletions.get(threadDeletionKey(id, deviceId))?.state === "deleted";
-}
-export function threadDeletionLocked(id = selectedId) {
-  const record = threadDeletions.get(threadDeletionKey(id));
-  return !!record && record.state !== "deleted";
-}
-function setThreadDeletion(key, record, required = false) {
-  const previous = threadDeletions.get(key);
-  if (record && !Number.isFinite(record.time)) record.time = Date.now();
-  if (record) threadDeletions.set(key, record);
-  else threadDeletions.delete(key);
-  try {
-    sessionStorage.setItem(threadDeletionStorageKey,
-      JSON.stringify([...threadDeletions.values()].filter(value => value.state !== "confirming")));
-  } catch {
-    if (required) {
-      if (previous) threadDeletions.set(key, previous); else threadDeletions.delete(key);
-      throw new Error("无法保存删除回执，会话未删除。请允许此网页使用浏览器会话存储。");
-    }
-  }
-}
-export function filterDeletedSidebar(value, deviceId = session?.device.id) {
-  if (!value) return;
-  const keep = item => !threadDeleted(item.id, deviceId);
-  value.recent = value.recent.filter(keep);
-  value.pinnedThreads = value.pinnedThreads.filter(keep);
-  for (const project of value.projects) project.threads = project.threads.filter(keep);
-}
 export function filterSideThreadSidebar(value) {
   if (!value) return;
   const sideIds = new Set(value.sideThreadIds || []);
@@ -200,137 +121,6 @@ export function filterSideThreadSidebar(value) {
   value.recent = value.recent.filter(keep);
   value.pinnedThreads = value.pinnedThreads.filter(keep);
   for (const project of value.projects) project.threads = project.threads.filter(keep);
-}
-export function applyThreadDeletion(id, deviceId = session?.device.id) {
-  transcriptCache.remove(deviceId, id);
-  if (session?.device.id === deviceId) threadDisplays.delete(threadDisplayKey(id));
-  if (readScope && session?.device.id === deviceId) {
-    void readCache.remove(readScope, "transcript", id).catch(() => {});
-    void readCache.remove(readScope, "thread", id).catch(() => {});
-  }
-  const key = threadDeletionKey(id, deviceId), previous = threadDeletions.get(key);
-  setThreadDeletion(key, { ...previous, deviceId, threadId: id, state: "deleted" });
-  if (session?.device.id !== deviceId) return;
-  clearSentMessageDisplays(id);
-  sessionMenu?.removeThread(id);
-  if (selectedId === id) {
-    stopGoalLiveTimer(); showWelcome();
-  }
-  // showWelcome 会先保存当前草稿；永久删除后再清理，避免把草稿重新留在内存。
-  deleteDraft(id);
-  const removedGoalRecovery = goalComposerRecoveries.get(id);
-  goalComposerRecoveries.delete(id);
-  if (persistGoalComposerRecoveries() && removedGoalRecovery?.recoveryRef && recoveryScope)
-    void recoveryStore.remove(recoveryScope, "pending", removedGoalRecovery.recoveryRef).catch(() => {});
-  for (const [scope, record] of promptOptimizations)
-    if (JSON.parse(scope)[0] === id) { cancelPromptOptimization(record); promptOptimizations.delete(scope); }
-  readMarkRequests.delete(id);
-  const queuedEdit = queuedEdits.get(id);
-  if (queuedEdit) queuedEditChecks.delete(queuedEdit.editId);
-  queuedEdits.delete(id); persistQueuedEdits();
-  compactions.delete(id); persistCompactions();
-  blockingRequestStates.delete(key);
-  for (const [entryKey, reply] of approvalReplies)
-    if (reply.deviceId === deviceId && reply.threadId === id) approvalReplies.delete(entryKey);
-  for (const [entryKey, draft] of approvalDrafts)
-    if (draft.deviceId === deviceId && draft.threadId === id) approvalDrafts.delete(entryKey);
-  for (const [entryKey, reply] of questionReplyReceipts)
-    if (reply.deviceId === deviceId && reply.threadId === id) {
-      questionReplyReceipts.delete(entryKey); questionDrafts.delete(entryKey);
-    }
-  for (const entryKey of questionDrafts.keys()) {
-    const [draftDevice, draftThread] = JSON.parse(entryKey);
-    if (draftDevice === deviceId && draftThread === id) questionDrafts.delete(entryKey);
-  }
-  try { sessionStorage.setItem("codex-elves-question-receipts", JSON.stringify([...questionReplyReceipts.values()])); } catch {}
-  if (goalEditDraft?.threadId === id) { setGoalEditDraft(null); $("#goal-edit-dialog")?.close(); }
-  if (goalEditPending?.deviceId === deviceId && goalEditPending.payload.threadId === id) setGoalEditPending(null);
-  if (pending?.deviceId === deviceId && (pending.payload?.threadId === id
-      || goalComposerAction(pending.action, pending.payload) && goalRecordThreadId(pending) === id)) savePending(null);
-  recentPriorityIds?.delete(id); recentPriorityKnownIds.delete(id);
-  recentPrioritySelectionSuppressions.delete(id);
-  filterDeletedSidebar(sidebar);
-  if (sidebar) cacheDisplayData("sidebar", "main", sidebarSnapshot(sidebar));
-  const hash = new URLSearchParams(location.hash.slice(1));
-  if (hash.get("thread") === id) {
-    hash.delete("thread");
-    history.replaceState(null, "", `${location.pathname}${location.search}${hash.size ? `#${hash}` : ""}`);
-  }
-  renderSidebar(); updateComposer(); renderApprovals();
-}
-export function threadDeletionConflict(id) {
-  return busy || stopping || sidebarBusy || pending?.payload?.threadId === id
-    || compactionLocked(id) || queuedEdits.has(id)
-    || goalEditPending?.deviceId === session?.device.id && goalEditPending.payload.threadId === id
-    || [...queuedActionBusy].some(key => key.startsWith(`${id}:`))
-    || [...approvalReplies.values()].some(reply => reply.deviceId === session?.device.id && reply.threadId === id
-      && ["submitting", "pending", "unknown"].includes(reply.state))
-    || [...questionReplyReceipts.values()].some(reply => reply.deviceId === session?.device.id && reply.threadId === id);
-}
-export async function deleteSidebarThread(item) {
-  if (!session || session.readOnly || !connected || threadDeletionConflict(item.id)) return;
-  const deviceId = session.device.id, key = threadDeletionKey(item.id, deviceId);
-  if (threadDeletions.has(key)) return;
-  let record = { id: randomId(), deviceId, threadId: item.id, title: item.title || "未命名会话", state: "confirming" };
-  threadDeletions.set(key, record);
-  try {
-    const claude = claudeThreadId(item.id);
-    const confirmed = await confirmAction(claude ? "移除 Claude 会话" : "删除会话",
-      claude ? `将从远程列表移除“${record.title}”。Claude 原生会话历史仍保留，项目文件不受影响。`
-        : `将永久删除“${record.title}”及其会话记录，此操作不可恢复。确定删除吗？`,
-      claude ? "移除会话" : "删除会话", true);
-    if (!confirmed || session?.device.id !== deviceId || session.readOnly || !connected) return;
-    if (threadDeletions.get(key) !== record || threadDeletionConflict(item.id)) return;
-    record = { ...record, state: "submitting" };
-    setThreadDeletion(key, record, true);
-    renderSidebar(); updateComposer();
-    const result = await mutate("deleteThread", { threadId: item.id }, { receiptId: record.id });
-    if (result?.ok !== true || result.deleted !== true || result.threadId !== item.id)
-      throw Object.assign(new Error(result?.message || "删除结果尚未确认，请核对回执，勿重复删除。"), { outcomeUnknown: true });
-    applyThreadDeletion(item.id, deviceId);
-    if (session?.device.id === deviceId) {
-      notice(claude ? "已从远程列表移除 Claude 会话" : result.status === "partial" ? result.message || "会话已永久删除，部分列表清理未完成。" : "会话已永久删除",
-        result.status === "partial");
-      void loadSidebar(null, { fresh: true }).catch(() => {});
-    }
-  } catch (error) {
-    if (!threadDeleted(item.id, deviceId)) {
-      if (error.outcomeUnknown || ["pending", "unknown"].includes(error.operationState))
-        setThreadDeletion(key, { ...record, state: error.operationState === "pending" ? "pending" : "unknown" });
-      else setThreadDeletion(key, null);
-    }
-    if (session?.device.id === deviceId && !threadDeleted(item.id, deviceId)) notice(error.message, true);
-  } finally {
-    if (threadDeletions.get(key)?.state === "confirming") threadDeletions.delete(key);
-    if (session?.device.id === deviceId) { renderSidebar(); updateComposer(); }
-  }
-}
-export async function checkThreadDeletion(record) {
-  const key = threadDeletionKey(record.threadId, record.deviceId);
-  if (!session || session.device.id !== record.deviceId || !connected || threadDeletionChecks.has(key)
-      || threadDeletions.get(key)?.id !== record.id || threadDeleted(record.threadId)) return;
-  threadDeletionChecks.add(key);
-  try {
-    const receipt = await api(`/api/receipts/${record.id}`);
-    if (threadDeleted(record.threadId, record.deviceId) || threadDeletions.get(key)?.id !== record.id) return;
-    const result = receipt.result;
-    if (result?.ok === true && result.deleted === true && result.threadId === record.threadId) {
-      applyThreadDeletion(record.threadId, record.deviceId);
-      if (session?.device.id === record.deviceId) notice(result.message || "已确认会话永久删除", result.status === "partial");
-    } else if (receipt.state === "failed" && result?.outcomeUnknown !== true) {
-      setThreadDeletion(key, null);
-      if (session?.device.id === record.deviceId) notice(result?.message || "会话未删除，可重新操作", true);
-    } else {
-      setThreadDeletion(key, { ...record, state: receipt.state === "pending" ? "pending" : "unknown" });
-      if (session?.device.id === record.deviceId) notice(result?.message || "删除结果尚未确认，请在本机核对；不会自动重试删除。", true);
-    }
-  } catch (error) {
-    if (session?.device.id === record.deviceId)
-      notice(error.code === 404 ? "未找到删除回执，请在本机核对；不会自动重试删除。" : error.message, true);
-  } finally {
-    threadDeletionChecks.delete(key);
-    if (session?.device.id === record.deviceId) { renderSidebar(); updateComposer(); }
-  }
 }
 export function restoreSidebarPreferences() {
   const scope = privateInputScope(session);

@@ -3,18 +3,22 @@
 import { $ } from "../ui/dom.js";
 import { notice } from "../ui/notice.js";
 import { activePopup, closePopup } from "../ui/popup.js";
+import { closeComposerMenus } from "../core/actions.js";
 import { selectedId, selectionToken } from "../core/state.js";
 import { claudeUsageState, closeClaudeUsageTip } from "./composer/claude-usage.js";
-import { closeComposerMenus, closeModelMenu } from "./composer/composer-menus.js";
+import { closeModelMenu } from "./composer/composer-menus.js";
 import { closeContextUsageTip, contextUsageTip } from "./composer/metrics.js";
-import { finishQueueDrag, queueDrag } from "./queue/queue.js";
+import { finishQueueDrag } from "./queue/queue.js";
+import { queueDrag } from "./queue/state.js";
+import {
+  relatedNavigationOwner, relatedSessionView, relatedThreadOperations, sideCreationHistoryKey,
+  sideCreationView
+} from "./session/related-state.js";
 import {
   dismissSideCreation, handleSideThreadShortcut, handleTransientHistoryPop, ownsRelatedOperation,
-  relatedNavigationOwner, relatedSessionView, relatedThreadOperations, requestSideCreationBack,
-  returnToParentSession, showSideCreation, sideCreationHistoryKey, sideCreationView,
-  updateSideCreationStatus
+  requestSideCreationBack, returnToParentSession, showSideCreation, updateSideCreationStatus
 } from "./session/related.js";
-import { closeMobileSidebar } from "./shell.js";
+import { closeMobileSidebar } from "./shell-state.js";
 
 // 点击、焦点切换与键盘输入时收起弹层和提示，并处理 Tab 输入模式与 Esc 分层关闭。
 export function installGlobalInputHandlers() {

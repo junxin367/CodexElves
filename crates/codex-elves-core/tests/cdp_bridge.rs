@@ -267,13 +267,16 @@ const assert=require("node:assert/strict");
 (async()=>{
 // 远程网页已按模块拆分：经共享辅助脚本在单个模块内截取函数源码（已去掉 import/export）。
 const {loadRemoteAppSource}=await import(require("node:url").pathToFileURL(process.argv[1]).href);
-const source=(await loadRemoteAppSource()).section("async function returnToParentSession(","function showSideCreation(");
+const remote=await loadRemoteAppSource();
+const source=remote.section("async function returnToParentSession(","function showSideCreation(");
 let backs=0,selections=[];
 const env={selectedId:"side",relatedHistoryKey:"related",relatedNavigationOwner:"current",
   relatedBackPending:false,relatedSessionView:{threadId:"side",parentThreadId:"parent",returnToParent:true},
   normalizeRelatedView:value=>value,validRelatedThreadId:value=>!!value,
   history:{state:{related:{threadId:"side",returnToParent:true}},back:()=>backs++},
   syncRelatedSessionLayout:()=>{},selectThread:async(id,options)=>selections.push([id,options])};
+// 状态归属其他模块时片段经 setter 写入（与 wireVm 相同）：按辅助脚本收集的 setter 改写 env 中的同名状态。
+for(const [setter,name] of remote.setters) if(source.includes(`${setter}(`)) env[setter]=value=>env[name]=value;
 const back=new Function("env",`with(env){${source}return returnToParentSession;}`)(env);
   await back();
   assert.equal(backs,0,"重载后的旧历史不能直接后退");

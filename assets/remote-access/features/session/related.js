@@ -1,4 +1,4 @@
-// 关联会话：侧边会话与子代理会话的打开、返回、过期、创建回执及临时历史导航。
+// 关联会话：侧边会话与子代理会话的打开、返回、过期、创建回执及临时历史导航；视图、操作记录与侧边新建等共享状态在 related-state.js。
 
 import { isAndroidContainer } from "../../platform.js";
 import { confirmAction } from "../../ui/dialog.js";
@@ -6,55 +6,46 @@ import { $, button, element } from "../../ui/dom.js";
 import { notice } from "../../ui/notice.js";
 import { closePopup } from "../../ui/popup.js";
 import {
+  closeComposerMenus, mutate, reloadThread, renderMessages, renderSidebar, retryConnectionRecovery,
+  selectThread, showWelcome, updateComposer
+} from "../../core/actions.js";
+import {
   connected, creating, pageLeaving, selectedId, selectionToken, selectionVersion, session,
   setThread, sidebar, thread, turns
 } from "../../core/state.js";
 import { readCache, transcriptCache } from "../../core/stores.js";
 import { randomId } from "../../core/util.js";
 import { api } from "../api.js";
-import { closeComposerMenus } from "../composer/composer-menus.js";
-import { pendingFeedbackReady, updateComposer } from "../composer/composer.js";
-import { currentEffort, currentModelId } from "../composer/models.js";
-import { permissionWrites } from "../composer/permissions.js";
-import { renderMessages } from "../conversation/history-view.js";
+import { currentEffort, currentModelId } from "../composer/model-choice.js";
+import { permissionWrites } from "../composer/options-state.js";
+import { pendingFeedbackReady } from "../composer/send-state.js";
+import { setHistoryError, setHistoryInitialized, setTranscriptChecking } from "../conversation/history-state.js";
 import {
-  reloadThread, setHistoryError, setHistoryInitialized, setTranscriptChecking
-} from "../conversation/history.js";
-import { mutate } from "../conversation/pending.js";
-import {
-  relatedSelectionVersion, selectThread, setRelatedReturnTranscript, setRelatedSelectionVersion,
-  setSuppressAutomaticNewChat, showWelcome, syncThreadHash
-} from "../conversation/selection.js";
-import { isSubagentItem } from "../messages/subagents.js";
+  relatedSelectionVersion, setRelatedReturnTranscript, setRelatedSelectionVersion,
+  setSuppressAutomaticNewChat, syncThreadHash
+} from "../conversation/selection-state.js";
 import { markVisibleThreadRead } from "../messages/user-content.js";
 import {
   normalizeRelatedView, privateInputScope, sideThreadsEnabled, subagentsEnabled, threadReadOnly,
   validRelatedThreadId
 } from "./capabilities.js";
-import { retryConnectionRecovery } from "./lifecycle.js";
-import { workspaceSidePanel } from "./side-panel.js";
 import {
-  discardPersistentThreadDisplay, readScope, syncRelatedModelDisplay, threadDisplayKey,
-  threadDisplays
-} from "./thread-cache.js";
-import { sessionMenu, sessionTools, setSessionMenu, syncRelatedSidebarLayout } from "../shell.js";
+  conversationHistoryPosition, persistRelatedOperations, relatedBackPending, relatedExitTransition,
+  relatedHistoryKey, relatedNavigationOwner, relatedOperationKey, relatedOperationStorageKey,
+  relatedOperationTimer, relatedSessionCheckTimer, relatedSessionView, relatedThreadOperations,
+  relatedThreadViews, restoringTransientHistory, sessionMenuIsOpen, setRelatedBackPending,
+  setRelatedExitTransition, setRelatedOperationTimer, setRelatedSessionCheckTimer,
+  setRelatedSessionView, setRestoringTransientHistory, setSideCreationView, setTransientHistoryView,
+  sideCreationHistoryKey, sideCreationView, stopRelatedSessionTimers, syncSideThreadUnread,
+  transientHistoryView
+} from "./related-state.js";
+import { workspaceSidePanel } from "./side-panel.js";
+import { discardPersistentThreadDisplay, readScope, threadDisplayKey, threadDisplays } from "./thread-cache.js";
+import { syncRelatedModelDisplay } from "./thread-display.js";
+import { sessionMenu, sessionTools, setSessionMenu, syncRelatedSidebarLayout } from "../shell-state.js";
 import { filterSideThreadSidebar } from "../sidebar/actions.js";
-import { markSidebarThreadReadLocally, renderSidebar, sidebarReadRefreshSuppressions } from "../sidebar/list.js";
+import { markSidebarThreadReadLocally, sidebarReadRefreshSuppressions } from "../sidebar/list-state.js";
 
-export let relatedSessionView = null;
-export function setRelatedSessionView(value) { return relatedSessionView = value; }
-export let relatedBackPending = false;
-export function setRelatedBackPending(value) { return relatedBackPending = value; }
-export let relatedExitTransition = null;
-export let sideCreationView = null;
-export let relatedMenuTimer = null, relatedOperationTimer = null, relatedSessionCheckTimer = null;
-export function setRelatedMenuTimer(value) { return relatedMenuTimer = value; }
-let transientHistoryView = null, restoringTransientHistory = null;
-export const relatedThreadViews = new Map(), relatedThreadOperations = new Map();
-export const relatedHistoryKey = "codexElvesRelatedSession", relatedOperationStorageKey = "codex-elves-related-operations";
-export const sideCreationHistoryKey = "codexElvesSideCreation";
-export const conversationHistoryKey = "codexElvesConversationPosition";
-export const relatedNavigationOwner = randomId();
 function rememberRelatedView(id, kind, parentThreadId, name = "", { openedFromThreadId = null, ephemeral } = {}) {
   const known = normalizeRelatedView(relatedThreadViews.get(id), id);
   const value = normalizeRelatedView({ scope: privateInputScope(session), threadId: id,
@@ -78,7 +69,7 @@ export function syncRelatedSessionLayout() {
     // 直接打开/重连子代理 URL 时，以后端确认的主会话关系恢复只读布局和返回入口，不依赖旧页面内存。
     view = rememberRelatedView(selectedId, "subagent", thread.parentThreadId, thread.agentName || thread.title || "",
       { openedFromThreadId: thread.parentThreadId, ephemeral: thread.ephemeral });
-    relatedSessionView = view;
+    setRelatedSessionView(view);
   }
   const workspace = $(".workspace");
   workspace?.classList.toggle("related-session-view", !!view);
@@ -107,25 +98,16 @@ export function syncRelatedSessionLayout() {
   sessionMenu?.reposition?.();
   scheduleRelatedSessionCheck();
 }
-export function syncSideThreadUnread() {
-  const trigger = $("#open-session-tools");
-  if (!trigger) return;
-  const unread = !creating && !relatedSessionView && (sidebar?.unreadSideThreads || [])
-    .some(item => item.parentThreadId === selectedId);
-  trigger.classList.toggle("has-unread-side-thread", unread);
-  const label = unread ? "会话菜单，有未读的侧边会话" : "会话菜单";
-  trigger.setAttribute("aria-label", label); trigger.title = label;
-}
 export function finishRelatedSessionExit() {
   const transition = relatedExitTransition;
   if (!transition) return;
-  relatedExitTransition = null;
+  setRelatedExitTransition(null);
   clearTimeout(transition.timer);
   transition.conversation.removeEventListener("animationend", transition.onAnimation);
   transition.conversation.removeEventListener("animationcancel", transition.onAnimation);
   transition.layer.remove();
   transition.workspace.inert = transition.wasInert;
-  relatedBackPending = false;
+  setRelatedBackPending(false);
   syncRelatedSessionLayout();
   transition.resolve();
 }
@@ -174,8 +156,8 @@ export function prepareRelatedSessionExit() {
     if (event.target === snapshot && event.animationName === "related-session-exit")
       finishRelatedSessionExit();
   };
-  relatedExitTransition = transition;
-  relatedBackPending = true;
+  setRelatedExitTransition(transition);
+  setRelatedBackPending(true);
   syncRelatedSessionLayout();
   workspace.inert = true;
   snapshot.addEventListener("animationend", transition.onAnimation);
@@ -202,37 +184,29 @@ export function applyRelatedThreadMetadata(value) {
     const source = previous?.kind === inferred.kind
       ? previous.openedFromThreadId || (previous.returnToParent ? previous.parentThreadId : null) : null;
     // 打开来源只用于返回，不作为原生类型或父关系的证据；完成后退出运行列表也不改变来源。
-    relatedSessionView = { ...rememberRelatedView(value.id, inferred.kind, inferred.parentThreadId, inferred.name,
+    setRelatedSessionView({ ...rememberRelatedView(value.id, inferred.kind, inferred.parentThreadId, inferred.name,
       { openedFromThreadId: source, ephemeral: value.ephemeral }),
       ...(source && previous.returnToParent
         ? { returnToParent: true } : {}),
       ...(source && previous.owner
-        ? { owner: previous.owner } : {}) };
+        ? { owner: previous.owner } : {}) });
   } else if (relatedSessionView?.threadId === value.id) {
     // 历史路由只是恢复提示，真实会话关系以原生返回为准。
     relatedThreadViews.delete(value.id);
-    relatedSessionView = null;
+    setRelatedSessionView(null);
   }
   if (!inferred && value.ephemeral === true) discardPersistentThreadDisplay(value.id);
   syncRelatedSessionLayout();
   syncThreadHash(value.id);
 }
-function sessionMenuIsOpen() {
-  if (relatedSessionView) return false;
-  return typeof sessionMenu?.isOpen === "function" ? sessionMenu.isOpen() : !!sessionMenu?.isOpen;
-}
-export function conversationHistoryPosition(state) {
-  const value = state?.[conversationHistoryKey];
-  return Number.isSafeInteger(value) && value >= 0 ? value : 0;
-}
 export function rememberTransientHistory() {
-  transientHistoryView = { scope: privateInputScope(session), threadId: selectedId,
-    state: history.state, url: location.href };
+  setTransientHistoryView({ scope: privateInputScope(session), threadId: selectedId,
+    state: history.state, url: location.href });
 }
 export function handleTransientHistoryPop(event) {
   if (restoringTransientHistory) {
     const scope = restoringTransientHistory.scope;
-    restoringTransientHistory = null;
+    setRestoringTransientHistory(null);
     if (scope === privateInputScope(session)) event.stopImmediatePropagation();
     return;
   }
@@ -248,31 +222,26 @@ export function handleTransientHistoryPop(event) {
   event.stopImmediatePropagation();
   preview.close();
   // popstate 本身不可取消；恢复原历史位置，让下一次返回再离开当前页面。
-  restoringTransientHistory = { scope: saved.scope };
+  setRestoringTransientHistory({ scope: saved.scope });
   history.go(direction);
-}
-export function stopRelatedSessionTimers() {
-  clearTimeout(relatedMenuTimer); relatedMenuTimer = null;
-  clearTimeout(relatedOperationTimer); relatedOperationTimer = null;
-  clearTimeout(relatedSessionCheckTimer); relatedSessionCheckTimer = null;
 }
 export function scheduleRelatedSessionCheck() {
   clearTimeout(relatedSessionCheckTimer);
-  relatedSessionCheckTimer = null;
+  setRelatedSessionCheckTimer(null);
   const view = normalizeRelatedView(relatedSessionView, selectedId);
   if (view
       && (view.kind === "subagent" ? subagentsEnabled() : sideThreadsEnabled())
       && connected && !document.hidden) {
     const id = selectedId, scope = privateInputScope(session), version = selectionVersion;
     // 用户要求 Codex 仅保留服务模式；关联会话统一每 2 秒只读补齐，隐藏或离页时停止，不恢复执行。
-    relatedSessionCheckTimer = setTimeout(async () => {
-      relatedSessionCheckTimer = null;
+    setRelatedSessionCheckTimer(setTimeout(async () => {
+      setRelatedSessionCheckTimer(null);
       if (scope !== privateInputScope(session) || selectedId !== id || version !== selectionVersion
           || document.hidden || !connected || relatedSessionView?.kind !== view.kind) return;
       try { await reloadThread(); } catch {}
       if (scope === privateInputScope(session) && selectedId === id && version === selectionVersion)
         scheduleRelatedSessionCheck();
-    }, 2000);
+    }, 2000));
     return;
   }
 }
@@ -304,7 +273,7 @@ async function retireExpiredSideThread(id) {
   const current = normalizeRelatedView(relatedSessionView, id);
   if (id !== selectedId || current?.kind !== "side") return false;
   const expired = { ...current, expired: true };
-  relatedSessionView = expired;
+  setRelatedSessionView(expired);
   relatedThreadViews.set(id, expired);
   sessionMenu?.markSideThreadRead(id);
   sessionMenu?.removeThread(id);
@@ -355,8 +324,8 @@ export function resetRelatedSessions({ persisted = false } = {}) {
   finishRelatedSessionExit();
   stopRelatedSessionTimers();
   sessionMenu?.dispose(); setSessionMenu(null);
-  relatedSessionView = null; setRelatedReturnTranscript(null); relatedBackPending = false;
-  transientHistoryView = restoringTransientHistory = null;
+  setRelatedSessionView(null); setRelatedReturnTranscript(null); setRelatedBackPending(false);
+  setTransientHistoryView(setRestoringTransientHistory(null));
   relatedThreadViews.clear(); relatedThreadOperations.clear();
   if (persisted) try { sessionStorage.removeItem(relatedOperationStorageKey); } catch {}
 }
@@ -416,23 +385,6 @@ export async function retireNativeSideThreads(ids, { notify = true, reason = "cl
     await returnToParentSession();
   }
 }
-export function scheduleRelatedMenuRefresh(event, { suppressReadRefresh = false } = {}) {
-  const params = event.params || {}, id = params.threadId ?? params.conversationId ?? params.thread?.id;
-  if (!["thread/started", "thread/deleted", "turn/started", "turn/completed",
-    "thread/status/changed", "thread/name/updated", "remote/sidebarChanged", "remote/relatedThreadsChanged",
-    "remote/resync", "remote/reconnected",
-    "item/started", "item/completed"].includes(event.method)
-    || event.method.startsWith("item/") && !isSubagentItem(params.item || {})) return;
-  if (suppressReadRefresh && event.method === "remote/sidebarChanged") return;
-  const relevant = sessionMenu?.invalidate(event.method === "thread/deleted" ? null : id, params.parentThreadId);
-  if (!relevant || relatedSessionView || !selectedId || !connected || relatedMenuTimer) return;
-  const scope = privateInputScope(session), parent = selectedId;
-  relatedMenuTimer = setTimeout(() => {
-    relatedMenuTimer = null;
-    if (scope === privateInputScope(session) && selectedId === parent && !relatedSessionView)
-      void Promise.resolve(sessionMenu.refresh({ background: true })).catch(() => {});
-  }, 450);
-}
 export async function openRelatedThread(item, kind, parentThreadId = selectedId, {
   owner = relatedNavigationOwner, initialThread = null, replaceHistory = false,
   preparedView = false, onViewReady = null, revealSidePanel = true
@@ -464,7 +416,7 @@ export async function returnToParentSession() {
   // 重载后的 owner 已失效，旧历史上一项不一定是父会话；只有本页创建的路由才可直接后退。
   if (historyView?.owner === relatedNavigationOwner && view.owner === relatedNavigationOwner
       && historyView.returnToParent && view.returnToParent) {
-    relatedBackPending = true; syncRelatedSessionLayout();
+    setRelatedBackPending(true); syncRelatedSessionLayout();
     history.back();
     return;
   }
@@ -509,7 +461,7 @@ export function showSideCreation(record, { recordHistory = true } = {}) {
     }
   });
   if (dock) {
-    sideCreationView = { record, dock };
+    setSideCreationView({ record, dock });
     return;
   }
   const panel = element("section", "session-tools-screen side-creation-screen");
@@ -521,7 +473,7 @@ export function showSideCreation(record, { recordHistory = true } = {}) {
   status.setAttribute("role", "status");
   status.append(element("span", "spinner"), element("p", "", "正在创建侧边会话…"));
   panel.append(header, status);
-  sideCreationView = { record, workspace, panel, status, wasInert: workspace.inert };
+  setSideCreationView({ record, workspace, panel, status, wasInert: workspace.inert });
   workspace.inert = true;
   document.body.append(panel);
   panel.getBoundingClientRect();
@@ -542,7 +494,7 @@ export function updateSideCreationStatus(record) {
 export function dismissSideCreation({ canceled = false, animate = false } = {}) {
   const view = sideCreationView;
   if (!view) return;
-  sideCreationView = null;
+  setSideCreationView(null);
   if (canceled) {
     view.record.autoOpen = false;
     if (ownsRelatedOperation(view.record)) persistRelatedOperations();
@@ -566,22 +518,6 @@ export function requestSideCreationBack() {
   dismissSideCreation({ canceled: true, animate: true });
   if (owned) history.back();
 }
-function persistRelatedOperations(required = false) {
-  try {
-    const records = [...relatedThreadOperations.values()].map(record => ({
-      id: record.id, action: record.action, scope: record.scope, parentThreadId: record.parentThreadId,
-      threadId: record.threadId, state: record.state, selectionToken: record.selectionToken, autoOpen: record.autoOpen,
-      time: record.time
-    }));
-    if (records.length) sessionStorage.setItem(relatedOperationStorageKey, JSON.stringify(records));
-    else sessionStorage.removeItem(relatedOperationStorageKey);
-  } catch {
-    if (required) throw new Error("无法保存侧边会话操作回执，操作未提交。请允许浏览器会话存储。");
-  }
-}
-function relatedOperationKey(record) {
-  return JSON.stringify([record.scope, record.action, record.parentThreadId, record.threadId || null]);
-}
 export function ownsRelatedOperation(record) {
   return record.scope === privateInputScope(session)
     && relatedThreadOperations.get(relatedOperationKey(record)) === record;
@@ -603,16 +539,16 @@ export function restoreRelatedOperations() {
   scheduleRelatedOperationCheck();
 }
 export function scheduleRelatedOperationCheck() {
-  clearTimeout(relatedOperationTimer); relatedOperationTimer = null;
+  clearTimeout(relatedOperationTimer); setRelatedOperationTimer(null);
   if (!session || !connected || pageLeaving || document.hidden) return;
   const records = [...relatedThreadOperations.values()].filter(record =>
     ownsRelatedOperation(record) && record.state === "pending" && !record.request);
   if (!records.length) return;
-  relatedOperationTimer = setTimeout(() => {
-    relatedOperationTimer = null;
+  setRelatedOperationTimer(setTimeout(() => {
+    setRelatedOperationTimer(null);
     for (const record of records) if (ownsRelatedOperation(record))
       void resolveRelatedOperation(record, { allowSelection: record.autoOpen === true }).catch(() => {});
-  }, 2000);
+  }, 2000));
 }
 async function finishRelatedOperation(record, result, { allowSelection = false } = {}) {
   if (!ownsRelatedOperation(record)) return;

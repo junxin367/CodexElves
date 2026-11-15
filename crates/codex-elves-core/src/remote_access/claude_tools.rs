@@ -137,7 +137,18 @@ pub(super) fn apply_result(item: &mut Value, block: &Value, frame: &Value) {
         }
         Some("mcpToolCall") => item["result"] = json!({"content":parts,"isError":failed}),
         Some("plan") => {}
-        _ => item["contentItems"] = json!(parts),
+        _ => {
+            item["contentItems"] = json!(parts);
+            // 用户要求经远程会话发出的回复在正文中可见：AskUserQuestion 的原生回答（按题目顺序，未作答为 null，
+            // 截图已由连接端转为图片）随条目下发，网页据此在原位置显示问答气泡，而不是只留在折叠的工具分组里。
+            if item["tool"] == "AskUserQuestion"
+                && let Some(answers) = native
+                    .map(|meta| &meta["questionAnswers"])
+                    .filter(|answers| answers.is_array())
+            {
+                item["questionAnswers"] = answers.clone();
+            }
+        }
     }
 }
 
@@ -534,6 +545,55 @@ mod tests {
         assert_eq!(item["status"], "completed");
         assert!(item["exitCode"].is_null());
         assert_eq!(item["backgroundTaskId"], "b1");
+    }
+
+    #[test]
+    fn ask_user_question_keeps_native_answers_for_the_reply_bubble() {
+        let question = |id: &str| {
+            tool_item(&json!({"type":"tool_use","id":id,"name":"AskUserQuestion",
+                "input":{"questions":[{"question":"第一题？","header":"方案"},{"question":"第二题？","header":"提交"}]}}))
+            .unwrap()
+        };
+        let answers = json!([{"question":"第一题？","answer":"按截图处理","images":[{"url":"data:image/png;base64,AA=="}]},
+            {"question":"第二题？","answer":null,"images":[]}]);
+        let mut item = question("q1");
+        assert_eq!(item["type"], "dynamicToolCall");
+        apply_result(
+            &mut item,
+            &result(
+                "q1",
+                json!("The user answered: \"第一题？\"=\"按截图处理\"."),
+                false,
+            ),
+            &json!({"nativeToolResult":{"toolUseId":"q1","questionAnswers":answers}}),
+        );
+        assert_eq!(item["status"], "completed");
+        assert_eq!(item["questionAnswers"], answers);
+        assert_eq!(
+            item["contentItems"][0]["text"],
+            "The user answered: \"第一题？\"=\"按截图处理\"."
+        );
+
+        // 元数据属于其他工具结果、或拒答没有结构化回答时，不显示问答气泡。
+        let mut other = question("q2");
+        apply_result(
+            &mut other,
+            &result("q2", json!("已回答"), false),
+            &json!({"nativeToolResult":{"toolUseId":"q1","questionAnswers":answers}}),
+        );
+        assert!(other["questionAnswers"].is_null());
+        let mut declined = question("q3");
+        apply_result(
+            &mut declined,
+            &result(
+                "q3",
+                json!("The user doesn't want to proceed with this tool use."),
+                true,
+            ),
+            &json!({}),
+        );
+        assert_eq!(declined["status"], "failed");
+        assert!(declined["questionAnswers"].is_null());
     }
 
     #[test]

@@ -12,8 +12,102 @@
   <link rel="modulepreload" href="/app.js">
   <link rel="modulepreload" href="/attachments.js">
   <link rel="modulepreload" href="/channels.js">
+  <link rel="modulepreload" href="/core/actions.js">
+  <link rel="modulepreload" href="/core/state.js">
+  <link rel="modulepreload" href="/core/stores.js">
+  <link rel="modulepreload" href="/core/util.js">
   <link rel="modulepreload" href="/diagnostics.js">
   <link rel="modulepreload" href="/events-client.js">
+  <link rel="modulepreload" href="/features/api.js">
+  <link rel="modulepreload" href="/features/appearance/apply.js">
+  <link rel="modulepreload" href="/features/appearance/dialog.js">
+  <link rel="modulepreload" href="/features/appearance/theme.js">
+  <link rel="modulepreload" href="/features/approval-requests.js">
+  <link rel="modulepreload" href="/features/approval-state.js">
+  <link rel="modulepreload" href="/features/approvals.js">
+  <link rel="modulepreload" href="/features/claude-notices.js">
+  <link rel="modulepreload" href="/features/composer/claude-usage.js">
+  <link rel="modulepreload" href="/features/composer/composer-menus.js">
+  <link rel="modulepreload" href="/features/composer/composer.js">
+  <link rel="modulepreload" href="/features/composer/creation-state.js">
+  <link rel="modulepreload" href="/features/composer/draft-restore.js">
+  <link rel="modulepreload" href="/features/composer/drafts.js">
+  <link rel="modulepreload" href="/features/composer/metrics.js">
+  <link rel="modulepreload" href="/features/composer/model-catalog.js">
+  <link rel="modulepreload" href="/features/composer/model-choice.js">
+  <link rel="modulepreload" href="/features/composer/models.js">
+  <link rel="modulepreload" href="/features/composer/new-chat-settings.js">
+  <link rel="modulepreload" href="/features/composer/new-chat.js">
+  <link rel="modulepreload" href="/features/composer/options-state.js">
+  <link rel="modulepreload" href="/features/composer/permissions.js">
+  <link rel="modulepreload" href="/features/composer/prompt-edit-history.js">
+  <link rel="modulepreload" href="/features/composer/prompt-editor.js">
+  <link rel="modulepreload" href="/features/composer/prompt-optimization.js">
+  <link rel="modulepreload" href="/features/composer/selected-skills.js">
+  <link rel="modulepreload" href="/features/composer/send-state.js">
+  <link rel="modulepreload" href="/features/composer/skill-catalog.js">
+  <link rel="modulepreload" href="/features/composer/skills.js">
+  <link rel="modulepreload" href="/features/conversation/compaction.js">
+  <link rel="modulepreload" href="/features/conversation/event-sync.js">
+  <link rel="modulepreload" href="/features/conversation/events.js">
+  <link rel="modulepreload" href="/features/conversation/history-state.js">
+  <link rel="modulepreload" href="/features/conversation/history-view.js">
+  <link rel="modulepreload" href="/features/conversation/history.js">
+  <link rel="modulepreload" href="/features/conversation/pending-state.js">
+  <link rel="modulepreload" href="/features/conversation/pending-store.js">
+  <link rel="modulepreload" href="/features/conversation/pending.js">
+  <link rel="modulepreload" href="/features/conversation/selection-state.js">
+  <link rel="modulepreload" href="/features/conversation/selection.js">
+  <link rel="modulepreload" href="/features/conversation/transcript-events.js">
+  <link rel="modulepreload" href="/features/conversation/transcript.js">
+  <link rel="modulepreload" href="/features/global-input.js">
+  <link rel="modulepreload" href="/features/goal/composer-submission.js">
+  <link rel="modulepreload" href="/features/goal/composer.js">
+  <link rel="modulepreload" href="/features/goal/state.js">
+  <link rel="modulepreload" href="/features/goal/status.js">
+  <link rel="modulepreload" href="/features/local-files.js">
+  <link rel="modulepreload" href="/features/messages/activity-state.js">
+  <link rel="modulepreload" href="/features/messages/activity.js">
+  <link rel="modulepreload" href="/features/messages/edited-files.js">
+  <link rel="modulepreload" href="/features/messages/item-presentation.js">
+  <link rel="modulepreload" href="/features/messages/items.js">
+  <link rel="modulepreload" href="/features/messages/media-state.js">
+  <link rel="modulepreload" href="/features/messages/media.js">
+  <link rel="modulepreload" href="/features/messages/message-edit.js">
+  <link rel="modulepreload" href="/features/messages/question-reply.js">
+  <link rel="modulepreload" href="/features/messages/subagents.js">
+  <link rel="modulepreload" href="/features/messages/tool-info.js">
+  <link rel="modulepreload" href="/features/messages/tool-output.js">
+  <link rel="modulepreload" href="/features/messages/user-content.js">
+  <link rel="modulepreload" href="/features/notifications.js">
+  <link rel="modulepreload" href="/features/queue/queue.js">
+  <link rel="modulepreload" href="/features/queue/queued-edit-recovery.js">
+  <link rel="modulepreload" href="/features/queue/queued-edit.js">
+  <link rel="modulepreload" href="/features/queue/sent-display.js">
+  <link rel="modulepreload" href="/features/queue/state.js">
+  <link rel="modulepreload" href="/features/session/action-capabilities.js">
+  <link rel="modulepreload" href="/features/session/capabilities.js">
+  <link rel="modulepreload" href="/features/session/connection-state.js">
+  <link rel="modulepreload" href="/features/session/connection.js">
+  <link rel="modulepreload" href="/features/session/instance-catalog.js">
+  <link rel="modulepreload" href="/features/session/instances.js">
+  <link rel="modulepreload" href="/features/session/lifecycle.js">
+  <link rel="modulepreload" href="/features/session/login.js">
+  <link rel="modulepreload" href="/features/session/page-lifecycle.js">
+  <link rel="modulepreload" href="/features/session/related-state.js">
+  <link rel="modulepreload" href="/features/session/related.js">
+  <link rel="modulepreload" href="/features/session/side-panel.js">
+  <link rel="modulepreload" href="/features/session/thread-cache.js">
+  <link rel="modulepreload" href="/features/session/thread-display.js">
+  <link rel="modulepreload" href="/features/settings/remote-settings.js">
+  <link rel="modulepreload" href="/features/shell-state.js">
+  <link rel="modulepreload" href="/features/shell.js">
+  <link rel="modulepreload" href="/features/sidebar/actions.js">
+  <link rel="modulepreload" href="/features/sidebar/deletion-state.js">
+  <link rel="modulepreload" href="/features/sidebar/filters.js">
+  <link rel="modulepreload" href="/features/sidebar/list-state.js">
+  <link rel="modulepreload" href="/features/sidebar/list.js">
+  <link rel="modulepreload" href="/features/sidebar/thread-deletion.js">
   <link rel="modulepreload" href="/markdown.js">
   <link rel="modulepreload" href="/message-actions.js">
   <link rel="modulepreload" href="/permissions.js">
@@ -23,7 +117,6 @@
   <link rel="modulepreload" href="/session-menu.js">
   <link rel="modulepreload" href="/session-tools.js">
   <link rel="modulepreload" href="/sha256.js">
-  <link rel="modulepreload" href="/workspace-preview.js">
   <link rel="modulepreload" href="/ui/clipboard.js">
   <link rel="modulepreload" href="/ui/dialog.js">
   <link rel="modulepreload" href="/ui/dom.js">
@@ -33,61 +126,7 @@
   <link rel="modulepreload" href="/ui/position.js">
   <link rel="modulepreload" href="/ui/select.js">
   <link rel="modulepreload" href="/ui/tooltip.js">
-  <link rel="modulepreload" href="/core/state.js">
-  <link rel="modulepreload" href="/core/stores.js">
-  <link rel="modulepreload" href="/core/util.js">
-  <link rel="modulepreload" href="/features/api.js">
-  <link rel="modulepreload" href="/features/appearance/dialog.js">
-  <link rel="modulepreload" href="/features/appearance/theme.js">
-  <link rel="modulepreload" href="/features/approvals.js">
-  <link rel="modulepreload" href="/features/claude-notices.js">
-  <link rel="modulepreload" href="/features/composer/claude-usage.js">
-  <link rel="modulepreload" href="/features/composer/composer-menus.js">
-  <link rel="modulepreload" href="/features/composer/composer.js">
-  <link rel="modulepreload" href="/features/composer/drafts.js">
-  <link rel="modulepreload" href="/features/composer/metrics.js">
-  <link rel="modulepreload" href="/features/composer/models.js">
-  <link rel="modulepreload" href="/features/composer/new-chat.js">
-  <link rel="modulepreload" href="/features/composer/permissions.js">
-  <link rel="modulepreload" href="/features/composer/prompt-editor.js">
-  <link rel="modulepreload" href="/features/composer/prompt-optimization.js">
-  <link rel="modulepreload" href="/features/composer/skills.js">
-  <link rel="modulepreload" href="/features/conversation/compaction.js">
-  <link rel="modulepreload" href="/features/conversation/events.js">
-  <link rel="modulepreload" href="/features/conversation/history-view.js">
-  <link rel="modulepreload" href="/features/conversation/history.js">
-  <link rel="modulepreload" href="/features/conversation/pending.js">
-  <link rel="modulepreload" href="/features/conversation/selection.js">
-  <link rel="modulepreload" href="/features/conversation/transcript-events.js">
-  <link rel="modulepreload" href="/features/global-input.js">
-  <link rel="modulepreload" href="/features/goal/composer.js">
-  <link rel="modulepreload" href="/features/goal/status.js">
-  <link rel="modulepreload" href="/features/local-files.js">
-  <link rel="modulepreload" href="/features/messages/activity.js">
-  <link rel="modulepreload" href="/features/messages/edited-files.js">
-  <link rel="modulepreload" href="/features/messages/items.js">
-  <link rel="modulepreload" href="/features/messages/media.js">
-  <link rel="modulepreload" href="/features/messages/message-edit.js">
-  <link rel="modulepreload" href="/features/messages/subagents.js">
-  <link rel="modulepreload" href="/features/messages/tool-output.js">
-  <link rel="modulepreload" href="/features/messages/user-content.js">
-  <link rel="modulepreload" href="/features/notifications.js">
-  <link rel="modulepreload" href="/features/queue/queue.js">
-  <link rel="modulepreload" href="/features/queue/queued-edit.js">
-  <link rel="modulepreload" href="/features/queue/sent-display.js">
-  <link rel="modulepreload" href="/features/session/capabilities.js">
-  <link rel="modulepreload" href="/features/session/connection.js">
-  <link rel="modulepreload" href="/features/session/instances.js">
-  <link rel="modulepreload" href="/features/session/lifecycle.js">
-  <link rel="modulepreload" href="/features/session/login.js">
-  <link rel="modulepreload" href="/features/session/related.js">
-  <link rel="modulepreload" href="/features/session/side-panel.js">
-  <link rel="modulepreload" href="/features/session/thread-cache.js">
-  <link rel="modulepreload" href="/features/settings/remote-settings.js">
-  <link rel="modulepreload" href="/features/shell.js">
-  <link rel="modulepreload" href="/features/sidebar/actions.js">
-  <link rel="modulepreload" href="/features/sidebar/filters.js">
-  <link rel="modulepreload" href="/features/sidebar/list.js">
+  <link rel="modulepreload" href="/workspace-preview.js">
   <script type="module" src="/pwa.js"></script>
   <script type="module" src="/app.js"></script>
 </head>

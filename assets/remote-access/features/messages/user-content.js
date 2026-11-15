@@ -1,21 +1,21 @@
 // 用户消息内容：原生用户请求的展示文本、复制文本、消息内 Skill 与可见消息已读标记。
 
+import { loadSkillChoices, mutate, renderSidebar } from "../../core/actions.js";
 import { connected, selectedId, session, thread } from "../../core/state.js";
 import { skillVisibleName } from "../composer/prompt-editor.js";
 import {
-  loadSkillChoices, messageSkillLoadScope, setMessageSkillLoadScope, skillChoices, skillScope
-} from "../composer/skills.js";
-import { followMessages } from "../conversation/history-view.js";
-import { historyError, historyInitialized, messageVersion, transcriptChecking } from "../conversation/history.js";
-import { mutate } from "../conversation/pending.js";
-import { isClaude, threadActionReadOnly } from "../session/capabilities.js";
-import { syncSideThreadUnread } from "../session/related.js";
-import { sessionMenu } from "../shell.js";
-import { threadDeleted, threadDeletionLocked } from "../sidebar/actions.js";
+  messageSkillLoadScope, setMessageSkillLoadScope, skillChoices, skillScope
+} from "../composer/skill-catalog.js";
 import {
-  markSidebarThreadReadLocally, recentPrioritySelectionSuppressions, renderSidebar,
-  sidebarReadRefreshSuppressions
-} from "../sidebar/list.js";
+  followMessages, historyError, historyInitialized, messageVersion, transcriptChecking
+} from "../conversation/history-state.js";
+import { isClaude, threadActionReadOnly } from "../session/capabilities.js";
+import { syncSideThreadUnread } from "../session/related-state.js";
+import { sessionMenu } from "../shell-state.js";
+import { threadDeleted, threadDeletionLocked } from "../sidebar/deletion-state.js";
+import {
+  markSidebarThreadReadLocally, recentPrioritySelectionSuppressions, sidebarReadRefreshSuppressions
+} from "../sidebar/list-state.js";
 
 export const readMarkRequests = new Map();
 export const textContent = item => item.text || (Array.isArray(item.content) ? item.content.filter(content => content.type === "text").map(content => content.text).join("\n") : "");

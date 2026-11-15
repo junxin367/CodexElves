@@ -1,23 +1,17 @@
-// 会话实例目录：实例加载、启用状态、新建会话的实例选择与 Claude 回顾默认值提示。
+// 会话实例：实例目录状态与启用判断、当前与会话所属实例、新建会话的后端选项、会话位置显示与 Claude 回顾默认值提示；目录加载与实例列表渲染在 instance-catalog.js。
 
-import { $, element } from "../../ui/dom.js";
 import { notice } from "../../ui/notice.js";
 import { creating, selectedId, session, thread } from "../../core/state.js";
-import { api } from "../api.js";
-import { appearance, applyAppearance } from "../appearance/theme.js";
-import { updateComposer } from "../composer/composer.js";
-import {
-  assignCreationBackend, creationInstanceId, setCreationBackend, setCreationInstanceId
-} from "../composer/new-chat.js";
-import { conversationBackend, newChatBackendOptions, privateInputScope } from "./capabilities.js";
+import { appearance } from "../appearance/theme.js";
+import { creationInstanceId } from "../composer/creation-state.js";
+import { conversationBackend } from "./capabilities.js";
 import { currentThreadDisplay } from "./thread-cache.js";
-import { sessionFilterValue } from "../sidebar/filters.js";
-import { loadSidebar, projectVisibleThreadCounts, renderSidebar } from "../sidebar/list.js";
 
 export let sessionInstances = [], sessionInstanceRequest = null;
 export function setSessionInstances(value) { return sessionInstances = value; }
 export function setSessionInstanceRequest(value) { return sessionInstanceRequest = value; }
-let sessionTypes = [{ id: "codex", label: "Codex" }, { id: "claude", label: "Claude" }];
+export let sessionTypes = [{ id: "codex", label: "Codex" }, { id: "claude", label: "Claude" }];
+export function setSessionTypes(value) { return sessionTypes = value; }
 export function availableSessionInstances() {
   if (sessionInstances.length) return sessionInstances;
   // 用户要求实例显示名不拼接“本机”“WSL”；目录未返回时的默认名称也遵循同一规则。
@@ -50,34 +44,15 @@ export function enabledInstanceIds() {
 function sessionBackendEnabled(backend) {
   return availableSessionInstances().some(instance => instance.backend === backend && sessionInstanceEnabled(instance.id));
 }
-function migrateSessionInstances(preferences, instances) {
+export function migrateSessionInstances(preferences, instances) {
   // 旧类型开关仅迁移到原默认实例；新发现的同类型实例保持关闭，各实例允许全部关闭。
   if (preferences.sessionInstances && typeof preferences.sessionInstances === "object") return false;
   preferences.sessionInstances = Object.fromEntries(instances.map(instance =>
     [instance.id, instance.legacyDefault === true && preferences.sessionTypes?.[instance.backend] === true]));
   return true;
 }
-function applySessionCatalog(result) {
-  if (!Array.isArray(result.instances) || !Array.isArray(result.types)) return;
-  sessionTypes = result.types.filter(kind => typeof kind.id === "string" && typeof kind.label === "string");
-  sessionInstances = result.instances.filter(instance => typeof instance.id === "string"
-    && typeof instance.label === "string" && sessionTypes.some(kind => kind.id === instance.backend));
-  let changed = migrateSessionInstances(appearance, sessionInstances);
-  const filter = sessionFilterValue();
-  if (JSON.stringify(appearance.sessionFilter) !== JSON.stringify(filter)) {
-    appearance.sessionFilter = filter; changed = true;
-  }
-  if (changed) applyAppearance(true);
-  if (!sessionInstanceEnabled(creationInstanceId)) {
-    const next = newChatBackendOptions()[0];
-    if (next && creating) setCreationBackend(next.value);
-    else if (next) { setCreationInstanceId(next.value); assignCreationBackend(next.backend); }
-  }
-  renderSessionInstances();
-  if ($("#composer")) { renderSidebar(); updateComposer(); }
-}
 const claudeRecapDefaultWarnings = new Map();
-function reportClaudeRecapDefaults(result, scope) {
+export function reportClaudeRecapDefaults(result, scope) {
   const warnings = [];
   for (const value of Array.isArray(result.claudeRecapDefaults) ? result.claudeRecapDefaults : []) {
     if (typeof value?.instanceId !== "string") continue;
@@ -91,60 +66,16 @@ function reportClaudeRecapDefaults(result, scope) {
   }
   if (warnings.length) notice(warnings.join("\n"), true);
 }
-export async function loadSessionInstances(force = false) {
-  const scope = privateInputScope(session);
-  if (sessionInstanceRequest && sessionInstanceRequest.deviceId === session?.device.id && sessionInstanceRequest.scope === scope)
-    return sessionInstanceRequest;
-  const deviceId = session?.device.id;
-  const request = api("/api/settings/environments", { force }).then(result => {
-    if (session?.device.id === deviceId && privateInputScope(session) === scope) {
-      applySessionCatalog(result);
-      reportClaudeRecapDefaults(result, scope);
-    }
-    return result;
-  }).finally(() => { if (sessionInstanceRequest === request) sessionInstanceRequest = null; });
-  request.deviceId = deviceId;
-  request.scope = scope;
-  sessionInstanceRequest = request;
-  return request;
+
+export function newChatBackendOptions() {
+  // 用户要求类型与环境实例分别控制；未接通的执行适配器只在设置中展示，不能悄悄改投默认实例。
+  return availableSessionInstances().filter(instance => instance.ready && sessionInstanceEnabled(instance.id))
+    .map(instance => ({ value: instance.id, backend: instance.backend, label: instance.label,
+      icon: ["codex", "claude"].includes(instance.backend) ? instance.backend : "allSessions" }));
 }
-export function renderSessionInstances() {
-  const root = $("#appearance-session-instances");
-  if (!root) return;
-  root.replaceChildren();
-  for (const kind of sessionTypes) {
-    const instances = availableSessionInstances().filter(instance => instance.backend === kind.id);
-    if (!instances.length) continue;
-    const group = element("section", "session-instance-group");
-    group.append(element("h4", "", `${kind.label}（${instances.length}）`));
-    for (const instance of instances) {
-      const row = element("label", "appearance-notification-row session-instance-row");
-      const copy = element("span", "appearance-environment-copy");
-      copy.append(element("strong", "", instance.label), element("small", "muted", instance.status || "可接入"));
-      if (instance.executable) copy.append(element("small", "muted session-instance-path", instance.executable));
-      const control = element("input", "appearance-notification-switch");
-      control.type = "checkbox"; control.setAttribute("role", "switch");
-      control.dataset.instanceId = instance.id; control.setAttribute("aria-label", `启用 ${instance.label}`);
-      control.checked = sessionInstanceEnabled(instance.id);
-      control.onchange = () => {
-        migrateSessionInstances(appearance, availableSessionInstances());
-        appearance.sessionInstances = { ...appearance.sessionInstances, [instance.id]: control.checked };
-        const filter = sessionFilterValue();
-        if (filter !== "all") {
-          // 关闭实例只移除该实例的筛选，保留其它多选项；全部移除后恢复“全部会话”。
-          const selected = filter.filter(id => sessionInstanceEnabled(id));
-          appearance.sessionFilter = selected.length ? selected : "all";
-        }
-        if (!sessionInstanceEnabled(creationInstanceId)) {
-          const next = newChatBackendOptions()[0];
-          if (next && creating) setCreationBackend(next.value);
-          else if (next) { setCreationInstanceId(next.value); assignCreationBackend(next.backend); }
-        }
-        applyAppearance(true); projectVisibleThreadCounts.clear(); renderSidebar(); updateComposer();
-        void loadSidebar(null, { fresh: true }).catch(error => notice(error.message, true));
-      };
-      row.append(copy, control); group.append(row);
-    }
-    root.append(group);
-  }
+export function threadLocation(value) {
+  // 用户要求顶部路径前仅显示非本机实例的实际环境名（如发行版名），不拼接类型、“本机”或“WSL”标签。
+  const distribution = value?.wslDistribution
+    || availableSessionInstances().find(instance => instance.id === value?.instanceId)?.distribution;
+  return [distribution, value?.cwd].filter(Boolean).join(" · ");
 }

@@ -495,10 +495,18 @@ def native_question_page(lines, questions):
     body = lines[starts[-1] + 1:] if starts else lines if len(questions) == 1 else []
     if "Review your answers" in body and "Ready to submit your answers?" in body:
         return {"index": len(questions), "review": body}
-    option_start = next((i for i in range(len(body) - 1, -1, -1)
-                         if re.match(r"^(?:❯\s*)?1\.\s", body[i])), None)
-    if option_start is None:
+    numbered = [i for i, line in enumerate(body) if re.match(r"^(?:❯\s*)?1\.\s", line)]
+    if not numbered:
         return None
+
+    def first_option(line):
+        shown = question_text_key(re.sub(r"^(?:❯\s*)?1\.\s+(?:\[[^\]]\]\s+)?", "", line))
+        return bool(shown) and any(question["options"] and question_text_key(
+            question["options"][0]["label"]).startswith(shown) for question in questions)
+
+    # 选项说明同样按终端宽度折行，去掉缩进后续行行首可能是“1. ”（2026-11-15 实测 2.1.325：说明续行被当成选项 1，
+    # 真正的选项 1 丢失，回答会被改成自定义文字）。优先取显示为某个问题首个选项的编号行；对不上时沿用最后一个编号行。
+    option_start = ([i for i in numbered if first_option(body[i])] or numbered)[-1]
     heading = question_text_key("".join(body[:option_start]))
     matches = [i for i, question in enumerate(questions) if question_text_key(question["question"]) in heading]
     if len(matches) != 1:
@@ -515,26 +523,38 @@ def native_question_page(lines, questions):
 
 
 def native_question_review_matches(lines, questions, answers):
-    entries, question, answer = [], [], None
-    for line in lines[lines.index("Review your answers") + 1:]:
-        if line == "Ready to submit your answers?":
-            break
-        if line.startswith("● "):
-            if answer is not None:
-                entries.append(("".join(question), "".join(answer)))
-            question, answer = [line[2:]], None
-        elif line.startswith("→ "):
-            answer = [line[2:]]
-        elif answer is not None:
-            answer.append(line)
-        elif question:
-            question.append(line)
-    if answer is not None:
-        entries.append(("".join(question), "".join(answer)))
-    return len(entries) == len(questions) and all(
-        question_text_key(label) == question_text_key(row["question"])
-        and re.sub(r"\s", "", value) == re.sub(r"\s", "", answers[row["question"]])
-        for (label, value), row in zip(entries, questions))
+    # 汇总页的问题与答案都会按终端宽度折行，续行去掉竖线和缩进后，行首可能恰好是正文里的“→ ”或“● ”。
+    # 2026-11-15 实测 2.1.325（120x40）：长问题在竖线内折行，续行“→ 视图 → 编排”被当成答案，正确回答被判不一致。
+    # 因此不按行首符号切分，而是按预期问题与答案依次累积核对：累积内容必须始终是预期文本的前缀，完整后才进入下一部分；
+    # 缺项（原版只列已回答的问题）、多余内容或任何不同都判为不一致，不提交。
+    body = lines[lines.index("Review your answers") + 1:]
+    if "Ready to submit your answers?" not in body:
+        return False
+    body = body[:body.index("Ready to submit your answers?")]
+    position = 0
+
+    def take(marker, expected, normalize):
+        nonlocal position
+        while position < len(body) and not body[position]:
+            position += 1
+        if position >= len(body) or not body[position].startswith(marker):
+            return False
+        text = normalize(body[position][len(marker):])
+        position += 1
+        while text != expected:
+            if position >= len(body) or not expected.startswith(text):
+                return False
+            text += normalize(body[position])
+            position += 1
+        return True
+
+    for row in questions:
+        # 问题按原版显示文本比较（去掉 Markdown 标记与空白）；答案只去空白，下划线等字符必须原样一致。
+        if not take("● ", question_text_key(row["question"]), question_text_key):
+            return False
+        if not take("→ ", re.sub(r"\s", "", answers[row["question"]]), lambda text: re.sub(r"\s", "", text)):
+            return False
+    return not any(body[position:])
 
 
 def native_control_command(row):
@@ -677,11 +697,70 @@ def native_turn_start(row):
 
 # 与网页 app.js 的 editedFileDiffLimit（1 MiB）保持一致；超过时只转发“覆盖修改”，网页显示未提供差异。
 NATIVE_PATCH_LIMIT = 1024 * 1024
+# 网页图片沿用远程输入限制：单张 5 MiB、合计 12 MiB；文件名 0-7 对应最多 8 张，与 remote_access.rs 同步核对。
+REMOTE_IMAGE_LIMIT = 5 * 1024 * 1024
+REMOTE_IMAGES_TOTAL_LIMIT = 12 * 1024 * 1024
+REMOTE_IMAGE_TYPES = {".png": "image/png", ".jpg": "image/jpeg", ".gif": "image/gif", ".webp": "image/webp"}
 
 
-def native_tool_result(row):
-    # 用户要求按 Claude 原生语义渲染工具：只转发展示需要的结构化补丁、后台任务 ID 与任务清单 ID，
+def remote_upload_path(line, uploads):
+    # 用户要求空网页登记也恢复原图：仅认可原生 prompt 内本用户上传目录的直接文件，不能跨目录/符号链接读取或伪造 client ID。
+    # 网页消息与 Claude 提问回答中的“@路径”引用共用此校验。
+    path = Path(line[1:]) if line.startswith("@") else None
+    if (path is None or path.parent.parent != uploads or not re.fullmatch(r"[A-Za-z0-9_-]{1,120}", path.parent.name)
+            or not re.fullmatch(r"[0-7]\.(png|jpg|gif|webp)", path.name)
+            or path.parent.resolve().parent != uploads.resolve()
+            or path.resolve().parent != path.parent.resolve()):
+        return None
+    return path
+
+
+def remote_upload_url(path):
+    try:
+        if path.stat().st_size > REMOTE_IMAGE_LIMIT:
+            return None
+        data = path.read_bytes()
+    except OSError:
+        return None
+    return f"data:{REMOTE_IMAGE_TYPES[path.suffix]};base64,{base64.b64encode(data).decode()}"
+
+
+def native_question_answers(result, root):
+    # 用户要求经远程会话发出的回复在正文中可见（2026-11-15：提问等待时从输入框发出的文字和截图被原生记为
+    # AskUserQuestion 回答，网页只在折叠的工具分组里能看到）。按题目顺序转发原生回答原文，未作答为 None；
+    # 回答里本用户上传目录的“@路径”行改为图片，不显示内部路径。2.1.325 实测 toolUseResult 只有 questions 与 answers。
+    questions, answers = result.get("questions"), result.get("answers")
+    if (not isinstance(questions, list) or not isinstance(answers, dict)
+            or not all(isinstance(question, dict) and isinstance(question.get("question"), str) for question in questions)):
+        return None
+    uploads = Path(root) / "remote-attachments" if root else None
+    replies, total = [], 0
+    for question in questions:
+        answer = answers.get(question["question"])
+        if not isinstance(answer, str):
+            replies.append({"question": question["question"], "answer": None, "images": []})
+            continue
+        lines, images, folder = [], [], None
+        for line in answer.splitlines():
+            path = remote_upload_path(line, uploads) if uploads else None
+            # 同一回答只认可同一上传目录（与网页消息一致）；其余以“@”开头的文字按原文保留。
+            if path is None or folder not in (None, path.parent):
+                lines.append(line)
+                continue
+            folder = path.parent
+            url = remote_upload_url(path)
+            size = len(base64.b64decode(url.split(",", 1)[1])) if url else 0
+            if size and total + size <= REMOTE_IMAGES_TOTAL_LIMIT and all(image["url"] != url for image in images):
+                total += size
+                images.append({"url": url})
+        replies.append({"question": question["question"], "answer": "\n".join(lines).strip(), "images": images})
+    return replies
+
+
+def native_tool_result(row, root=None):
+    # 用户要求按 Claude 原生语义渲染工具：只转发展示需要的结构化补丁、后台任务 ID、任务清单 ID 与提问回答，
     # 不复制 originalFile、stdout 等大字段。由 Rust claude_tools.rs 消费，字段改名需同步核对。
+    # root 为原生配置目录，用于读取提问回答引用的网页上传图片；子代理只读视图不传（子代理不能向用户提问）。
     result = row.get("toolUseResult")
     message = row.get("message")
     content = message.get("content") if isinstance(message, dict) else None
@@ -719,6 +798,9 @@ def native_tool_result(row):
         value["createdTaskId"] = str(created["id"])
     if result.get("success") is False:
         value["success"] = False
+    replies = native_question_answers(result, root)
+    if replies is not None:
+        value["questionAnswers"] = replies
     return {"toolUseId": calls[0], **value} if value else None
 
 
@@ -3324,12 +3406,9 @@ class NativeSession:
         folder = uploads / client if re.fullmatch(r"[A-Za-z0-9_-]{1,120}", client) else None
         paths = []
         for line in text.splitlines():
-            path = Path(line[1:]) if line.startswith("@") else None
-            # 用户要求空网页登记也恢复原图：仅认可原生 prompt 内本用户上传目录的直接文件，不能跨目录/符号链接读取或伪造 client ID。
-            if (path is None or path.parent.parent != uploads or not re.fullmatch(r"[A-Za-z0-9_-]{1,120}", path.parent.name)
-                    or not re.fullmatch(r"[0-7]\.(png|jpg|gif|webp)", path.name)
-                    or path.parent.resolve().parent != uploads.resolve()
-                    or path.resolve().parent != path.parent.resolve()):
+            # 用户要求空网页登记也恢复原图：校验规则见 remote_upload_path，仅认可本用户上传目录内的直接文件。
+            path = remote_upload_path(line, uploads)
+            if path is None:
                 continue
             if folder is None:
                 folder = path.parent
@@ -3345,14 +3424,9 @@ class NativeSession:
                 source = originals[index]["source"]
                 url = f"data:{source['media_type']};base64,{source['data']}"
             if url is None:
-                try:
-                    if path.stat().st_size > 5 * 1024 * 1024:
-                        continue
-                    data = path.read_bytes()
-                except OSError:
+                url = remote_upload_url(path)
+                if url is None:
                     continue
-                mime = {".png": "image/png", ".jpg": "image/jpeg", ".gif": "image/gif", ".webp": "image/webp"}[path.suffix]
-                url = f"data:{mime};base64,{base64.b64encode(data).decode()}"
             size = len(base64.b64decode(url.split(",", 1)[1], validate=True))
             # 仅张数改为 8；沿用单张 5 MiB、合计 12 MiB，历史恢复不能另设更宽松的大小限制。
             if not size or size > 5 * 1024 * 1024 or total + size > 12 * 1024 * 1024:
@@ -3545,7 +3619,7 @@ class NativeSession:
                     if result.get("resumedAgentId"):
                         self.messages[-1]["nativeAgentResult"].update(
                             agentId=result["resumedAgentId"], status="async_launched", resumed=True)
-                tool_result = native_tool_result(row)
+                tool_result = native_tool_result(row, self.root)
                 if tool_result:
                     self.messages[-1]["nativeToolResult"] = tool_result
                 if isinstance(row.get("message"), dict):

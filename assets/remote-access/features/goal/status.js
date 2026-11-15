@@ -1,144 +1,28 @@
-// 目标状态：状态展示、计时与目标编辑。
+// 目标状态：渲染目标状态与目标编辑器，提交目标编辑、状态修改与删除并核对回执；计时、编辑草稿与回执状态在 goal/state.js。
 
 import { confirmAction } from "../../ui/dialog.js";
 import { $, button, element } from "../../ui/dom.js";
 import { icon } from "../../ui/icons.js";
 import { notice } from "../../ui/notice.js";
-import { connected, pageLeaving, selectedId, session, thread } from "../../core/state.js";
+import { reloadThread } from "../../core/actions.js";
+import { connected, selectedId, session, thread } from "../../core/state.js";
 import { randomId } from "../../core/util.js";
 import { api } from "../api.js";
-import { pendingFeedbackReady, syncPendingFeedbackTimer } from "../composer/composer.js";
-import { reloadThread } from "../conversation/history.js";
+import { syncPendingFeedbackTimer } from "../composer/composer.js";
+import { pendingFeedbackReady } from "../composer/send-state.js";
+import {
+  editableGoalStatuses, fitGoalEditor, goalEditBaseline, goalEditDraft, goalEditPending,
+  goalEditPollTimer, goalEditReceiptRequest, goalStatusView, goalVersion, sameGoalEditBaseline,
+  setGoalEditDraft, setGoalEditPending, setGoalEditPollTimer, setGoalEditReceiptRequest,
+  setGoalVersion, setNotifiedGoal, stopGoalLiveTimer, updateGoalLiveView, validGoalEditPayload
+} from "./state.js";
 import { isClaude, threadReadOnly } from "../session/capabilities.js";
 import { currentThreadDisplay } from "../session/thread-cache.js";
 
-let goalEditorBaseViewport = {
-  width: window.innerWidth,
-  height: window.visualViewport?.height || window.innerHeight
-};
-export let goalVersion = 0, notifiedGoal = null;
-export function setGoalVersion(value) { return goalVersion = value; }
-export function setNotifiedGoal(value) { return notifiedGoal = value; }
-const goalStatusLabels = {
-  active: "运行中",
-  paused: "已暂停",
-  blocked: "已阻塞",
-  budgetLimited: "预算受限",
-  usageLimited: "用量受限",
-  complete: "已完成"
-};
-const goalStatusTitles = {
-  active: "进行中的目标",
-  paused: "已暂停的目标",
-  blocked: "已阻塞的目标",
-  budgetLimited: "预算受限的目标",
-  usageLimited: "用量受限的目标",
-  complete: "已完成的目标"
-};
-function goalStatusView(status) {
-  const tone = ["active", "paused", "blocked", "budgetLimited", "usageLimited", "complete"].includes(status) ? status : "unknown";
-  return { label: goalStatusLabels[status] || status || "状态未知", title: goalStatusTitles[status] || "目标", tone };
-}
-function formatGoalTokens(value) {
-  if (!Number.isFinite(value) || value < 0) return null;
-  return new Intl.NumberFormat("zh-CN").format(Math.floor(value));
-}
-function formatGoalDuration(seconds) {
-  if (!Number.isFinite(seconds) || seconds < 0) return null;
-  let remaining = Math.floor(seconds);
-  const days = Math.floor(remaining / 86400); remaining %= 86400;
-  const hours = Math.floor(remaining / 3600); remaining %= 3600;
-  const minutes = Math.floor(remaining / 60); remaining %= 60;
-  const parts = [];
-  if (days) parts.push(`${days}d`);
-  if (hours || days) parts.push(`${hours}h`);
-  if (minutes || hours || days) parts.push(`${minutes}m`);
-  if (remaining || !parts.length) parts.push(`${remaining}s`);
-  return parts.join("");
-}
-let goalLiveTimer = null;
-function goalDurationSeconds(goal, now = Date.now()) {
-  const seconds = goal?.timeUsedSeconds;
-  if (!Number.isFinite(seconds) || seconds < 0) return null;
-  // Claude 只展示原生返回的耗时，等待评估期间不自行累计。
-  if (goal.source === "claude") return seconds;
-  if (goal.status !== "active" || !Number.isFinite(goal.updatedAt) || goal.updatedAt < 0) return seconds;
-  const milliseconds = seconds * 1000 + now - goal.updatedAt * 1000;
-  return Number.isFinite(milliseconds) ? Math.max(milliseconds, 0) / 1000 : seconds;
-}
-export function stopGoalLiveTimer() {
-  clearInterval(goalLiveTimer);
-  goalLiveTimer = null;
-}
-export function syncGoalLiveTimer() {
-  const root = $("#goal-area"), goal = thread?.goal;
-  if (!session || !connected || pageLeaving || document.hidden
-      || !root || root.hidden || thread?.id !== selectedId || root.dataset.goalThread !== selectedId
-      || goal?.source === "claude" || goal?.status !== "active" || !Number.isFinite(goal.timeUsedSeconds) || goal.timeUsedSeconds < 0
-      || !Number.isFinite(goal.updatedAt) || goal.updatedAt < 0) {
-    stopGoalLiveTimer();
-    return;
-  }
-  updateGoalDurationView(root, goal);
-  if (goalLiveTimer == null) goalLiveTimer = setInterval(syncGoalLiveTimer, 1000);
-}
-const goalEditStorageKey = "codex-elves-goal-edit-pending";
-const editableGoalStatuses = ["active", "paused", "blocked", "budgetLimited", "usageLimited"];
-function validGoalEditPayload(value) {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
-  const operation = value.operation ?? "edit";
-  const bytes = text => typeof text === "string" ? new TextEncoder().encode(text.trim()).byteLength : 0;
-  return typeof value.threadId === "string" && /^[a-zA-Z0-9_-]{1,120}$/.test(value.threadId)
-    && bytes(value.objective) > 0 && bytes(value.objective) <= 16 * 1024
-    && Number.isSafeInteger(value.expectedCreatedAt) && value.expectedCreatedAt >= 0
-    && bytes(value.expectedObjective) > 0 && bytes(value.expectedObjective) <= 16 * 1024
-    && editableGoalStatuses.includes(value.expectedStatus)
-    && ["edit", "pause", "resume", "delete"].includes(operation)
-    && (operation === "edit" || value.objective.trim() === value.expectedObjective.trim())
-    && (operation !== "pause" || value.expectedStatus === "active")
-    && (operation !== "resume" || ["paused", "blocked"].includes(value.expectedStatus));
-}
-export let goalEditPending = (() => {
-  try {
-    const value = JSON.parse(sessionStorage.getItem(goalEditStorageKey) || "null");
-    return value && typeof value.id === "string" && /^[a-zA-Z0-9-]{1,100}$/.test(value.id)
-      && typeof value.deviceId === "string" && validGoalEditPayload(value.payload)
-      && ["submitting", "pending", "unknown"].includes(value.state)
-      ? { ...value, state: value.state === "submitting" ? "unknown" : value.state } : null;
-  } catch { return null; }
-})();
-export function assignGoalEditPending(value) { return goalEditPending = value; }
-export let goalEditReceiptRequest = null, goalEditPollTimer = null, goalEditDraft = null;
-export function setGoalEditDraft(value) { return goalEditDraft = value; }
-export function setGoalEditPending(value, required = false) {
-  if (value && !Number.isFinite(value.time)) value.time = Date.now();
-  try {
-    if (value) sessionStorage.setItem(goalEditStorageKey, JSON.stringify(value));
-    else sessionStorage.removeItem(goalEditStorageKey);
-  } catch {
-    if (required) throw new Error("无法保存目标操作回执，操作未提交。请允许此网页使用浏览器会话存储。");
-    notice("无法保存目标操作回执；请在本机核对目标状态。", true);
-  }
-  clearTimeout(goalEditPollTimer);
-  goalEditPollTimer = null;
-  goalEditPending = value;
-}
-function goalEditBaseline(goal) {
-  const objective = typeof goal?.objective === "string" ? goal.objective.trim() : "";
-  const status = typeof goal?.status === "string" ? goal.status : "";
-  const createdAt = Number.isFinite(goal?.createdAt) && goal.createdAt >= 0 ? Math.floor(goal.createdAt) : null;
-  return objective && editableGoalStatuses.includes(status) && createdAt != null
-    ? { objective, status, createdAt } : null;
-}
-function sameGoalEditBaseline(goal, baseline) {
-  const current = goalEditBaseline(goal);
-  return !!current && !!baseline && current.objective === baseline.objective
-    && current.status === baseline.status && current.createdAt === baseline.createdAt;
-}
 function scheduleGoalEditReceipt() {
   clearTimeout(goalEditPollTimer);
   if (goalEditPending?.state !== "pending") return;
-  goalEditPollTimer = setTimeout(() => {
+  setGoalEditPollTimer(setTimeout(() => {
     void resolveGoalEditReceipt().catch(error => {
       const current = goalEditPending;
       if (current?.state !== "pending") return;
@@ -146,7 +30,7 @@ function scheduleGoalEditReceipt() {
       renderGoalStatus();
       notice(`查询目标操作回执失败：${error.message}。不会重复提交，请稍后手动查回执。`, true);
     });
-  }, 2000);
+  }, 2000));
 }
 async function applyGoalEditReceipt(record, receipt) {
   if (goalEditPending?.id !== record.id) return receipt?.state || "stale";
@@ -178,7 +62,7 @@ async function applyGoalEditReceipt(record, receipt) {
   if (receipt.result?.backend === "claude" && receipt.result?.ok === true
       && receipt.result?.nativeCommand?.name === "goal"
       && receipt.result.threadId === record.payload.threadId) {
-    goalEditDraft = null;
+    setGoalEditDraft(null);
     notice("目标命令已交给 Claude，状态将随原生执行更新");
     renderGoalStatus();
     if (selectedId === record.payload.threadId) await reloadThread();
@@ -203,11 +87,11 @@ async function applyGoalEditReceipt(record, receipt) {
         objective: record.payload.expectedObjective, status: record.payload.expectedStatus,
         createdAt: record.payload.expectedCreatedAt
       })) {
-    notifiedGoal = updated;
-    ++goalVersion;
+    setNotifiedGoal(updated);
+    setGoalVersion(goalVersion + 1);
     thread.goal = updated;
   }
-  if (goalEditDraft?.threadId === record.payload.threadId) goalEditDraft = null;
+  if (goalEditDraft?.threadId === record.payload.threadId) setGoalEditDraft(null);
   renderGoalStatus();
   if (operation === "edit") notice("目标已更新");
   return "completed";
@@ -220,7 +104,7 @@ async function resolveGoalEditReceipt() {
     notice("目标操作回执属于旧设备授权。请在桌面核对后解除锁定。", true);
     return null;
   }
-  goalEditReceiptRequest = (async () => {
+  setGoalEditReceiptRequest((async () => {
     try {
       return await applyGoalEditReceipt(record, await api(`/api/receipts/${record.id}`));
     } catch (error) {
@@ -231,8 +115,8 @@ async function resolveGoalEditReceipt() {
         notice("未找到目标操作回执。不会自动重试，请在桌面核对后解除锁定。", true);
       } else if (record.state === "pending") scheduleGoalEditReceipt();
       throw error;
-    } finally { goalEditReceiptRequest = null; }
-  })();
+    } finally { setGoalEditReceiptRequest(null); }
+  })());
   return goalEditReceiptRequest;
 }
 function beginGoalEdit(goal) {
@@ -253,16 +137,16 @@ function beginGoalEdit(goal) {
     queueMicrotask(() => $("#goal-edit-input")?.focus());
     return;
   }
-  goalEditDraft = {
+  setGoalEditDraft({
     threadId: thread.id, baseline,
     objective: pendingRecord?.payload.objective || baseline.objective
-  };
+  });
   renderGoalStatus();
   queueMicrotask(() => $("#goal-edit-input")?.focus());
 }
 function cancelGoalEdit() {
   const dialog = $("#goal-edit-dialog");
-  goalEditDraft = null;
+  setGoalEditDraft(null);
   if (dialog?.open) dialog.close("cancel");
   else dialog?.remove();
   renderGoalStatus();
@@ -317,27 +201,6 @@ async function submitGoalUpdate(payload) {
     renderGoalStatus();
     notice(error.message, true);
   }
-}
-export function fitGoalEditor() {
-  const viewport = window.visualViewport;
-  const width = window.innerWidth, height = viewport?.height || window.innerHeight;
-  // 同一宽度下保留键盘收起时的高度；转屏后重新建立基准。
-  goalEditorBaseViewport = {
-    width,
-    height: width === goalEditorBaseViewport.width ? Math.max(goalEditorBaseViewport.height, height) : height
-  };
-  const dialog = $("#goal-edit-dialog");
-  if (!dialog?.open) return;
-  if (width <= 760) {
-    if (dialog.goalEditorViewportWidth === width) return;
-    dialog.goalEditorViewportWidth = width;
-    // 打开时锁定尺寸，后续键盘引起的 visualViewport resize/scroll 不再改变弹窗。
-    dialog.style.setProperty("--goal-edit-viewport-height", `${goalEditorBaseViewport.height}px`);
-    return;
-  }
-  delete dialog.goalEditorViewportWidth;
-  dialog.style.setProperty("--goal-edit-viewport-height", `${height}px`);
-  dialog.style.setProperty("--goal-edit-viewport-top", `${viewport?.offsetTop || 0}px`);
 }
 function renderGoalEditor(goal, pendingRecord) {
   const draft = goalEditDraft?.threadId === thread?.id ? goalEditDraft : null;
@@ -403,7 +266,7 @@ function renderGoalEditor(goal, pendingRecord) {
       "请先在 Codex 桌面核对目标状态。解除锁定不会再次提交；仅在已确认操作完成或未执行后继续。",
       "已核对，解除锁定", true) && goalEditPending === current) {
       setGoalEditPending(null);
-      goalEditDraft = null;
+      setGoalEditDraft(null);
       renderGoalStatus();
     }
   });
@@ -474,49 +337,6 @@ function renderGoalEditor(goal, pendingRecord) {
   dialog.showModal();
   sync(goal, pendingRecord);
   if (!input.disabled) input.focus();
-}
-function updateGoalDurationView(root, goal) {
-  const duration = formatGoalDuration(goalDurationSeconds(goal));
-  const durationNode = root.querySelector(".goal-duration");
-  if (durationNode) {
-    if (durationNode.textContent !== (duration || "")) durationNode.textContent = duration || "";
-    durationNode.hidden = duration == null;
-  }
-  const row = root.querySelector(".goal-metric-duration");
-  if (row) {
-    row.hidden = duration == null;
-    const output = row.querySelector("dd");
-    if (output && duration != null && output.textContent !== duration) output.textContent = duration;
-  }
-  return duration;
-}
-function updateGoalLiveView(root, goal) {
-  const duration = updateGoalDurationView(root, goal);
-  const tokensUsed = formatGoalTokens(goal?.tokensUsed);
-  const tokenBudget = formatGoalTokens(goal?.tokenBudget);
-  const values = {
-    "tokens-used": tokensUsed,
-    "token-budget": goal?.tokenBudget == null ? goal?.source === "claude" ? null : "无上限" : tokenBudget,
-    "tokens-remaining": tokenBudget != null && tokensUsed != null
-      ? formatGoalTokens(Math.max(0, goal.tokenBudget - goal.tokensUsed)) : null,
-    iterations: goal?.source === "claude" && Number.isSafeInteger(goal.iterations) && goal.iterations >= 0
-      ? String(goal.iterations) : null,
-    duration
-  };
-  const metrics = root.querySelector(".goal-metrics");
-  if (metrics) {
-    let visible = 0;
-    for (const [key, value] of Object.entries(values)) {
-      const row = root.querySelector(`.goal-metric-${key}`);
-      if (!row) continue;
-      row.hidden = value == null;
-      const output = row.querySelector("dd");
-      if (output && value != null) output.textContent = value;
-      if (value != null) visible++;
-    }
-    metrics.hidden = visible === 0;
-  }
-  syncGoalLiveTimer();
 }
 export function renderGoalStatus() {
   syncPendingFeedbackTimer();

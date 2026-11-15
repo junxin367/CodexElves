@@ -1,100 +1,34 @@
-// 写操作与回执：发送/创建/编辑等写入的幂等提交、待确认回执的保存与核对。
+// 写操作与回执：发送/创建/编辑等写入的幂等提交与待确认回执的核对；待发送状态在 pending-state.js，本地保存与恢复在 pending-store.js。
 
 import { recoveryStorageMessage } from "../../recovery-store.js";
 import { notice } from "../../ui/notice.js";
-import { creating, selectedId, selectionToken, selectionVersion, session, thread, turns } from "../../core/state.js";
+import {
+  applyQueuedSendResult, reloadThread, renderMessages, selectThread, updateComposer
+} from "../../core/actions.js";
+import { creating, selectedId, selectionToken, selectionVersion, session, thread } from "../../core/state.js";
 import { recoveryStore } from "../../core/stores.js";
 import { randomId } from "../../core/util.js";
 import { api } from "../api.js";
-import { updateComposer } from "../composer/composer.js";
+import { clearSubmittedDraft, recoverFailedInput, restorePrivateInputs } from "../composer/draft-restore.js";
 import {
-  clearSubmittedDraft, recoverFailedInput, recoveryGeneration, recoveryScope, restorePrivateInputs,
-  setRecoveryScope, smallInputStorageRecord, snapshotDraft, submittedDrafts
+  recoveryGeneration, setRecoveryScope, smallInputStorageRecord, snapshotDraft, submittedDrafts
 } from "../composer/drafts.js";
-import { selectCreatedThread } from "../composer/new-chat.js";
-import { renderMessages } from "./history-view.js";
-import { reloadThread } from "./history.js";
-import { selectThread } from "./selection.js";
-import {
-  applyGoalComposerReceipt, goalComposerAction, goalComposerRecoveries, goalComposerStorageRecord,
-  goalReceiptOutcome, goalSubmissionState, hydrateGoalComposerRecord, updateGoalComposerPending,
-  validGoalComposerDraft
-} from "../goal/composer.js";
-import { goalVersion } from "../goal/status.js";
+import { selectCreatedThread } from "../composer/new-chat-settings.js";
+import { confirmPendingSend, pending, pendingTimer, setPendingTimer } from "./pending-state.js";
+import { savePending } from "./pending-store.js";
+import { applyGoalComposerReceipt, updateGoalComposerPending } from "../goal/composer-submission.js";
+import { goalComposerAction, goalReceiptOutcome, goalSubmissionState, goalVersion } from "../goal/state.js";
 import { cancelMessageEdit, editingMessage } from "../messages/message-edit.js";
-import {
-  applyQueuedSendResult, applyQueueReorderResult, applyQueueSnapshot, confirmQueuedSteerDisplay,
-  pendingSteer, queueSnapshotIsVersioned, queueVersion, reloadQueue, setPendingSteer
-} from "../queue/queue.js";
-import {
-  checkQueuedMessageEdit, completeQueuedEditAction, finishQueuedMessageEdit, queuedEditActions,
-  queuedEdits
-} from "../queue/queued-edit.js";
+import { applyQueueReorderResult, applyQueueSnapshot, confirmQueuedSteerDisplay, reloadQueue } from "../queue/queue.js";
+import { checkQueuedMessageEdit } from "../queue/queued-edit-recovery.js";
+import { completeQueuedEditAction, finishQueuedMessageEdit } from "../queue/queued-edit.js";
 import { clearSentMessageDisplays } from "../queue/sent-display.js";
+import {
+  pendingSteer, queueSnapshotIsVersioned, queueVersion, queuedEditActions, queuedEdits,
+  setPendingSteer
+} from "../queue/state.js";
 import { claudeThreadId, privateInputScope, threadActionReadOnly } from "../session/capabilities.js";
 
-export let pendingTimer = null;
-export function setPendingTimer(value) { return pendingTimer = value; }
-export function validSkillSelection(value) {
-  return value == null || (Array.isArray(value) && value.length <= 16 && value.every(skill =>
-    skill && typeof skill.name === "string" && skill.name.length > 0 && skill.name.length <= 256
-      && typeof skill.path === "string" && skill.path.length > 0 && skill.path.length <= 4096));
-}
-export function validQueuedImageSources(value) {
-  return Array.isArray(value) && value.length <= 4
-    && value.every(source => typeof source === "string" && source.length > 0 && source.length <= 32_767
-      && !/[\u0000-\u001f\u007f]/u.test(source))
-    && new Set(value).size === value.length;
-}
-export let pending = null;
-export function setPending(value) { return pending = value; }
-export let pendingSendRequest = null;
-export function setPendingSendRequest(value) { return pendingSendRequest = value; }
-// 从会话存储恢复未完成的写操作回执；校验失败时记为无效，交由恢复流程提示用户。
-export function restoreStoredPending() {
-  try {
-    const stored = hydrateGoalComposerRecord(JSON.parse(sessionStorage.getItem("codex-elves-pending") || "null"));
-    if (stored) pending = typeof stored.id === "string" && /^[a-zA-Z0-9-]{1,100}$/.test(stored.id)
-      && (stored.action === "reorderQueued"
-        ? typeof stored.payload?.threadId === "string" && Array.isArray(stored.payload.messageIds)
-          && Array.isArray(stored.payload.expectedMessageIds)
-          && stored.payload.messageIds.length > 0
-          && stored.payload.messageIds.length === stored.payload.expectedMessageIds.length
-          && new Set(stored.payload.messageIds).size === stored.payload.messageIds.length
-          && stored.payload.messageIds.every(id => typeof id === "string" && stored.payload.expectedMessageIds.includes(id))
-        : queuedEditActions.has(stored.action)
-        ? typeof stored.payload?.editId === "string" && typeof stored.payload?.threadId === "string"
-        : ["steerQueued", "removeQueued"].includes(stored.action)
-        ? typeof stored.payload?.threadId === "string" && typeof stored.payload?.messageId === "string"
-        : ["send", "create", "editMessage", "setGoal"].includes(stored.action)
-          && typeof stored.payload?.prompt === "string" && validSkillSelection(stored.payload.skills)
-          && (stored.action !== "setGoal" || stored.payload.goalMode === true && typeof stored.payload.threadId === "string")
-          && (stored.payload.goalMode !== true || goalComposerAction(stored.action, stored.payload)
-            && (validGoalComposerDraft(stored.draft) || typeof stored.recoveryRef === "string")))
-      ? stored : { invalid: true };
-  } catch { pending = { invalid: true }; }
-}
-export function savePending(value) {
-  if (value) {
-    if (!Number.isFinite(value.time)) value.time = Date.now();
-    try { sessionStorage.setItem("codex-elves-pending", JSON.stringify(goalComposerStorageRecord(value))); }
-    catch (error) {
-      if (!value.recoveryRef) throw new Error(recoveryStorageMessage(error, true));
-      // 完整记录已先写入 IndexedDB，刷新时也可以通过原 ID 找回。
-    }
-  } else {
-    try { sessionStorage.removeItem("codex-elves-pending"); }
-    catch { notice("无法清理浏览器回执记录，重新打开页面后可能仍需人工核对。", true); }
-    const previous = pending;
-    if (previous?.recoveryRef && recoveryScope)
-      void recoveryStore.remove(recoveryScope, "active", previous.recoveryRef).catch(() => {});
-    if (previous?.recoveryRef && recoveryScope
-        && ![...goalComposerRecoveries.values()].some(record => record.id === previous.id))
-      void recoveryStore.remove(recoveryScope, "pending", previous.recoveryRef).catch(() => {});
-  }
-  clearTimeout(pendingTimer);
-  pending = value;
-}
 export async function mutate(action, payload, { reliable = false, receiptId = null } = {}) {
   if (payload?.threadId && threadActionReadOnly(action, payload.threadId))
     throw Object.assign(new Error("此会话仅供查看，不能提交操作。"), { code: 403, notSubmitted: true });
@@ -254,59 +188,6 @@ export async function mutate(action, payload, { reliable = false, receiptId = nu
   }
   return result.result;
 }
-export function reportMutationError(error) {
-  if (error.pendingFeedback) { updateComposer(); return; }
-  notice(error.message, true);
-}
-export function acceptedSendItem(items, clientId) {
-  return items.find(item => (item.type === "userMessage"
-    || item.type === "steeringUserMessage" && item.status === "accepted")
-    && !item.remotePendingInput && !item.remoteCompactionInput
-    && (item.clientId === clientId || item.clientUserMessageId === clientId));
-}
-async function confirmPendingSend(current, result = {}) {
-  const threadId = current.payload?.threadId;
-  const clientId = result?.clientUserMessageId ?? current.payload?.clientUserMessageId;
-  const historicalEdit = current.action === "editMessage" && claudeThreadId(threadId);
-  if (current.action !== "send" && !historicalEdit || typeof threadId !== "string"
-      || typeof clientId !== "string" || !/^[a-zA-Z0-9_-]{1,120}$/.test(clientId)
-      || result?.threadId && result.threadId !== threadId
-      || result?.clientUserMessageId && current.payload?.clientUserMessageId
-        && result.clientUserMessageId !== current.payload.clientUserMessageId) return null;
-  if (current.deviceId && current.deviceId !== session?.device.id) return null;
-  current.confirmationClientUserMessageId = clientId;
-  // 原生接受事件已到达时立即收敛回执；不再被慢速或未返回的 sendState 查询挡住。
-  // 仅使用稳定轮次下的真实用户消息，排除发送占位和等待准入，保留未知结果不重发。
-  const accepted = selectedId === threadId
-    ? acceptedSendItem([...turns.values()].filter(turn => (turn.id || turn.turnId)
-      && !turn.pendingUserMessageAdmission).flatMap(turn => turn.items || []), clientId) : null;
-  if (accepted) return { ok: true, confirmed: true, deliveryState: "accepted",
-    threadId, clientUserMessageId: clientId, messageId: accepted.serverUserMessageId || accepted.id };
-  if (pendingSendRequest?.current === current) return pendingSendRequest.promise;
-  const promise = (async () => {
-    if (session.capabilities?.queueSendRecovery === true) {
-      const state = await api("/api/read/sendState", { threadId, clientUserMessageId: clientId });
-      return state.confirmed === true && state.threadId === threadId
-        && state.clientUserMessageId === clientId
-        && (historicalEdit ? state.deliveryState === "accepted" : ["queued", "accepted"].includes(state.deliveryState))
-        ? state : null;
-    }
-    const queue = await api("/api/read/queue", { threadId });
-    const queued = queue.threadId === threadId && (queue.queuedMessages || []).find(message =>
-      (message.clientUserMessageId ?? message.submissionOptions?.clientUserMessageId
-        ?? (!message.serverQueuedMessageId ? message.id : null)) === clientId);
-    if (queued && !historicalEdit) return { ...queue, ok: true, confirmed: true, deliveryState: "queued",
-      clientUserMessageId: clientId, messageId: queued.id };
-    const history = await api("/api/read/history", { threadId, cursor: null });
-    const delivered = history.threadId === threadId
-      && acceptedSendItem((history.data || []).flatMap(turn => turn.items || []), clientId);
-    return delivered ? { ok: true, confirmed: true, deliveryState: "accepted",
-      threadId, clientUserMessageId: clientId, messageId: delivered.id } : null;
-  })();
-  const request = { current, promise }; pendingSendRequest = request;
-  try { return await promise; }
-  finally { if (pendingSendRequest === request) pendingSendRequest = null; }
-}
 export async function resolvePending() {
   if (!pending || !session) return;
   if (pending.recoveryUnavailable) {
@@ -329,7 +210,7 @@ export async function resolvePending() {
     && (!queueAction || generation === recoveryGeneration && operationScope === privateInputScope(session));
   const retry = delay => {
     clearTimeout(pendingTimer);
-    pendingTimer = setTimeout(() => { if (stillCurrent()) void resolvePending(); }, delay);
+    setPendingTimer(setTimeout(() => { if (stillCurrent()) void resolvePending(); }, delay));
   };
   try {
     let receipt = await api(`/api/receipts/${current.id}`);
@@ -338,7 +219,7 @@ export async function resolvePending() {
       const outcome = await applyGoalComposerReceipt(current, receipt, { allowSelection: true });
       if (outcome === "pending" && pending?.id === current.id) {
         clearTimeout(pendingTimer);
-        pendingTimer = setTimeout(() => { if (pending?.id === current.id) void resolvePending(); }, 2000);
+        setPendingTimer(setTimeout(() => { if (pending?.id === current.id) void resolvePending(); }, 2000));
       }
       return;
     }

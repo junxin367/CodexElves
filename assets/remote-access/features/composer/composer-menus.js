@@ -1,24 +1,23 @@
-// 输入区浮层：模型菜单渲染、浮层与审批区的视口适配，以及统一收起输入区菜单。
+// 输入区浮层：模型菜单渲染与新会话所选模型的记忆、浮层与审批区的视口适配，以及统一收起输入区菜单；模型菜单搜索词在 options-state.js。
 
-import { menuHorizontalLeft } from "../../ui/position.js";
 import { $, button, element } from "../../ui/dom.js";
 import { activePopup, fitPopup } from "../../ui/popup.js";
+import { menuHorizontalLeft } from "../../ui/position.js";
+import { updateComposer } from "../../core/actions.js";
 import { creating } from "../../core/state.js";
 import { fitClaudeUsageTip } from "./claude-usage.js";
-import { updateComposer } from "./composer.js";
 import { closeContextUsageTip, fitContextUsageTip } from "./metrics.js";
+import { currentEffort, currentModel, currentModelId } from "./model-choice.js";
+import { rememberNewChatSettings } from "./new-chat-settings.js";
 import {
-  currentEffort, currentModel, currentModelId, defaultModelEffort, modelChoiceVersion, models,
-  selectedEffort, setModelChoiceVersion, setSelectedEffort, setSelectedModel
-} from "./models.js";
-import { rememberNewChatModel, rememberNewChatSettings } from "./new-chat.js";
+  defaultModelEffort, modelChoiceVersion, modelQuery, models, selectedEffort, setModelChoiceVersion,
+  setModelQuery, setSelectedEffort, setSelectedModel
+} from "./options-state.js";
 import { effortLabels } from "./prompt-editor.js";
-import { fitGoalEditor } from "../goal/status.js";
+import { fitGoalEditor } from "../goal/state.js";
 import { isClaude } from "../session/capabilities.js";
-import { scheduleDesktopObservation } from "../sidebar/list.js";
+import { scheduleDesktopObservation } from "../sidebar/list-state.js";
 
-export let modelQuery = "";
-export function setModelQuery(value) { return modelQuery = value; }
 export function closeSkillMenu() {
   const menu = $("#skill-menu"); if (menu) menu.hidden = true;
   $("#prompt")?.setAttribute("aria-expanded", "false");
@@ -47,8 +46,8 @@ export function renderModelMenu() {
     const input = element("input", "model-search");
     input.id = "model-search"; input.type = "search"; input.value = modelQuery;
     input.placeholder = "搜索模型"; input.setAttribute("aria-label", "搜索模型"); input.autocomplete = "off";
-    input.oninput = event => { if (!event.isComposing) { modelQuery = input.value; renderModelMenu(); } };
-    input.oncompositionend = () => { modelQuery = input.value; renderModelMenu(); };
+    input.oninput = event => { if (!event.isComposing) { setModelQuery(input.value); renderModelMenu(); } };
+    input.oncompositionend = () => { setModelQuery(input.value); renderModelMenu(); };
     menu.append(input);
   }
   const choice = (text, checked, action, description, key = text) => {
@@ -187,4 +186,8 @@ export function installComposerMenuViewportListeners() {
     const menu = $("#model-settings");
     if (menu && !menu.hidden && !menu.contains(event.target)) fitComposerMenu(menu);
   }, true);
+}
+
+export function rememberNewChatModel(model) {
+  rememberNewChatSettings({ model, reasoningEffort: currentEffort() });
 }

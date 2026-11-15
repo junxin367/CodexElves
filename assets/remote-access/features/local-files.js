@@ -4,7 +4,7 @@ import { isAndroidContainer, openAndroidBrowser } from "../platform.js";
 import { notice } from "../ui/notice.js";
 import { creating, selectedId } from "../core/state.js";
 import { api } from "./api.js";
-import { relatedSessionView } from "./session/related.js";
+import { relatedSessionView } from "./session/related-state.js";
 import { workspaceSidePanel } from "./session/side-panel.js";
 
 function currentFileBrowserThreadId() {

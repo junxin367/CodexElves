@@ -1,8 +1,8 @@
 // 已发送消息的展示接替：发送回执确认后在正文中展示，并按原生消息身份去重接替。
 
+import { renderMessages, renderQueueArea } from "../../core/actions.js";
 import { selectedId, session, turns } from "../../core/state.js";
-import { renderMessages } from "../conversation/history-view.js";
-import { queueMessageIdentity, queueMessageText, renderQueueArea } from "./queue.js";
+import { queueMessageIdentity, queueMessageText } from "./state.js";
 import { privateInputScope } from "../session/capabilities.js";
 
 export const sentMessageDisplays = new Map();

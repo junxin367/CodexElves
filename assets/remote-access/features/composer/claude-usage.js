@@ -3,9 +3,9 @@
 import { $, element } from "../../ui/dom.js";
 import { icon } from "../../ui/icons.js";
 import { closePopup } from "../../ui/popup.js";
+import { closeComposerMenus } from "../../core/actions.js";
 import { connected, creating, pageLeaving, selectedId, session, sidebar, thread } from "../../core/state.js";
 import { api } from "../api.js";
-import { closeComposerMenus } from "./composer-menus.js";
 import { fitComposerMetrics } from "./metrics.js";
 import { isClaude, privateInputScope } from "../session/capabilities.js";
 import { activeInstanceId, sessionInstanceEnabled } from "../session/instances.js";

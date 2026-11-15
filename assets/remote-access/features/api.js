@@ -3,11 +3,11 @@
 import { activateRemoteChannels, raceRemoteRead, requestRemote, validateRemoteReceipt } from "../channels.js";
 import { receiveDiagnosticRequest } from "../diagnostics.js";
 import { beginPwaForegroundWork } from "../pwa.js";
+import { requireAuthentication } from "../core/actions.js";
 import { session } from "../core/state.js";
 import { threadActionReadOnly } from "./session/capabilities.js";
-import { currentChannelMeasurements, markMessageChannelUnavailable } from "./session/connection.js";
-import { requireAuthentication } from "./session/login.js";
-import { threadDeleted, threadDeletionLocked } from "./sidebar/actions.js";
+import { currentChannelMeasurements, markMessageChannelUnavailable } from "./session/connection-state.js";
+import { threadDeleted, threadDeletionLocked } from "./sidebar/deletion-state.js";
 
 export async function api(path, body, id, signal, { resourcePriority = "foreground", onChannelLatency = null, recoveryProbe = false } = {}) {
   if (path.startsWith("/api/action/") && body?.threadId

@@ -1,184 +1,61 @@
-// 会话正文视图：历史加载占位、消息列表渲染与正文缓存的保存/恢复。
+// 会话正文视图：调度并渲染消息列表、恢复已暂存的正文；滚动、跟随与分页按钮等视图状态在 history-state.js，正文暂存在 transcript.js，加载占位在 history.js。
 
 import { renderMessageActions } from "../../message-actions.js";
 import { copyText } from "../../ui/clipboard.js";
-import { $, button, element } from "../../ui/dom.js";
+import { $, element } from "../../ui/dom.js";
 import { icon } from "../../ui/icons.js";
 import { notice } from "../../ui/notice.js";
+import { renderItem, renderQueueArea } from "../../core/actions.js";
 import {
-  busy, connected, creating, pageLeaving, selectedId, selectionVersion, session, setTurns, sidebar,
-  stopping, thread, turns
+  busy, connected, creating, selectedId, selectionVersion, session, setTurns, stopping, thread,
+  turns
 } from "../../core/state.js";
 import { readCache, transcriptCache } from "../../core/stores.js";
-import { clearPendingFeedbackTimer } from "../composer/composer.js";
-import { selectedEffort, selectedModel, setSelectedEffort, setSelectedModel } from "../composer/models.js";
+import { setSelectedEffort, setSelectedModel } from "../composer/options-state.js";
 import { resizeEditorInput } from "../composer/prompt-editor.js";
-import { skillRenderVersion } from "../composer/skills.js";
+import { skillRenderVersion } from "../composer/skill-catalog.js";
 import { compactionLocked } from "./compaction.js";
-import { setNotifiedStatus } from "./events.js";
 import {
-  historyAutoFailed, historyController, historyCursor, historyError, historyInitialized,
-  historyLoading, historyLoadingOlder, historyLoadingTurnId, historyLoadingVersion, itemVersions,
-  loadHistory, partialItems, setHistoryAutoFailed, setHistoryController, setHistoryCursor,
-  setHistoryError, setHistoryInitialized, setHistoryLoading, setHistoryLoadingOlder,
-  setHistoryLoadingTurnId, setHistoryLoadingVersion, setHistoryRequest, setLatestHistoryReadFailed,
-  setTranscriptChecking, transcriptChecking, turnFieldVersions, turnVersions
-} from "./history.js";
-import { pending } from "./pending.js";
+  followMessages, historyCursor, historyError, historyInitialized, historyLoadButton,
+  legacySentDisplayTurn, messageFrame, renderTurnPlanTitle, renderedItems, renderedTurns,
+  setFollowMessages, setHistoryCursor, setHistoryInitialized, setHistoryScrollTop, setMessageFrame,
+  setRecentHistoryPage, setTranscriptChecking, syncHistoryButtons, updateScrollControl,
+  visibleMessageAnchor
+} from "./history-state.js";
+import { historyPlaceholder, loadHistory, scheduleHistoryLoad } from "./history.js";
+import { pending } from "./pending-state.js";
+import { relatedReturnTranscript, setRelatedReturnTranscript, welcomeNode } from "./selection-state.js";
 import {
-  relatedReturnTranscript, selectionController, setRelatedReturnTranscript, setSelectionController,
-  setThreadReadFailed, welcomeNode
-} from "./selection.js";
-import {
-  completedManualCompactionAfterReply, replaceTranscriptEvents, transcriptEvents,
-  transcriptEventTypes
+  completedManualCompactionAfterReply, replaceTranscriptEvents, transcriptEventTypes
 } from "./transcript-events.js";
 import {
-  activityPresentation, claudeTurnAwaitingStart, finalMessageIndex, renderActivity,
-  renderedActivities, stopActivityTimer, syncActivityTimer
-} from "../messages/activity.js";
+  activityPresentation, claudeTurnAwaitingStart, finalMessageIndex, renderedActivities,
+  syncActivityTimer
+} from "../messages/activity-state.js";
+import { renderActivity } from "../messages/activity.js";
 import { renderEditedFiles } from "../messages/edited-files.js";
-import { reasoningPreviewText, reconcileChildren, renderItem } from "../messages/items.js";
-import { markdownRenderVersion, messageImageRefreshes, scheduleMermaidBlocks } from "../messages/media.js";
+import { reasoningPreviewText, reconcileChildren } from "../messages/item-presentation.js";
+import { markdownRenderVersion, scheduleMermaidBlocks } from "../messages/media-state.js";
 import { beginMessageEdit, editingMessage } from "../messages/message-edit.js";
+import { claudeQuestionReplies } from "../messages/question-reply.js";
 import { isSubagentItem, subagentTool } from "../messages/subagents.js";
 import {
   loadMessageSkillChoices, messageCopyText, textContent, userMessageHasSkills
 } from "../messages/user-content.js";
-import {
-  finishQueueDrag, queueVersion, renderQueueArea, retiredQueueEpochs, setNotifiedQueue,
-  setNotifiedQueueEdits, setQueueSnapshotVersion, setQueueVersion
-} from "../queue/queue.js";
-import { editingQueuedMessage } from "../queue/queued-edit.js";
 import { reconcileSentMessageDisplays, withSentMessageDisplays } from "../queue/sent-display.js";
+import { editingQueuedMessage } from "../queue/state.js";
+import { threadSentMessageEditAllowed } from "../session/action-capabilities.js";
 import {
-  isActiveThread, normalizeRelatedView, privateInputScope, subagentsEnabled, threadReadOnly,
-  threadSentMessageEditAllowed
+  isActiveThread, normalizeRelatedView, privateInputScope, subagentsEnabled, threadReadOnly
 } from "../session/capabilities.js";
-import {
-  relatedSessionView, relatedThreadViews, setRelatedSessionView, syncRelatedSessionLayout
-} from "../session/related.js";
-import {
-  cacheDisplayData, currentThreadDisplay, readingPosition, readScope, rememberReadingPosition,
-  rememberThreadDisplay, threadEphemeralState
-} from "../session/thread-cache.js";
-import { composerScroll } from "../shell.js";
-import { threadDeleted } from "../sidebar/actions.js";
+import { relatedSessionView, relatedThreadViews, setRelatedSessionView } from "../session/related-state.js";
+import { syncRelatedSessionLayout } from "../session/related.js";
+import { currentThreadDisplay, readScope } from "../session/thread-cache.js";
+import { composerScroll } from "../shell-state.js";
 
-export let historyLoadFrame = null, historyScrollTop = 0, historyLoadVisibleItems = false;
-export function setHistoryScrollTop(value) { return historyScrollTop = value; }
-export let recentHistoryPage = null;
-export function setRecentHistoryPage(value) { return recentHistoryPage = value; }
-let messageFrame = null;
-export let followMessages = true;
-export function setFollowMessages(value) { return followMessages = value; }
-export const renderedItems = new Map(), renderedTurns = new Map();
-export function resetMessages() {
-  for (const request of messageImageRefreshes.values()) request.controller.abort();
-  messageImageRefreshes.clear();
-  clearPendingFeedbackTimer();
-  composerScroll?.expand();
-  stopActivityTimer();
-  finishQueueDrag({ render: false });
-  historyController?.abort(); setHistoryController(null);
-  setHistoryRequest(null);
-  selectionController?.abort(); setSelectionController(null);
-  setHistoryLoading(false); setHistoryLoadingVersion(-1); setHistoryLoadingTurnId(null); setHistoryLoadingOlder(false); setHistoryError("");
-  setThreadReadFailed(false); setLatestHistoryReadFailed(false);
-  cancelAnimationFrame(historyLoadFrame); historyLoadFrame = null; setHistoryAutoFailed(false);
-  historyScrollTop = 0; historyLoadVisibleItems = false;
-  cancelAnimationFrame(messageFrame); messageFrame = null;
-  for (const entry of renderedItems.values()) entry.node.messageActionBinding?.dispose();
-  renderedItems.clear(); renderedTurns.clear(); renderedActivities.clear(); itemVersions.clear(); turnVersions.clear(); turnFieldVersions.clear();
-  partialItems.clear();
-  followMessages = true;
-  setTranscriptChecking(false);
-  recentHistoryPage = null;
-  setNotifiedStatus(null);
-  setNotifiedQueue(null); setNotifiedQueueEdits(null); setQueueSnapshotVersion(null); retiredQueueEpochs.clear(); setQueueVersion(queueVersion + 1);
-}
 export function scheduleMessages() {
   if (messageFrame != null) return;
-  messageFrame = requestAnimationFrame(() => { messageFrame = null; renderMessages(); });
-}
-export function updateScrollControl() {
-  const messages = $("#messages"), control = $("#scroll-to-bottom");
-  if (!messages || !control) return;
-  const away = messages.scrollHeight - messages.scrollTop - messages.clientHeight >= 100;
-  control.hidden = !selectedId || !away;
-  const running = isActiveThread();
-  const state = running ? "working" : "latest";
-  if (control.dataset.state !== state) {
-    control.dataset.state = state;
-    if (running) {
-      const dots = element("span", "scroll-working-dots");
-      dots.setAttribute("aria-hidden", "true");
-      dots.append(element("span"), element("span"), element("span"));
-      control.replaceChildren(dots);
-    } else control.replaceChildren(icon("arrowUp"));
-  }
-  control.setAttribute("aria-label", running ? "会话正在执行，跳转到最新消息" : "跳转到最新消息");
-  control.title = running ? "会话正在执行，回到最新消息" : "回到最新消息";
-}
-export function historyPlaceholder() {
-  const node = element("div", "empty-conversation");
-  if (historyError) {
-    node.append(element("p", "error-text", historyError),
-      button("重试", "重试加载最新消息", () => void loadHistory(), "text-button"));
-  } else {
-    node.setAttribute("role", "status");
-    node.append(element("span", "spinner"), document.createTextNode(" 正在加载最新消息…"));
-  }
-  return node;
-}
-export function scheduleHistoryLoad(visibleItems = false) {
-  historyLoadVisibleItems ||= visibleItems;
-  if (historyLoadFrame != null) return;
-  historyLoadFrame = requestAnimationFrame(() => {
-    historyLoadFrame = null;
-    const includeVisibleItems = historyLoadVisibleItems;
-    historyLoadVisibleItems = false;
-    const root = $("#messages");
-    if (!root || !selectedId || !historyInitialized || transcriptChecking || historyLoading || historyAutoFailed || pageLeaving) return;
-    const box = root.getBoundingClientRect();
-    for (const node of root.querySelectorAll(".history-load[data-history-page]")) {
-      if (node.dataset.turnId && node.closest("details:not([open])")) continue;
-      const rect = node.getBoundingClientRect();
-      if (!node.disabled && rect.height && rect.bottom >= box.top - 120
-          && rect.top <= (includeVisibleItems && node.dataset.turnId ? box.bottom : Math.min(box.bottom, box.top + 120))) {
-        const version = selectionVersion;
-        void loadHistory(true, version, node.dataset.turnId || null).then(() => {
-          if (version === selectionVersion) scheduleHistoryLoad(includeVisibleItems);
-        });
-        break;
-      }
-    }
-  });
-}
-export function syncHistoryButtons() {
-  const loading = historyLoading && historyLoadingVersion === selectionVersion;
-  for (const node of document.querySelectorAll("#messages .history-load")) {
-    node.disabled = loading;
-    const requested = historyLoadingTurnId ? node.dataset.turnId === historyLoadingTurnId
-      : historyLoadingOlder ? node.dataset.historyPage === "older" && !node.dataset.turnId : !node.dataset.historyPage;
-    node.textContent = loading && requested
-      ? "加载中…" : node.dataset.label;
-  }
-}
-function historyLoadButton(label, action, turnId = "") {
-  const node = button(label, label, action, "load-more history-load");
-  node.dataset.label = label; node.dataset.turnId = turnId;
-  return node;
-}
-export function visibleMessageAnchor(root) {
-  const box = root.getBoundingClientRect();
-  const candidates = [...root.querySelectorAll("[data-key]"), ...root.querySelectorAll("[data-activity-key]"), ...root.querySelectorAll(".turn")];
-  for (const node of candidates) {
-    const rect = node.getBoundingClientRect();
-    if (rect.height && rect.bottom > box.top && rect.top < box.bottom)
-      return { node, key: node.dataset.key, offset: rect.top - box.top };
-  }
-  return null;
+  setMessageFrame(requestAnimationFrame(() => { setMessageFrame(null); renderMessages(); }));
 }
 function historyGapIndex(turn) {
   const items = turn.items || [];
@@ -188,14 +65,8 @@ function historyGapIndex(turn) {
   while (index > 0 && transcriptEventTypes.has(items[index - 1].type) && !items[index - 1].remoteHistoryContext) index--;
   return index;
 }
-// 用户要求 Claude 和 Codex 都保留 TODO 统计标题；仅统计原生 turn.plan 的状态，随计划更新，不从正文推测任务。
-function renderTurnPlanTitle(plan) {
-  const count = status => plan.filter(step => step.status === status).length;
-  return element("div", "turn-plan-title",
-    `${plan.length} 个任务（${count("completed")} 个已完成，${count("inProgress")} 个进行中，${count("pending")} 个待办）`);
-}
 export function renderMessages(keepScroll = true) {
-  cancelAnimationFrame(messageFrame); messageFrame = null;
+  cancelAnimationFrame(messageFrame); setMessageFrame(null);
   const root = $("#messages");
   if (!root) return;
   scheduleMermaidBlocks();
@@ -296,7 +167,8 @@ export function renderMessages(keepScroll = true) {
       if (isSubagentItem(item) && ["wait", "wait_agent"].includes(subagentTool(item))) continue;
       if (item.type === "reasoning" && !reasoningPreviewText(item) && !(turnRunning && item === turnItems.at(-1))) continue;
       if (["agentMessage", "plan"].includes(item.type) && !textContent(item).trim()) continue;
-      if (item.type === "userMessage" || transcriptEventTypes.has(item.type)) {
+      // 已回答的 Claude 提问是用户发出的回复，与用户消息一样在原位置单独显示，不并入折叠的工作分组。
+      if (item.type === "userMessage" || transcriptEventTypes.has(item.type) || claudeQuestionReplies(item)) {
         flushActivity(); content.push({ item });
       }
       else work.push(item);
@@ -384,66 +256,9 @@ export function renderMessages(keepScroll = true) {
       root.scrollTop += node.getBoundingClientRect().top - root.getBoundingClientRect().top - anchor.offset;
     else if (!keepScroll) root.scrollTop = oldTop + root.scrollHeight - oldHeight;
   }
-  historyScrollTop = root.scrollTop;
+  setHistoryScrollTop(root.scrollTop);
   updateScrollControl();
   scheduleHistoryLoad();
-}
-export function rememberTranscript({ retainView = false, retainRelatedParent = false } = {}) {
-  rememberThreadDisplay();
-  if (!session || !selectedId || !historyInitialized || threadDeleted(selectedId)) return;
-  const ephemeral = threadEphemeralState(selectedId);
-  const summary = [...(sidebar?.recent || []), ...(sidebar?.pinnedThreads || []),
-    ...(sidebar?.projects || []).flatMap(project => project.threads || [])].find(item => item.id === selectedId);
-  // 补插轮次只用于维持当前视图：缓存只保留已加载轮次和仍未见原生正文的成功投影，不把补出的原生副本写成历史轮次，
-  // 避免用户切回会话或重启后，旧消息被当作真实历史插到执行中轮次前后。
-  const currentTurns = withSentMessageDisplays().flatMap(turn => {
-    if (turns.has(turn.id)) return [turn];
-    const items = turn.items.filter(item => item.remotePendingInput);
-    return items.length ? [{ ...turn, items }] : [];
-  }), events = [...transcriptEvents.values()];
-  const recentStart = currentTurns.findIndex(turn => turn.id === recentHistoryPage?.turns?.[0]?.id);
-  // 最近页起点和游标来自服务器；合并该页之后收到的新轮次，避免回退窗口遗漏刚完成的回复。
-  const recentTurns = recentStart >= 0 ? currentTurns.slice(recentStart) : null;
-  const recentIds = new Set(recentTurns?.map(turn => turn.id));
-  const recentWindow = recentTurns ? { ...recentHistoryPage, turns: recentTurns,
-    transcriptEvents: events.filter(event => recentIds.has(event.turnId)) } : recentHistoryPage;
-  const snapshot = {
-    turns: currentTurns, transcriptEvents: events, historyCursor,
-    ...(typeof ephemeral === "boolean" ? { ephemeral } : {}),
-    ...readingPosition(), recentWindow, recentPage: recentHistoryPage,
-    title: thread?.title || summary?.title || "",
-    cwd: thread?.cwd || summary?.cwd || "",
-    ...(recentHistoryPage?.sideHistoryVersion === 1 ? { sideHistoryVersion: 1 } : {}),
-    ...(relatedSessionView ? { relatedView: normalizeRelatedView(relatedSessionView, selectedId) } : {})
-  };
-  // 仅离开会话时保留渲染节点，和正文共用容量限制；超限回退窗口时不复用整页视图。
-  const view = retainView ? {
-    turns: new Map(currentTurns.map(turn => [turn.id, turn])), items: new Map(renderedItems),
-    groups: new Map(renderedTurns), activities: new Map(renderedActivities)
-  } : null;
-  // 子页仅保留一层返回位置，正文超出普通缓存窗口时也保留主会话原节点。
-  if (retainRelatedParent && view) setRelatedReturnTranscript({
-    scope: privateInputScope(session), threadId: selectedId, snapshot, view,
-    selectedModel, selectedEffort
-  });
-  const retained = transcriptCache.put(session.device.id, selectedId, snapshot, view);
-  if (retained) {
-    const completed = retained.turns.filter(turn => ["completed", "failed", "interrupted"].includes(turn.status));
-    const completedIds = new Set(completed.map(turn => turn.id));
-    if (completed.length) cacheDisplayData("transcript", selectedId, {
-      ...retained, turns: completed,
-      transcriptEvents: (retained.transcriptEvents || []).filter(event => completedIds.has(event.turnId)),
-      ...(completed.length === retained.turns.length ? {} : { followMessages: true, scrollTop: 0, anchor: null })
-    });
-  }
-  rememberReadingPosition();
-}
-function legacySentDisplayTurn(turn) {
-  // 旧版本曾把补插出的已接替提问写成只有 id/status/items 的完成轮次，用户升级后旧缓存仍会把旧消息插到执行中轮次前后。
-  // 真实轮次带有原生或分页字段；仍未见原生正文的成功投影带 remotePendingInput，均不在此剔除范围内。
-  return turn?.status === "completed" && Object.keys(turn).every(key => ["id", "status", "items"].includes(key))
-    && Array.isArray(turn.items) && turn.items.length > 0
-    && turn.items.every(item => item?.type === "userMessage" && item.remoteConfirmedInput === true && !item.remotePendingInput);
 }
 export function restoreTranscript(id) {
   const returning = relatedReturnTranscript?.scope === privateInputScope(session)
@@ -474,8 +289,8 @@ export function restoreTranscript(id) {
   }
   replaceTranscriptEvents(cached.transcriptEvents);
   setHistoryCursor(cached.historyCursor); setHistoryInitialized(true);
-  recentHistoryPage = cached;
-  followMessages = cached.followMessages; setTranscriptChecking(true);
+  setRecentHistoryPage(cached);
+  setFollowMessages(cached.followMessages); setTranscriptChecking(true);
   renderMessages();
   const root = $("#messages");
   if (root) {
@@ -483,7 +298,7 @@ export function restoreTranscript(id) {
     const anchor = cached.anchor && renderedItems.get(cached.anchor.key)?.node;
     if (!cached.followMessages && anchor?.isConnected)
       root.scrollTop += anchor.getBoundingClientRect().top - root.getBoundingClientRect().top - cached.anchor.offset;
-    historyScrollTop = root.scrollTop;
+    setHistoryScrollTop(root.scrollTop);
   }
   return cached;
 }

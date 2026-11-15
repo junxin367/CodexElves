@@ -14,29 +14,29 @@ import { icon } from "../../ui/icons.js";
 import { notice } from "../../ui/notice.js";
 import { activePopup, closePopup, fitPopup, setActivePopup } from "../../ui/popup.js";
 import { selectControl, setSelectOptions, setSelectValue } from "../../ui/select.js";
+import { closeComposerMenus, loadSidebar, renderSidebar, updateComposer } from "../../core/actions.js";
 import { connected, creating, session } from "../../core/state.js";
 import { api } from "../api.js";
 import {
-  appearance, appearanceThemes, applyAppearance, conversationWidthMax, conversationWidthMin,
+  applyAppearance, mountAutomaticThemeLightSetting, setAppearanceThemeMode, syncRemoteBackground
+} from "./apply.js";
+import {
+  appearance, appearanceThemes, conversationWidthMax, conversationWidthMin,
   currentFileReadingFontSize, defaultAppearance, deleteRemoteBackground, fileReadingFontDefault,
-  fileReadingFontMax, fileReadingFontMin, mountAutomaticThemeLightSetting, projectThreadLimits,
-  readRemoteBackgroundFile, remoteBackground, remoteBackgroundBusy, remoteBackgroundError,
-  remoteBackgroundOperation, setAppearance, setAppearanceThemeMode, setRemoteBackground,
-  setRemoteBackgroundBusy, setRemoteBackgroundError, setRemoteBackgroundOperation,
-  setSyncAppearanceThemeControls, syncAppearanceThemeControls, syncRemoteBackground,
+  fileReadingFontMax, fileReadingFontMin, projectThreadLimits, readRemoteBackgroundFile,
+  remoteBackground, remoteBackgroundBusy, remoteBackgroundError, remoteBackgroundOperation,
+  setAppearance, setRemoteBackground, setRemoteBackgroundBusy, setRemoteBackgroundError,
+  setRemoteBackgroundOperation, setSyncAppearanceThemeControls, syncAppearanceThemeControls,
   validFontFamily, writeRemoteBackground
 } from "./theme.js";
-import { closeComposerMenus } from "../composer/composer-menus.js";
-import { updateComposer } from "../composer/composer.js";
 import { setCreationBackend } from "../composer/new-chat.js";
-import { rememberInstancePermissionCatalog } from "../composer/permissions.js";
+import { rememberInstancePermissionCatalog } from "../composer/options-state.js";
 import { privateInputScope } from "../session/capabilities.js";
-import {
-  activeInstanceId, availableSessionInstances, loadSessionInstances, renderSessionInstances
-} from "../session/instances.js";
+import { loadSessionInstances, renderSessionInstances } from "../session/instance-catalog.js";
+import { activeInstanceId, availableSessionInstances } from "../session/instances.js";
 import { mountClaudeRecapSettings, mountRemoteSettings } from "../settings/remote-settings.js";
-import { sessionMenu } from "../shell.js";
-import { loadSidebar, projectVisibleThreadCounts, renderSidebar } from "../sidebar/list.js";
+import { sessionMenu } from "../shell-state.js";
+import { projectVisibleThreadCounts } from "../sidebar/list-state.js";
 
 function renderPwaCacheState() {
   const root = $("#appearance-cache-state");

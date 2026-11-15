@@ -1,72 +1,63 @@
-// 实时事件处理：接收服务事件并更新会话、侧栏、队列与审批。
+// 实时事件处理：接收服务事件并更新会话、侧栏、队列与审批，调度关联菜单刷新；已通知版本与延迟重载在 event-sync.js。
 
 import { handleRemoteChannelEvent } from "../../channels.js";
 import { receiveDiagnosticRequest } from "../../diagnostics.js";
 import { notice } from "../../ui/notice.js";
 import {
-  nativeConnectionVersion, selectedId, session, setNativeConnectionVersion, setThread, thread,
-  turns
+  loadSidebar, renderApprovals, renderGoalStatus, requireAuthentication, resolvePending,
+  scheduleMessages, selectThread, updateComposer
+} from "../../core/actions.js";
+import {
+  connected, nativeConnectionVersion, selectedId, session, setNativeConnectionVersion, setThread,
+  thread, turns
 } from "../../core/state.js";
 import { readCache, transcriptCache } from "../../core/stores.js";
+import { applyBlockingRequestsSnapshot, invalidateBlockingRequests } from "../approval-requests.js";
 import {
-  applyBlockingRequestsSnapshot, blockingRequestState, invalidateBlockingRequests,
-  notifiedQuestions, questionVersion, renderApprovals, replaceAsyncQuestions, setNotifiedQuestions,
-  setQuestionVersion
-} from "../approvals.js";
-import { sending, updateComposer } from "../composer/composer.js";
-import { rememberRemoteFastPreference } from "../composer/models.js";
-import { rememberPermissionSelection } from "../composer/permissions.js";
+  blockingRequestState, notifiedQuestions, questionVersion, replaceAsyncQuestions,
+  setNotifiedQuestions, setQuestionVersion
+} from "../approval-state.js";
+import { rememberRemoteFastPreference } from "../composer/model-catalog.js";
+import { rememberPermissionSelection } from "../composer/options-state.js";
+import { sending } from "../composer/send-state.js";
 import { refreshSkillCatalog } from "../composer/skills.js";
 import { receiveCompactionLifecycle, reconcileCompaction } from "./compaction.js";
-import { rememberTranscript, scheduleMessages } from "./history-view.js";
 import {
-  claudeHistoryCursor, completedItem, itemVersions, mergeItemProjection, messageVersion,
-  normalizeDisplayedTurnItems, normalizeDisplayedUserMessage, orderClaudeHistoryTurns,
-  partialItems, reloadThread, retireClaudeHistoryTurns, setHistoryCursor, setMessageVersion,
-  turnFieldVersions, turnVersions
-} from "./history.js";
-import { acceptedSendItem, pending, resolvePending } from "./pending.js";
-import { selectThread } from "./selection.js";
-import { enrichTurnTranscriptEvents, mergeTranscriptEvents, transcriptEventTypes } from "./transcript-events.js";
-import { goalVersion, notifiedGoal, renderGoalStatus, setGoalVersion, setNotifiedGoal } from "../goal/status.js";
+  notifiedStatus, scheduleReload, scheduleSidebarRefresh, setNotifiedStatus, setNotifiedTokenUsage,
+  setStatusVersion, setTokenUsageVersion, statusVersion, tokenUsageVersion
+} from "./event-sync.js";
+import {
+  claudeHistoryCursor, completedItem, itemVersions, messageVersion, normalizeDisplayedTurnItems,
+  normalizeDisplayedUserMessage, orderClaudeHistoryTurns, partialItems, setHistoryCursor,
+  setMessageVersion, turnFieldVersions, turnVersions
+} from "./history-state.js";
+import { retireClaudeHistoryTurns } from "./history.js";
+import { acceptedSendItem, pending } from "./pending-state.js";
+import {
+  enrichTurnTranscriptEvents, mergeItemProjection, mergeTranscriptEvents, transcriptEventTypes
+} from "./transcript-events.js";
+import { rememberTranscript } from "./transcript.js";
+import { goalVersion, notifiedGoal, setGoalVersion, setNotifiedGoal } from "../goal/state.js";
+import { isSubagentItem } from "../messages/subagents.js";
 import { markVisibleThreadRead } from "../messages/user-content.js";
-import {
-  applyQueueSnapshot, queueVersion, reloadQueue, setNotifiedQueue, setNotifiedQueueEdits,
-  setQueueVersion
-} from "../queue/queue.js";
+import { applyQueueSnapshot, reloadQueue } from "../queue/queue.js";
 import { clearSentMessageDisplays, reconcileSentMessageDisplays, retiredSendPayloads } from "../queue/sent-display.js";
-import { backendAvailable } from "../session/capabilities.js";
+import { queueVersion, setNotifiedQueue, setNotifiedQueueEdits, setQueueVersion } from "../queue/state.js";
+import { backendAvailable, privateInputScope } from "../session/capabilities.js";
+import { stream, withRecoveryErrorSilence } from "../session/connection-state.js";
 import { refreshConnectedSession, setConnection } from "../session/connection.js";
+import { relatedMenuTimer, relatedSessionView, setRelatedMenuTimer } from "../session/related-state.js";
+import { retireNativeSideThreads } from "../session/related.js";
+import { currentThreadDisplay, readScope, threadDisplayKey, threadDisplays } from "../session/thread-cache.js";
+import { rememberBackgroundThreadDisplay, rememberThreadDisplay } from "../session/thread-display.js";
+import { sessionMenu } from "../shell-state.js";
+import { threadDeleted } from "../sidebar/deletion-state.js";
 import {
-  refreshTimer, setRefreshTimer, setSidebarTimer, sidebarTimer, stream, withRecoveryErrorSilence
-} from "../session/lifecycle.js";
-import { requireAuthentication } from "../session/login.js";
-import { relatedSessionView, retireNativeSideThreads, scheduleRelatedMenuRefresh } from "../session/related.js";
-import {
-  currentThreadDisplay, readScope, rememberBackgroundThreadDisplay, rememberThreadDisplay,
-  threadDisplayKey, threadDisplays
-} from "../session/thread-cache.js";
-import { applyThreadDeletion, threadDeleted } from "../sidebar/actions.js";
-import {
-  loadSidebar, recentPrioritySelectionSuppressions, resetDesktopObservation,
-  scheduleDesktopObservation, sidebarReadRefreshSuppressions
-} from "../sidebar/list.js";
+  recentPrioritySelectionSuppressions, resetDesktopObservation, scheduleDesktopObservation,
+  sidebarReadRefreshSuppressions
+} from "../sidebar/list-state.js";
+import { applyThreadDeletion } from "../sidebar/thread-deletion.js";
 
-export let tokenUsageVersion = 0, notifiedTokenUsage = null;
-export function setNotifiedTokenUsage(value) { return notifiedTokenUsage = value; }
-export let statusVersion = 0, notifiedStatus = null;
-export function setNotifiedStatus(value) { return notifiedStatus = value; }
-export function scheduleReload() {
-  if (refreshTimer) return;
-  setRefreshTimer(setTimeout(() => {
-    setRefreshTimer(null);
-    void reloadThread().catch(error => notice(error.message, true));
-  }, 450));
-}
-function scheduleSidebarRefresh() {
-  clearTimeout(sidebarTimer);
-  setSidebarTimer(setTimeout(() => void loadSidebar(null, { fresh: true }).catch(() => {}), 1200));
-}
 function receiveClaudeHistory(params) {
   const id = params.threadId;
   // 临时正文不改变其他会话的标题、未读或队列；只让正式快照触发侧栏读取，避免流式片段反复刷新列表。
@@ -77,7 +68,7 @@ function receiveClaudeHistory(params) {
     setThread({ ...thread, ...params.thread });
     setNotifiedGoal(thread.goal); setGoalVersion(goalVersion + 1);
     if (thread.compaction) reconcileCompaction(id, thread.compaction);
-    notifiedStatus = thread.status; ++statusVersion;
+    setNotifiedStatus(thread.status); setStatusVersion(statusVersion + 1);
     setNotifiedQueue(thread.queuedMessages); setNotifiedQueueEdits(thread.queuedEdits || []); setQueueVersion(queueVersion + 1);
   }
   // 用户要求同步后旧内部摘要气泡消失；完整快照给出全部有效轮次 ID，仅移除已失效的原生轮次，不删除待发送预览。
@@ -295,7 +286,7 @@ export function receive(event) {
       renderGoalStatus();
     }
     if (event.method === "thread/tokenUsage/updated") {
-      notifiedTokenUsage = params.tokenUsage; ++tokenUsageVersion;
+      setNotifiedTokenUsage(params.tokenUsage); setTokenUsageVersion(tokenUsageVersion + 1);
       if (thread) thread.tokenUsage = params.tokenUsage;
       const display = currentThreadDisplay();
       rememberThreadDisplay({ ...display, id: selectedId, tokenUsage: params.tokenUsage },
@@ -303,7 +294,7 @@ export function receive(event) {
       updateComposer();
     }
     if (event.method === "thread/status/changed") {
-      notifiedStatus = params.status; ++statusVersion;
+      setNotifiedStatus(params.status); setStatusVersion(statusVersion + 1);
       if (thread) thread.status = notifiedStatus;
       updateComposer(); scheduleMessages();
       const status = params.status?.status || params.status;
@@ -334,7 +325,7 @@ export function receive(event) {
         if (Number.isFinite(params.completedAtMs)) turn.turnCompletedAtMs = params.completedAtMs;
         turn.status = event.method === "turn/started" ? "inProgress" : params.turn?.status || "completed";
         turnVersions.set(turnId, version);
-        notifiedStatus = { type: event.method === "turn/started" ? "active" : "idle" }; ++statusVersion;
+        setNotifiedStatus({ type: event.method === "turn/started" ? "active" : "idle" }); setStatusVersion(statusVersion + 1);
         if (thread) thread.status = notifiedStatus;
         updateComposer();
         if (event.method === "turn/completed") {
@@ -407,4 +398,22 @@ export function receive(event) {
     "remote/requestsChanged", "serverRequest/resolved"].includes(event.method)) {
     scheduleSidebarRefresh();
   }
+}
+
+export function scheduleRelatedMenuRefresh(event, { suppressReadRefresh = false } = {}) {
+  const params = event.params || {}, id = params.threadId ?? params.conversationId ?? params.thread?.id;
+  if (!["thread/started", "thread/deleted", "turn/started", "turn/completed",
+    "thread/status/changed", "thread/name/updated", "remote/sidebarChanged", "remote/relatedThreadsChanged",
+    "remote/resync", "remote/reconnected",
+    "item/started", "item/completed"].includes(event.method)
+    || event.method.startsWith("item/") && !isSubagentItem(params.item || {})) return;
+  if (suppressReadRefresh && event.method === "remote/sidebarChanged") return;
+  const relevant = sessionMenu?.invalidate(event.method === "thread/deleted" ? null : id, params.parentThreadId);
+  if (!relevant || relatedSessionView || !selectedId || !connected || relatedMenuTimer) return;
+  const scope = privateInputScope(session), parent = selectedId;
+  setRelatedMenuTimer(setTimeout(() => {
+    setRelatedMenuTimer(null);
+    if (scope === privateInputScope(session) && selectedId === parent && !relatedSessionView)
+      void Promise.resolve(sessionMenu.refresh({ background: true })).catch(() => {});
+  }, 450));
 }

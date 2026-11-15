@@ -6,7 +6,7 @@ import { setSelectOptions } from "../../ui/select.js";
 import { connected, session } from "../../core/state.js";
 import { api } from "../api.js";
 import { privateInputScope } from "../session/capabilities.js";
-import { loadSessionInstances } from "../session/instances.js";
+import { loadSessionInstances } from "../session/instance-catalog.js";
 
 // textarea 将 CRLF 规范为 LF；比较草稿时统一文本，保存时恢复原文件换行，避免未编辑即提示“未保存”。
 const normalizeInstructionText = value => value.replace(/\r\n?/g, "\n");

@@ -1,0 +1,206 @@
+// 侧栏列表状态：本地已读与优先显示、桌面端观察、未读角标计时、侧栏读取请求与折叠分组。
+
+import { $ } from "../../ui/dom.js";
+import { creating, nativeConnectionVersion, pageLeaving, selectedId, session, sidebar } from "../../core/state.js";
+import { api } from "../api.js";
+import { claudeThreadId } from "../session/capabilities.js";
+import { foregroundReadGeneration } from "../session/connection-state.js";
+import { relatedSessionView } from "../session/related-state.js";
+
+export let collapsed = new Set(), search = "";
+export function setSearch(value) { return search = value; }
+export let sidebarVersion = 0;
+export function setSidebarVersion(value) { return sidebarVersion = value; }
+let desktopObservationTimer = null, desktopObservationRequest = null, desktopObservationLast = null;
+export const projectVisibleThreadCounts = new Map();
+export const collapsedSidebarSections = new Set();
+export let recentLimit = 40;
+export function setRecentLimit(value) { return recentLimit = value; }
+export let recentPriorityIds = null;
+export function setRecentPriorityIds(value) { return recentPriorityIds = value; }
+// Opening an older thread can refresh its runtime state without starting work.
+export const recentPrioritySelectionSuppressions = new Set();
+// Marking a thread read must not turn a selection-only refresh into a list reorder.
+export const sidebarReadRefreshSuppressions = new Set();
+export let recentPriorityKnownIds = new Set(), recentPriorityOpenedAt = 0;
+export function setRecentPriorityKnownIds(value) { return recentPriorityKnownIds = value; }
+export function setRecentPriorityOpenedAt(value) { return recentPriorityOpenedAt = value; }
+export let sidebarFilterDeviceId = null;
+export function setSidebarFilterDeviceId(value) { return sidebarFilterDeviceId = value; }
+export let sidebarRequest = null;
+export function setSidebarRequest(value) { return sidebarRequest = value; }
+export function mergeIncompleteSidebar(previous, current) {
+  if (current.complete !== false || current.nativeBridge !== "harness"
+      || previous?.nativeBridge !== "harness") return current;
+  // 服务首批目录不完整时继续展示同一后端的已知会话；新数据优先，
+  // 完整目录返回后整体核对，不能把部分结果当作删除证据；置顶目录独立判断完整性。
+  const freshIds = new Set([...current.recent, ...current.pinnedThreads,
+    ...current.projects.flatMap(project => project.threads)].map(item => item.id));
+  const oldProjects = new Map(previous.projects.map(project => [project.id, project]));
+  const projectIds = new Set(current.projects.map(project => project.id));
+  // 用户要求服务模式与桌面置顶一致：原生置顶已完整时立即接受取消，不能被未完成的最近分页补回。
+  const completePins = current.pinnedThreadsComplete === true;
+  const pinnedIds = new Set(current.pinnedThreads.map(item => item.id));
+  const mergeRows = (old, fresh) => [...fresh, ...old.filter(item => !freshIds.has(item.id) && !claudeThreadId(item.id))]
+    .map(item => item.projectId && !projectIds.has(item.projectId) ? { ...item, projectId: null } : item)
+    .map(item => completePins ? { ...item, pinned: pinnedIds.has(item.id) } : item);
+  const oldRecent = completePins
+    ? [...new Map([...previous.pinnedThreads, ...previous.recent].map(item => [item.id, item])).values()]
+    : previous.recent;
+  return { ...current,
+    recent: mergeRows(oldRecent, current.recent),
+    pinnedThreads: completePins ? current.pinnedThreads : mergeRows(previous.pinnedThreads, current.pinnedThreads),
+    // 项目目录始终完整，只有会话分页未完成；不能把旧服务合成的工作目录补回项目列表。
+    projects: current.projects.map(project => ({ ...project,
+      threads: mergeRows(oldProjects.get(project.id)?.threads || [], project.threads) }))
+  };
+}
+export let clientUnreadBadgeTimer = null, clientUnreadBadgeRequest = null;
+export function setClientUnreadBadgeTimer(value) { return clientUnreadBadgeTimer = value; }
+export function setClientUnreadBadgeRequest(value) { return clientUnreadBadgeRequest = value; }
+export function clientUnreadThreadCount(value) {
+  const unread = new Set(), sideIds = new Set(value?.sideThreadIds || []);
+  // 对照本机 Windows Codex：按未读主会话去重，不按消息/轮次累加；
+  // 最近、项目、置顶重复出现仍只算 1，侧边子会话/子代理不单独增加任务栏数字。
+  for (const item of [...(value?.recent || []), ...(value?.pinnedThreads || []),
+    ...(value?.projects || []).flatMap(project => project.threads || [])]) {
+    if (!item?.id || item.archived === true || sideIds.has(item.id)
+        || item.parentThreadId && item.parentThreadId !== item.id
+        || item.threadSource === "subagent" || item.source?.subAgent || item.source?.subagent) continue;
+    const hasUnread = typeof item.hasUnreadTurn === "boolean"
+      ? item.hasUnreadTurn : item.priority?.attentionState === "unread";
+    if (hasUnread) unread.add(item.id);
+  }
+  return unread.size;
+}
+// 用户要求服务模式会话按优先级、今天、昨天、前天、近四个星期日历日和历史分组；
+// 服务端已统一输出毫秒，
+// 这里兼容旧缓存中的 Unix 秒。阈值 1e11 与服务时间戳转换及
+// codex_service.rs UNIX_SECONDS_LIMIT 同步。
+export function sidebarTimestamp(value) {
+  if (!Number.isFinite(value) || value <= 0) return 0;
+  return value < 100_000_000_000 ? value * 1000 : value;
+}
+export function sidebarUpdatedAt(item) {
+  return sidebarTimestamp(item.updatedAt) || sidebarTimestamp(item.recencyAt) || sidebarTimestamp(item.createdAt);
+}
+export function sidebarRecentDateGroups(items, now = Date.now()) {
+  const today = new Date(now);
+  today.setHours(0, 0, 0, 0);
+  const starts = Array.from({ length: 7 }, (_, offset) => {
+    const date = new Date(today);
+    date.setDate(date.getDate() - offset);
+    return date;
+  });
+  const weekdays = ["日", "一", "二", "三", "四", "五", "六"];
+  const labels = ["今天", "昨天", "前天", ...starts.slice(3).map(date => `星期${weekdays[date.getDay()]}`)];
+  const groups = labels.map((label, index) => ({
+    key: index < 3 ? ["today", "yesterday", "before-yesterday"][index] : `weekday-${index}`,
+    label,
+    items: []
+  }));
+  const history = { key: "history", label: "历史", items: [] };
+  for (const item of Array.isArray(items) ? items : []) {
+    const timestamp = sidebarUpdatedAt(item);
+    const index = starts.findIndex((start, offset) => timestamp >= start.getTime()
+      && (offset === 0 || timestamp < starts[offset - 1].getTime()));
+    (index >= 0 ? groups[index] : history).items.push(item);
+  }
+  // 用户要求最近会话依次显示优先级、今天、昨天、前天、近四个星期日历日和历史；
+  // 空分组由 appendSection 跳过，但固定返回顺序，避免跨周、跨月时改变位置。
+  return [...groups, history];
+}
+export function markSidebarThreadReadLocally(id, value = sidebar) {
+  if (!value || typeof id !== "string" || !id) return;
+  const parents = new Set((value.unreadSideThreads || [])
+    .filter(item => item.id === id).map(item => item.parentThreadId));
+  if (Array.isArray(value.unreadSideThreads))
+    value.unreadSideThreads = value.unreadSideThreads.filter(item => item.id !== id);
+  const update = item => {
+    // 用户要求读完侧边后消除所属主会话的蓝点；同一父会话还有其它未读侧边时继续保留。
+    if (item && parents.has(item.id) && item.sideThreadAttention)
+      item.sideThreadAttention = { ...item.sideThreadAttention,
+        unread: value.unreadSideThreads.some(side => side.parentThreadId === item.id) };
+    if (!item || item.id !== id) return;
+    item.hasUnreadTurn = false;
+    if (item.priority?.attentionState === "unread") {
+      item.priority = { ...item.priority, attentionState: item.priority.active === true ? "active" : "idle" };
+    }
+  };
+  value.recent.forEach(update);
+  value.pinnedThreads.forEach(update);
+  value.projects.forEach(project => project.threads.forEach(update));
+}
+export function sidebarAttentionState(item) {
+  const side = item.sideThreadAttention;
+  const own = item.priority?.attentionState;
+  const status = item.status?.status || item.status;
+  const type = typeof status === "string" ? status : status?.type;
+  if (side?.waiting || own === "waiting" || !own && (type === "waiting" || (status?.activeFlags || []).some(flag =>
+    flag === "waitingOnApproval" || flag === "waitingOnUserInput"))) return "waiting";
+  if (side?.unread || own === "unread" || item.hasUnreadTurn) return "unread";
+  return side?.active || own === "active" || !own && (type === "active" || type === "inProgress") ? "active" : "idle";
+}
+function desktopObservationIds() {
+  const ids = new Set();
+  const add = id => {
+    if (typeof id === "string" && /^[a-z0-9_-]{1,120}$/i.test(id) && !claudeThreadId(id)) ids.add(id);
+  };
+  if (!creating) add(relatedSessionView?.parentThreadId || selectedId);
+  const root = $("#sidebar-content"), bounds = root?.getBoundingClientRect();
+  if (bounds?.width > 0 && bounds.right > 0 && bounds.left < window.innerWidth) {
+    for (const row of root.querySelectorAll(".thread-row")) {
+      const rect = row.getBoundingClientRect();
+      if (rect.height > 0 && rect.bottom > bounds.top && rect.top < bounds.bottom) add(row.dataset.threadId);
+      if (ids.size >= 128) break; // 与 observeThreads 的单批上限保持一致。
+    }
+  }
+  return [...ids].sort();
+}
+export function resetDesktopObservation() {
+  clearTimeout(desktopObservationTimer);
+  desktopObservationTimer = null;
+  const previous = desktopObservationRequest;
+  // 页面或连接代次已变时立即退役旧读取，不等待被取消的网络 promise 才允许重新观察。
+  desktopObservationRequest = null;
+  desktopObservationLast = null;
+  previous?.controller.abort();
+}
+export function scheduleDesktopObservation() {
+  if (pageLeaving || document.hidden || !session?.capabilities?.desktopSessionSync) {
+    resetDesktopObservation();
+    return;
+  }
+  clearTimeout(desktopObservationTimer);
+  // 用户要求服务模式同步桌面会话：只观察当前会话及列表可见项，滚动合并 150ms；
+  // 沿用连接轮询每 15 秒续期，对应后端 45 秒兴趣窗口，不轮询整份消息正文。
+  desktopObservationTimer = setTimeout(() => void syncDesktopObservation(), 150);
+}
+async function syncDesktopObservation() {
+  desktopObservationTimer = null;
+  if (pageLeaving || document.hidden || !session?.capabilities?.desktopSessionSync) return;
+  if (desktopObservationRequest && (desktopObservationRequest.generation !== foregroundReadGeneration
+      || desktopObservationRequest.deviceId !== session.device.id
+      || desktopObservationRequest.revision !== nativeConnectionVersion)) resetDesktopObservation();
+  if (desktopObservationRequest) { desktopObservationRequest.again = true; return; }
+  const ids = desktopObservationIds(), deviceId = session.device.id, revision = nativeConnectionVersion;
+  const signature = JSON.stringify([deviceId, revision, ids]), now = Date.now();
+  // 12 秒内合并重复渲染，确保既有 15 秒轮询仍能在后端 45 秒到期前续上观察。
+  if (desktopObservationLast?.signature === signature && now - desktopObservationLast.at < 12000) return;
+  const request = { controller: new AbortController(), generation: foregroundReadGeneration, deviceId, revision, again: false };
+  desktopObservationRequest = request;
+  try {
+    await api("/api/read/observeThreads", { threadIds: ids }, undefined, request.controller.signal,
+      { resourcePriority: "background" });
+    if (!request.controller.signal.aborted && request.generation === foregroundReadGeneration
+        && session?.device.id === deviceId && nativeConnectionVersion === revision)
+      desktopObservationLast = { signature, at: now };
+  } catch {
+    // 观察失败由后台重连和下一次连接轮询恢复，不阻塞输入或修改已有发送回执。
+  } finally {
+    if (desktopObservationRequest === request) {
+      desktopObservationRequest = null;
+      if (request.again) scheduleDesktopObservation();
+    }
+  }
+}

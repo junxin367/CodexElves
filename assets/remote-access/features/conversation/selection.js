@@ -1,10 +1,14 @@
-// 会话切换：选择会话、新建会话、欢迎页与地址栏同步。
+// 会话切换：选择会话、新建会话、显示欢迎页，判断所选会话是否读取完整；读取版本与地址栏同步等状态在 selection-state.js。
 
 import { clearComposerAttachments } from "../../attachments.js";
-import { $, element } from "../../ui/dom.js";
+import { $ } from "../../ui/dom.js";
 import { notice } from "../../ui/notice.js";
 import { closePopup } from "../../ui/popup.js";
 import { setSelectValue } from "../../ui/select.js";
+import {
+  loadSidebar, reloadThread, renderApprovals, renderMessages, renderSidebar, scheduleMessages,
+  updateComposer
+} from "../../core/actions.js";
 import {
   connected, creating, pageLeaving, selectedId, selectionVersion, session, setCreating,
   setSelectedId, setSelectionToken, setSelectionVersion, setThread, sidebar, thread, turns
@@ -12,90 +16,78 @@ import {
 import { readCache, transcriptCache } from "../../core/stores.js";
 import { randomId } from "../../core/util.js";
 import { api } from "../api.js";
+import { mergeBlockingRequestsRead } from "../approval-requests.js";
 import {
-  blockingRequestState, mergeBlockingRequestsRead, notifiedQuestions, questionVersion,
-  renderApprovals, replaceAsyncQuestions, setNotifiedQuestions
-} from "../approvals.js";
+  blockingRequestState, notifiedQuestions, questionVersion, replaceAsyncQuestions,
+  setNotifiedQuestions
+} from "../approval-state.js";
 import { renderModelMenu } from "../composer/composer-menus.js";
-import { updateComposer } from "../composer/composer.js";
-import {
-  draftKey, rememberDraft, resetComposerOptions, restoreDraft, restoreQueuedMessageEdit
-} from "../composer/drafts.js";
-import { fastModeVersion, reconcileRemoteFastPreference } from "../composer/models.js";
 import {
   assignCreationBackend, creationInstanceId, setCreationInstanceId, setCreationProject
-} from "../composer/new-chat.js";
-import { renderSelectedSkills, setSelectedSkills } from "../composer/skills.js";
+} from "../composer/creation-state.js";
+import { restoreDraft, restoreQueuedMessageEdit } from "../composer/draft-restore.js";
+import { draftKey, rememberDraft } from "../composer/drafts.js";
+import { reconcileRemoteFastPreference } from "../composer/model-catalog.js";
+import { resetComposerOptions } from "../composer/new-chat.js";
+import { fastModeVersion } from "../composer/options-state.js";
+import { renderSelectedSkills } from "../composer/selected-skills.js";
+import { setSelectedSkills } from "../composer/skill-catalog.js";
 import { compactionVersion, currentCompaction, normalizeCompaction, reconcileCompaction } from "./compaction.js";
 import {
   notifiedStatus, notifiedTokenUsage, setNotifiedTokenUsage, statusVersion, tokenUsageVersion
-} from "./events.js";
+} from "./event-sync.js";
 import {
-  historyPlaceholder, rememberTranscript, renderMessages, resetMessages, restoreTranscript,
-  scheduleMessages, setRecentHistoryPage
-} from "./history-view.js";
+  historyError, historyInitialized, historyLoading, historyRequest, latestHistoryReadFailed,
+  messageVersion, setHistoryCursor, setHistoryInitialized, setRecentHistoryPage,
+  setTranscriptChecking, threadRequest, transcriptChecking
+} from "./history-state.js";
+import { restoreTranscript } from "./history-view.js";
+import { historyPlaceholder, loadHistory, retireMissingEphemeralTranscript } from "./history.js";
 import {
-  historyInitialized, historyLoading, historyRequest, loadHistory, messageVersion, reloadThread,
-  setHistoryCursor, setHistoryInitialized, setTranscriptChecking, threadRequest
-} from "./history.js";
+  relatedReturnTranscript, relatedSelectionVersion, selectedThreadProjectId, selectionController,
+  setRelatedReturnTranscript, setRelatedSelectionVersion, setSelectionController,
+  setSuppressAutomaticNewChat, setThreadReadFailed, setThreadReadVersion, syncNewChatHash,
+  syncThreadHash, threadReadFailed, threadReadVersion, welcomeNode
+} from "./selection-state.js";
 import { refreshTranscriptEvents, replaceTranscriptEvents, transcriptEvents } from "./transcript-events.js";
-import { setSelectedGoal } from "../goal/composer.js";
-import { goalVersion, notifiedGoal, setNotifiedGoal, stopGoalLiveTimer } from "../goal/status.js";
+import { rememberTranscript, resetMessages } from "./transcript.js";
+import { goalVersion, notifiedGoal, setNotifiedGoal, setSelectedGoal, stopGoalLiveTimer } from "../goal/state.js";
 import { cancelMessageEdit } from "../messages/message-edit.js";
 import { markVisibleThreadRead } from "../messages/user-content.js";
-import {
-  applyQueueRead, notifiedQueue, notifiedQueueEdits, queueSnapshotVersion, queueVersion,
-  setPendingSteer
-} from "../queue/queue.js";
-import { setEditingQueuedMessage, syncEditableMessageMetadata } from "../queue/queued-edit.js";
+import { applyQueueRead } from "../queue/queue.js";
 import { settleSentMessageDisplays } from "../queue/sent-display.js";
 import {
-  backendAvailable, isActiveThread, isClaude, newChatBackendOptions, normalizeRelatedView,
-  privateInputScope, sideThreadsEnabled, subagentsEnabled, threadLocation, validRelatedThreadId
+  notifiedQueue, notifiedQueueEdits, queueSnapshotVersion, queueVersion, setEditingQueuedMessage,
+  setPendingSteer, syncEditableMessageMetadata
+} from "../queue/state.js";
+import {
+  backendAvailable, isActiveThread, normalizeRelatedView, privateInputScope, sideThreadsEnabled,
+  subagentsEnabled, validRelatedThreadId
 } from "../session/capabilities.js";
+import { recoveryErrorSilenceDepth, stream } from "../session/connection-state.js";
 import { setConnection } from "../session/connection.js";
-import { recoveryErrorSilenceDepth, selectedThreadReadIncomplete, stream } from "../session/lifecycle.js";
+import { newChatBackendOptions, threadLocation } from "../session/instances.js";
+import {
+  relatedMenuTimer, relatedNavigationOwner, relatedSessionView, setRelatedBackPending,
+  setRelatedMenuTimer, setRelatedSessionView, sideCreationHistoryKey, sideCreationView
+} from "../session/related-state.js";
 import {
   animateRelatedSessionExit, applyRelatedThreadMetadata, clearMissingThreadSelection,
-  conversationHistoryKey, conversationHistoryPosition, dismissSideCreation,
-  finishRelatedSessionExit, isMissingThreadError, prepareRelatedSessionExit, relatedExitTransition,
-  relatedHistoryKey, relatedMenuTimer, relatedNavigationOwner, relatedSessionView,
-  relatedViewForThread, setRelatedBackPending, setRelatedMenuTimer, setRelatedSessionView,
-  sideCreationHistoryKey, sideCreationView, syncRelatedSessionLayout
+  dismissSideCreation, finishRelatedSessionExit, isMissingThreadError, prepareRelatedSessionExit,
+  relatedViewForThread, sideThreadExpired, syncRelatedSessionLayout
 } from "../session/related.js";
 import {
   currentThreadDisplay, discardPersistentThreadDisplay, optionalCachedRead,
-  persistentThreadDisplayAllowed, readScope, rememberReadingPosition, rememberThreadDisplay,
-  retireMissingEphemeralTranscript, threadEphemeralState
+  persistentThreadDisplayAllowed, readScope, rememberReadingPosition, threadEphemeralState
 } from "../session/thread-cache.js";
-import { closeMobileSidebar, sessionMenu, sessionTools } from "../shell.js";
-import { applyThreadDeletion, threadDeleted } from "../sidebar/actions.js";
-import { loadSidebar, renderSidebar } from "../sidebar/list.js";
+import { rememberThreadDisplay } from "../session/thread-display.js";
+import { closeMobileSidebar, sessionMenu, sessionTools } from "../shell-state.js";
+import { threadDeleted } from "../sidebar/deletion-state.js";
+import { applyThreadDeletion } from "../sidebar/thread-deletion.js";
 
-export let selectionController = null;
-export function setSelectionController(value) { return selectionController = value; }
-export let threadReadFailed = false;
-export function setThreadReadFailed(value) { return threadReadFailed = value; }
-export let suppressAutomaticNewChat = false;
-export function setSuppressAutomaticNewChat(value) { return suppressAutomaticNewChat = value; }
-export let threadReadVersion = 0;
-export function setThreadReadVersion(value) { return threadReadVersion = value; }
-export let relatedReturnTranscript = null;
-export function setRelatedReturnTranscript(value) { return relatedReturnTranscript = value; }
-export let relatedSelectionVersion = 0;
-export function setRelatedSelectionVersion(value) { return relatedSelectionVersion = value; }
-function selectedThreadProjectId() {
-  if (!selectedId || !sidebar) return "";
-  const projects = sidebar.projects || [];
-  const summary = [...(sidebar.recent || []), ...(sidebar.pinnedThreads || [])]
-    .find(item => item.id === selectedId);
-  const projectId = summary?.projectId !== undefined ? summary.projectId
-    : projects.find(project => project.threads?.some(item => item.id === selectedId))?.id;
-  return projects.some(project => project.id === projectId) ? projectId : "";
-}
 export async function startNewChat(projectId, { focus = true, closeSidebar = true } = {}) {
   if (relatedSessionView) return;
-  suppressAutomaticNewChat = false;
+  setSuppressAutomaticNewChat(false);
   cancelMessageEdit({ focus: false });
   if (!session || session.readOnly) return;
   if (closeSidebar) closeMobileSidebar({ focus: false });
@@ -112,9 +104,9 @@ export async function startNewChat(projectId, { focus = true, closeSidebar = tru
   setEditingQueuedMessage(null);
   setSelectValue($("#project-select"), project);
   setSelectionVersion(selectionVersion + 1); setCreating(true); setSelectedId(null); setThread(null); setHistoryCursor(null); setHistoryInitialized(false); turns.clear(); transcriptEvents.clear(); renderMessages();
-  setRelatedSessionView(null); relatedReturnTranscript = null; sessionMenu?.close(); syncRelatedSessionLayout();
+  setRelatedSessionView(null); setRelatedReturnTranscript(null); sessionMenu?.close(); syncRelatedSessionLayout();
   setSelectionToken(randomId());
-  setCreationProject($("#project-select").value); setNotifiedTokenUsage(null); ++threadReadVersion;
+  setCreationProject($("#project-select").value); setNotifiedTokenUsage(null); setThreadReadVersion(threadReadVersion + 1);
   const instance = newChatBackendOptions().find(value => value.value === creationInstanceId) || newChatBackendOptions()[0];
   setCreationInstanceId(instance?.value || "codex:local"); assignCreationBackend(instance?.backend || "codex");
   if ($("#new-chat-backend")) setSelectValue($("#new-chat-backend"), creationInstanceId);
@@ -131,8 +123,8 @@ export async function startNewChat(projectId, { focus = true, closeSidebar = tru
 export async function selectThread(id, { closeSidebar = true, force = false, relatedView = undefined, replaceHistory = false,
   initialThread = null, preparedView = false, onViewReady = null } = {}) {
   if (!validRelatedThreadId(id) || !session) return;
-  suppressAutomaticNewChat = false;
-  const navigationVersion = ++relatedSelectionVersion;
+  setSuppressAutomaticNewChat(false);
+  const navigationVersion = setRelatedSelectionVersion(relatedSelectionVersion + 1);
   const nextRelatedView = relatedView === undefined ? relatedViewForThread(id) : normalizeRelatedView(relatedView, id);
   if (nextRelatedView
       && (nextRelatedView.kind === "side" ? !sideThreadsEnabled() : !subagentsEnabled())) {
@@ -184,7 +176,7 @@ export async function selectThread(id, { closeSidebar = true, force = false, rel
       && selectedId === (nextRelatedView.openedFromThreadId || nextRelatedView.parentThreadId) });
   if (relatedReturnTranscript && id !== relatedReturnTranscript.threadId
       && (nextRelatedView?.openedFromThreadId || nextRelatedView?.parentThreadId) !== relatedReturnTranscript.threadId)
-    relatedReturnTranscript = null;
+    setRelatedReturnTranscript(null);
   setRelatedBackPending(!!exitTransition);
   if (!returningToParent && nextRelatedView?.kind !== "side") sessionMenu?.close();
   clearTimeout(relatedMenuTimer); setRelatedMenuTimer(null);
@@ -204,7 +196,7 @@ export async function selectThread(id, { closeSidebar = true, force = false, rel
   restoreDraft(id); resetComposerOptions(); restoreQueuedMessageEdit();
   setNotifiedTokenUsage(null); setNotifiedGoal(null);
   setNotifiedQuestions(null);
-  const read = ++threadReadVersion, usageVersion = tokenUsageVersion, fastReadVersion = fastModeVersion,
+  const read = setThreadReadVersion(threadReadVersion + 1), usageVersion = tokenUsageVersion, fastReadVersion = fastModeVersion,
     runtimeVersion = statusVersion, transcriptReadVersion = messageVersion,
     questionReadVersion = questionVersion,
     requestsReadVersion = blockingRequestState(id).generation,
@@ -271,13 +263,13 @@ export async function selectThread(id, { closeSidebar = true, force = false, rel
   if (pageLeaving || document.hidden) return;
   const latest = loadHistory(false, version);
   const controller = new AbortController();
-  selectionController = controller;
+  setSelectionController(controller);
   try {
     const result = await api("/api/read/thread", { threadId: id }, undefined, controller.signal);
     if (version !== selectionVersion || read !== threadReadVersion || selectedId !== id || threadDeleted(id)) return;
     setThread(reconcileRemoteFastPreference(result.thread, fastReadVersion));
     if (thread?.id !== id) throw new Error("会话返回内容与当前会话不一致");
-    threadReadFailed = false;
+    setThreadReadFailed(false);
     applyRelatedThreadMetadata(thread);
     mergeBlockingRequestsRead(id, thread, requestsReadVersion);
     if (questionReadVersion !== questionVersion && notifiedQuestions)
@@ -308,60 +300,25 @@ export async function selectThread(id, { closeSidebar = true, force = false, rel
       return;
     }
     if (!controller.signal.aborted && version === selectionVersion && selectedId === id) {
-      threadReadFailed = true;
+      setThreadReadFailed(true);
       if (error.code === 404) retireMissingEphemeralTranscript(id, error);
       if (!recoveryErrorSilenceDepth && (error.code === 404 || !currentThreadDisplay()))
         notice(`会话设置读取失败，可点击刷新重试：${error.message}`, true);
     }
   } finally {
-    if (selectionController === controller) selectionController = null;
+    if (selectionController === controller) setSelectionController(null);
   }
   await latest;
   if (version === selectionVersion && !isActiveThread())
     void markVisibleThreadRead(id).catch(error => notice(error.message, true));
 }
-export function syncThreadHash(id, { replace = false } = {}) {
-  if (relatedExitTransition && id === selectedId) return;
-  const hash = new URLSearchParams(location.hash.slice(1));
-  const previousId = hash.get("thread");
-  hash.set("thread", id);
-  const state = { ...(history.state || {}) };
-  state[conversationHistoryKey] = conversationHistoryPosition(state) + (previousId !== id && !replace ? 1 : 0);
-  if (relatedSessionView?.threadId === id) state[relatedHistoryKey] = normalizeRelatedView(relatedSessionView, id);
-  else delete state[relatedHistoryKey];
-  // 只在新会话条目中清除旧工具路由，保留此前变更页的历史条目。
-  if (previousId !== id) delete state.codexElvesTools;
-  const url = `${location.pathname}${location.search}#${hash}`;
-  if (!replace && previousId !== id) history.pushState(state, "", url);
-  else history.replaceState(state, "", url);
-}
-function syncNewChatHash() {
-  const hash = new URLSearchParams(location.hash.slice(1));
-  if (!hash.has("thread")) return;
-  hash.delete("thread");
-  const state = { ...(history.state || {}) };
-  state[conversationHistoryKey] = conversationHistoryPosition(state) + 1;
-  delete state[relatedHistoryKey]; delete state.codexElvesTools;
-  // 新建会话是独立历史条目，工具页返回时不能再命中上一条会话。
-  history.pushState(state, "", `${location.pathname}${location.search}${hash.size ? `#${hash}` : ""}`);
-}
-export function welcomeNode() {
-  const node = element("div", "welcome");
-  // 用户要求说明所选 Claude 实例的职责，不引用默认 WSL 名称，避免与当前选择的实例不一致。
-  node.append(element("h1", "", isClaude() ? "开始 Claude 会话" : "继续本机的工作"),
-    element("p", "", isClaude() ? "选择项目，输入消息开始工作。" : "选择左侧会话，发送会话。"),
-    element("small", "", isClaude()
-      ? "消息、工具和上下文由所选 Claude 实例处理。"
-      : "消息、审批和执行状态与 Codex 桌面共享。"));
-  return node;
-}
 export function showWelcome({ startNew = true, clearHash = false } = {}) {
-  ++relatedSelectionVersion;
+  setRelatedSelectionVersion(relatedSelectionVersion + 1);
   finishRelatedSessionExit();
-  setRelatedSessionView(null); relatedReturnTranscript = null; sessionMenu?.close(); syncRelatedSessionLayout();
+  setRelatedSessionView(null); setRelatedReturnTranscript(null); sessionMenu?.close(); syncRelatedSessionLayout();
   setPendingSteer(null);
   if (session && !session.readOnly && startNew) {
-    suppressAutomaticNewChat = false;
+    setSuppressAutomaticNewChat(false);
     void startNewChat("", { focus: false, closeSidebar: false });
     return;
   }
@@ -369,7 +326,7 @@ export function showWelcome({ startNew = true, clearHash = false } = {}) {
   if (!clearHash) { rememberDraft(); rememberTranscript({ retainView: true }); }
   resetMessages();
   setEditingQueuedMessage(null);
-  setSelectionVersion(selectionVersion + 1); ++threadReadVersion; setSelectionToken(randomId());
+  setSelectionVersion(selectionVersion + 1); setThreadReadVersion(threadReadVersion + 1); setSelectionToken(randomId());
   setSelectedId(null); setThread(null); setCreating(false); setHistoryCursor(null); setHistoryInitialized(false); turns.clear(); transcriptEvents.clear(); setNotifiedTokenUsage(null);
   if (clearHash) {
     const hash = new URLSearchParams(location.hash.slice(1));
@@ -385,4 +342,10 @@ export function showWelcome({ startNew = true, clearHash = false } = {}) {
   $("#messages").replaceChildren(welcomeNode());
   renderSelectedSkills(); renderApprovals(); renderSidebar(); updateComposer();
   rememberReadingPosition();
+}
+
+export function selectedThreadReadIncomplete() {
+  return !!selectedId && !creating && !threadDeleted(selectedId) && !sideThreadExpired(selectedId)
+    && (thread?.id !== selectedId || threadReadFailed || latestHistoryReadFailed
+      || !historyInitialized || transcriptChecking || !!historyError);
 }

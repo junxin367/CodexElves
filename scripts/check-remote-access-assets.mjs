@@ -78,6 +78,42 @@ for (const file of jsFiles.sort()) {
   }
 }
 
+// 静态 import 不得成环（2026-11-15 用户要求完整分层重构、消除循环依赖）：环会让模块求值顺序依赖入口导入次序，
+// 加载期读取未初始化的绑定即报错。下层需要调用上层时经 core/actions.js 的注册动作反转依赖，
+// 见 docs/remote-access-web-architecture.md；动态 import 的可选模块不参与求值顺序，不计入。
+{
+  const graph = new Map([...sources].map(([file, text]) => [file, [...localImports(text, { dynamic: false })]
+    .map(specifier => posix.normalize(posix.join(posix.dirname(file), specifier))).filter(target => sources.has(target))]));
+  let index = 0;
+  const order = new Map(), low = new Map(), stack = [], onStack = new Set();
+  const visit = file => {
+    order.set(file, index); low.set(file, index); index++; stack.push(file); onStack.add(file);
+    for (const target of graph.get(file)) {
+      if (!order.has(target)) { visit(target); low.set(file, Math.min(low.get(file), low.get(target))); }
+      else if (onStack.has(target)) low.set(file, Math.min(low.get(file), order.get(target)));
+    }
+    if (low.get(file) !== order.get(file)) return;
+    const component = [];
+    let member;
+    do { member = stack.pop(); onStack.delete(member); component.push(member); } while (member !== file);
+    if (component.length === 1 && !graph.get(file).includes(file)) return;
+    // 给出分量内一条最短的具体环，便于定位应反转或下沉的依赖
+    const inside = new Set(component), start = component.sort()[0], previous = new Map([[start, null]]), queue = [start];
+    let cycle = null;
+    while (queue.length && !cycle) {
+      const current = queue.shift();
+      for (const target of graph.get(current)) {
+        if (!inside.has(target)) continue;
+        if (target === start) { cycle = [current]; break; }
+        if (!previous.has(target)) { previous.set(target, current); queue.push(target); }
+      }
+    }
+    for (let node = cycle && previous.get(cycle[0]); node; node = previous.get(node)) cycle.unshift(node);
+    errors.push(`静态 import 存在循环依赖（${component.length} 个模块）：${[...(cycle || component), start].join(" → ")}`);
+  };
+  for (const file of [...graph.keys()].sort()) if (!order.has(file)) visit(file);
+}
+
 // 具名导入须在目标模块中存在：用 V8 只链接、不执行全部模块，缺失或冲突的导出会在链接阶段报错。
 // 浏览器遇到这类错误会整页无法加载，而截取源码的 vm 测试无法发现，因此作为静态门禁。
 const linkCheck = spawnSync(process.execPath, ["--experimental-vm-modules", "--no-warnings", "--input-type=module", "-e", `
@@ -154,5 +190,5 @@ if (errors.length) {
   console.error(errors.join("\n\n"));
   process.exitCode = 1;
 } else {
-  console.log(`远程资源检查通过：${resources.length} 个网页资源，${jsFiles.length} 个 JS 文件语法、import 与导出链接、分层与预加载均有效。`);
+  console.log(`远程资源检查通过：${resources.length} 个网页资源，${jsFiles.length} 个 JS 文件语法、import 与导出链接、分层、无循环依赖与预加载均有效。`);
 }

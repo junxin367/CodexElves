@@ -1,4 +1,4 @@
-// 登录与连接恢复页：访问密钥登录、授权失效处理与初始连接失败的恢复说明。
+// 登录与连接恢复页：访问密钥登录、授权失效处理与初始连接失败的恢复说明；登录状态与登录客户端标识在 connection-state.js。
 
 import { clearRemoteChannels } from "../../channels.js";
 import { isAndroidContainer, postPlatformMessage } from "../../platform.js";
@@ -13,67 +13,46 @@ import {
 import { randomId } from "../../core/util.js";
 import { api } from "../api.js";
 import { openAppearance } from "../appearance/dialog.js";
-import { setApprovalSignature } from "../approvals.js";
-import { attachmentDrafts, clearPrivateInputs, drafts, goalDrafts, skillDrafts } from "../composer/drafts.js";
+import { setApprovalSignature } from "../approval-state.js";
+import { resetNewChatBranch, setCreationProject } from "../composer/creation-state.js";
+import { clearPrivateInputs } from "../composer/draft-restore.js";
+import { attachmentDrafts, drafts, goalDrafts, skillDrafts } from "../composer/drafts.js";
 import { closeContextUsageTip } from "../composer/metrics.js";
 import {
   setModelDefaults, setModels, setModelsLoadedAt, setModelsPromise, setSelectedEffort,
   setSelectedModel
-} from "../composer/models.js";
-import { resetNewChatBranch, setCreationProject } from "../composer/new-chat.js";
+} from "../composer/options-state.js";
 import {
-  setMessageSkillLoadScope, setSelectedSkills, setSkillChoices, setSkillLoading,
-  setSkillLoadVersion, setSkillRenderVersion, setSkillScope, skillLoadVersion, skillRenderVersion
-} from "../composer/skills.js";
-import { setNotifiedTokenUsage } from "../conversation/events.js";
-import { setHistoryCursor, setHistoryInitialized } from "../conversation/history.js";
-import { savePending } from "../conversation/pending.js";
-import { setSuppressAutomaticNewChat, setThreadReadVersion, threadReadVersion } from "../conversation/selection.js";
+  setMessageSkillLoadScope, setSelectedSkills, setSkillChoices, setSkillLoadVersion,
+  setSkillLoading, setSkillRenderVersion, setSkillScope, skillLoadVersion, skillRenderVersion
+} from "../composer/skill-catalog.js";
+import { setNotifiedTokenUsage } from "../conversation/event-sync.js";
+import { setHistoryCursor, setHistoryInitialized } from "../conversation/history-state.js";
+import { savePending } from "../conversation/pending-store.js";
+import {
+  setSuppressAutomaticNewChat, setThreadReadVersion, threadReadVersion
+} from "../conversation/selection-state.js";
 import { transcriptEvents } from "../conversation/transcript-events.js";
-import { setSelectedGoal } from "../goal/composer.js";
-import { stopGoalLiveTimer } from "../goal/status.js";
+import { setSelectedGoal, stopGoalLiveTimer } from "../goal/state.js";
 import { setEditingMessage } from "../messages/message-edit.js";
 import { setPendingNotificationOpen } from "../notifications.js";
-import { setEditingQueuedMessage } from "../queue/queued-edit.js";
+import { setEditingQueuedMessage } from "../queue/state.js";
+import {
+  connectionErrorMessage, initialAuthenticationRequired, loginPageCleanup, remoteLoginClientId,
+  setAuthenticationRequired, setLoginPageCleanup
+} from "./connection-state.js";
 import { connect, disconnect } from "./lifecycle.js";
 import { resetRelatedSessions } from "./related.js";
 import {
   announceAppReady, composerScroll, sessionTools, setCloseMobileSidebar, setComposerScroll,
   setSessionTools, setSidebarLayoutCleanup, sidebarLayoutCleanup
-} from "../shell.js";
+} from "../shell-state.js";
 import { setSidebarBusy, setSidebarPreferenceScope } from "../sidebar/actions.js";
 import {
   collapsedSidebarSections, projectVisibleThreadCounts, recentPrioritySelectionSuppressions,
   setRecentPriorityIds, sidebarReadRefreshSuppressions
-} from "../sidebar/list.js";
+} from "../sidebar/list-state.js";
 
-export let initialAuthenticationRequired = false;
-// 从会话存储恢复“需要重新登录”标记。
-export function restoreAuthenticationRequirement() {
-  try { initialAuthenticationRequired = sessionStorage.getItem("codex-elves-auth-required") === "1"; } catch {}
-}
-export function setAuthenticationRequired(required) {
-  initialAuthenticationRequired = required;
-  try {
-    if (required) sessionStorage.setItem("codex-elves-auth-required", "1");
-    else sessionStorage.removeItem("codex-elves-auth-required");
-  } catch {}
-}
-let loginClientId = "";
-function remoteLoginClientId() {
-  // 用户要求同一 App/浏览器重复登录不累积设备；随机标识只做去重，不能替代访问密钥，也不采集硬件指纹。
-  if (loginClientId) return loginClientId;
-  try { loginClientId = localStorage.getItem("codex-elves-login-client-id") || ""; } catch {}
-  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(loginClientId)) {
-    const bytes = crypto.getRandomValues(new Uint8Array(16));
-    bytes[6] = bytes[6] & 15 | 64; bytes[8] = bytes[8] & 63 | 128;
-    const hex = [...bytes].map(value => value.toString(16).padStart(2, "0")).join("");
-    loginClientId = `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
-  }
-  try { localStorage.setItem("codex-elves-login-client-id", loginClientId); } catch {}
-  return loginClientId;
-}
-export let loginPageCleanup = null;
 export function showLogin() {
   loginPageCleanup?.();
   resetNewChatBranch();
@@ -227,14 +206,14 @@ export function showLogin() {
     pageHidden = false;
     if ((!loginStatusChecked || loginLocked) && !document.hidden) void readLoginStatus();
   }
-  loginPageCleanup = () => {
+  setLoginPageCleanup(() => {
     disposed = true;
     stopLoginStatusRead();
     document.removeEventListener("visibilitychange", handleLoginVisibility);
     window.removeEventListener("pagehide", handleLoginPageHide);
     window.removeEventListener("pageshow", handleLoginPageShow);
-    loginPageCleanup = null;
-  };
+    setLoginPageCleanup(null);
+  });
   document.addEventListener("visibilitychange", handleLoginVisibility);
   window.addEventListener("pagehide", handleLoginPageHide);
   window.addEventListener("pageshow", handleLoginPageShow);
@@ -337,11 +316,6 @@ export function requireAuthentication() {
   postPlatformMessage("auth-required");
   showLogin();
 }
-export function connectionErrorMessage(error) {
-  return error instanceof TypeError
-    ? "无法连接服务，请检查网络和远程访问地址后重试。"
-    : error?.message || "连接失败，请检查网络后重试。";
-}
 export function showConnectionRecovery(error) {
   showLogin();
   loginPageCleanup?.();
@@ -361,10 +335,10 @@ export function showConnectionRecovery(error) {
   const status = element("p", "pair-status muted", "设备授权仍保留，恢复连接后会继续打开会话。");
   const controller = new AbortController();
   let exiting = false;
-  loginPageCleanup = () => {
+  setLoginPageCleanup(() => {
     controller.abort();
-    loginPageCleanup = null;
-  };
+    setLoginPageCleanup(null);
+  });
   retry.onclick = async () => {
     if (exiting || !panel.isConnected) return;
     retry.disabled = true;

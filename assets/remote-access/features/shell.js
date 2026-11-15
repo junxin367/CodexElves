@@ -1,4 +1,4 @@
-// 主界面骨架：生成工作区布局、绑定侧栏/输入区/会话菜单等控件并挂载会话工具。
+// 主界面骨架：生成工作区布局、绑定侧栏/输入区/会话菜单等控件并挂载会话工具；创建的共享引用写入 shell-state.js 供其他模块读取。
 
 import { handleComposerImagePaste, mountComposerAttachments, openVideoPreview } from "../attachments.js";
 import { prepareRemoteTunnelAccess, remoteChannelRoutes, requestRemote } from "../channels.js";
@@ -15,94 +15,89 @@ import { notice } from "../ui/notice.js";
 import { activePopup, closePopup, openPopup, togglePopup } from "../ui/popup.js";
 import { selectControl, setSelectValue } from "../ui/select.js";
 import { composerTooltips, installComposerTooltips, setComposerTooltips } from "../ui/tooltip.js";
+import {
+  closeComposerMenus, loadModels, renderSidebar, requireAuthentication, updateComposer
+} from "../core/actions.js";
 import { app, connected, creating, nativeConnectionVersion, selectedId, session, sidebar } from "../core/state.js";
 import { api } from "./api.js";
 import { openAppearance } from "./appearance/dialog.js";
-import { setApprovalSignature } from "./approvals.js";
+import { setApprovalSignature } from "./approval-state.js";
 import { fitClaudeUsageTip, mountClaudeUsage, resetClaudeUsage } from "./composer/claude-usage.js";
-import {
-  closeComposerMenus, closeSkillMenu, fitApprovalArea, fitComposerMenu, renderModelMenu,
-  setModelQuery
-} from "./composer/composer-menus.js";
-import { sendMessage, stopGeneration, updateComposer } from "./composer/composer.js";
-import { clearPrivateInputs, rememberDraft } from "./composer/drafts.js";
+import { closeSkillMenu, fitApprovalArea, fitComposerMenu, renderModelMenu } from "./composer/composer-menus.js";
+import { mountComposerScroll, sendMessage, stopGeneration } from "./composer/composer.js";
+import { creationInstanceId, creationProject } from "./composer/creation-state.js";
+import { clearPrivateInputs } from "./composer/draft-restore.js";
+import { rememberDraft } from "./composer/drafts.js";
 import {
   closeContextUsageTip, fitContextUsageTip, mountContextUsage, resetComposerMetrics
 } from "./composer/metrics.js";
-import { loadModels, modelContextKey, modelsLoadedAt, toggleRemoteFast } from "./composer/models.js";
-import {
-  changeCreationBackend, changeCreationProject, creationInstanceId, creationProject
-} from "./composer/new-chat.js";
+import { modelContextKey } from "./composer/model-catalog.js";
+import { toggleRemoteFast } from "./composer/models.js";
+import { changeCreationBackend, changeCreationProject } from "./composer/new-chat.js";
+import { modelsLoadedAt, setModelQuery } from "./composer/options-state.js";
 import { changeComposerPermissions, loadInstancePermissionCatalog } from "./composer/permissions.js";
-import { configurePromptEditor, mountComposerScroll, resizeEditorInput } from "./composer/prompt-editor.js";
+import { configurePromptEditor } from "./composer/prompt-edit-history.js";
+import { resizeEditorInput } from "./composer/prompt-editor.js";
 import { activatePromptOptimization, openPromptOptimizationSettings } from "./composer/prompt-optimization.js";
+import { removeAdjacentPromptToken, selectSkill } from "./composer/selected-skills.js";
+import { moveSlashIndex, skillIndex } from "./composer/skill-catalog.js";
 import {
-  handlePromptInput, moveSlashIndex, removeAdjacentPromptToken, renderSkillMenu,
-  selectCompactCommand, selectSkill, skillIndex, slashMenuEntries, updateSkillMenu
+  handlePromptInput, renderSkillMenu, selectCompactCommand, slashMenuEntries, updateSkillMenu
 } from "./composer/skills.js";
 import {
-  followMessages, historyScrollTop, scheduleHistoryLoad, setFollowMessages, setHistoryScrollTop,
-  updateScrollControl
-} from "./conversation/history-view.js";
-import { savePending } from "./conversation/pending.js";
-import { startNewChat, welcomeNode } from "./conversation/selection.js";
+  followMessages, historyScrollTop, setFollowMessages, setHistoryScrollTop, updateScrollControl
+} from "./conversation/history-state.js";
+import { scheduleHistoryLoad } from "./conversation/history.js";
+import { savePending } from "./conversation/pending-store.js";
+import { welcomeNode } from "./conversation/selection-state.js";
+import { startNewChat } from "./conversation/selection.js";
 import { selectGoalCommand } from "./goal/composer.js";
-import { openImagePreview } from "./messages/media.js";
+import { openImagePreview } from "./messages/media-state.js";
 import { editingMessage } from "./messages/message-edit.js";
 import { createSubagentIcon, subagentName } from "./messages/subagents.js";
 import { markVisibleThreadRead } from "./messages/user-content.js";
 import { setPendingNotificationOpen } from "./notifications.js";
 import {
-  isActiveThread, isClaude, newChatBackendOptions, privateInputScope, sideThreadsEnabled,
-  subagentsEnabled, threadReadOnly
+  isActiveThread, isClaude, privateInputScope, sideThreadsEnabled, subagentsEnabled, threadReadOnly
 } from "./session/capabilities.js";
 import {
-  connectionRttDescription, currentChannelMeasurements, markMessageChannelUnavailable
-} from "./session/connection.js";
-import { activeInstanceId } from "./session/instances.js";
+  connectionRttDescription, currentChannelMeasurements, loginPageCleanup,
+  markMessageChannelUnavailable, setAuthenticationRequired
+} from "./session/connection-state.js";
+import { activeInstanceId, newChatBackendOptions } from "./session/instances.js";
 import { disconnect, refreshConnectionFromIndicator } from "./session/lifecycle.js";
-import { loginPageCleanup, requireAuthentication, setAuthenticationRequired, showLogin } from "./session/login.js";
+import { showLogin } from "./session/login.js";
+import { relatedSessionView, relatedThreadOperations, stopRelatedSessionTimers } from "./session/related-state.js";
 import {
   adoptRelatedMenu, createDesktopSideThread, loadRelatedThreads, openRelatedThread,
-  ownsRelatedOperation, relatedSessionView, relatedThreadOperations, rememberTransientHistory,
-  restoreRelatedOperations, returnToParentSession, runRelatedOperation, stopRelatedSessionTimers,
-  syncRelatedSessionLayout
+  ownsRelatedOperation, rememberTransientHistory, restoreRelatedOperations, returnToParentSession,
+  runRelatedOperation, syncRelatedSessionLayout
 } from "./session/related.js";
 import { workspaceSidePanel } from "./session/side-panel.js";
 import { relatedMenuCache, scheduleReadingPosition, workspaceViewCache } from "./session/thread-cache.js";
+import {
+  announceAppReady, closeMobileSidebar, composerScroll, desktopSidebarOpen, messagesResizeObserver,
+  sessionMenu, sessionTools, setCloseMobileSidebar, setComposerScroll, setDesktopSidebarOpen,
+  setMessagesResizeObserver, setSessionMenu, setSessionTools, setSidebarLayoutCleanup,
+  setSyncRelatedSidebarLayout, sidebarLayoutCleanup, syncRelatedSidebarLayout
+} from "./shell-state.js";
 import { changeSidebar, openWorkspaceFileContextMenu, sidebarFilters } from "./sidebar/actions.js";
 import { renderSessionFilter } from "./sidebar/filters.js";
-import { renderSidebar, setSearch } from "./sidebar/list.js";
+import { setSearch } from "./sidebar/list-state.js";
 
-let appReadySent = false;
-export function announceAppReady() {
-  if (appReadySent) return;
-  appReadySent = true;
-  window.dispatchEvent(new Event("codex-elves-app-ready"));
-}
-let messagesResizeObserver = null;
-export let composerScroll = null;
-export function setComposerScroll(value) { return composerScroll = value; }
-export let desktopSidebarOpen = true, sidebarLayoutCleanup = null, closeMobileSidebar = () => {};
-export function setSidebarLayoutCleanup(value) { return sidebarLayoutCleanup = value; }
-export function setCloseMobileSidebar(value) { return closeMobileSidebar = value; }
-export let sessionTools = null;
-export function setSessionTools(value) { return sessionTools = value; }
-export let sessionMenu = null, syncRelatedSidebarLayout = null;
-export function setSessionMenu(value) { return sessionMenu = value; }
 export function shell() {
   loginPageCleanup?.();
   closePopup();
-  sessionMenu?.dispose(); sessionMenu = null;
+  sessionMenu?.dispose(); setSessionMenu(null);
   stopRelatedSessionTimers();
-  sessionTools?.dispose(); sessionTools = null;
+  sessionTools?.dispose(); setSessionTools(null);
   closeContextUsageTip();
   resetClaudeUsage();
   resetComposerMetrics();
   setApprovalSignature(null);
   setSearch("");
-  composerScroll?.dispose(); composerScroll = null;
-  sidebarLayoutCleanup?.(); sidebarLayoutCleanup = null; closeMobileSidebar = () => {};
+  composerScroll?.dispose(); setComposerScroll(null);
+  sidebarLayoutCleanup?.(); setSidebarLayoutCleanup(null); setCloseMobileSidebar(() => {});
   app.innerHTML = `<div class="workspace">
     <div class="sidebar-backdrop"></div>
     <aside id="session-sidebar" class="sidebar" aria-label="会话侧边栏">
@@ -148,7 +143,7 @@ export function shell() {
     notice,
     onPreview: openImagePreview
   });
-  composerScroll = mountComposerScroll();
+  setComposerScroll(mountComposerScroll());
   announceAppReady();
   const add = $("#composer-add");
   add.append(icon("plus"));
@@ -208,7 +203,7 @@ export function shell() {
       void markVisibleThreadRead().catch(error => notice(error.message, true));
   };
   messagesResizeObserver?.disconnect();
-  messagesResizeObserver = new ResizeObserver(() => {
+  setMessagesResizeObserver(new ResizeObserver(() => {
     resizeEditorInput(editingMessage?.input);
     const messages = $("#messages");
     if (messages && followMessages) messages.scrollTop = messages.scrollHeight;
@@ -217,7 +212,7 @@ export function shell() {
     fitClaudeUsageTip();
     updateScrollControl();
     scheduleHistoryLoad();
-  });
+  }));
   messagesResizeObserver.observe($("#messages"));
   messagesResizeObserver.observe($("#composer"));
   messagesResizeObserver.observe($(".composer-area"));
@@ -305,27 +300,27 @@ export function shell() {
       renderSidebar();
     }
     if (compactSidebarMedia.matches) workspace.classList.toggle("sidebar-open", open);
-    else desktopSidebarOpen = open;
+    else setDesktopSidebarOpen(open);
     syncSidebarLayout();
     sidebarBackdropPress = null;
     if (opening && compactSidebarMedia.matches) sidebarBackdropReadyAt = performance.now() + sidebarBackdropGuardMs;
     if (focus) focusSidebarControl();
   };
   const closeSidebar = ({ focus = true } = {}) => setSidebarOpen(false, { focus });
-  closeMobileSidebar = ({ focus = true } = {}) => {
+  setCloseMobileSidebar(({ focus = true } = {}) => {
     if (!compactSidebarMedia.matches) return;
     setSidebarOpen(false, { focus });
-  };
+  });
   const onSidebarMediaChange = () => {
     workspace.classList.remove("sidebar-open");
     syncSidebarLayout();
   };
   compactSidebarMedia.addEventListener("change", onSidebarMediaChange);
-  syncRelatedSidebarLayout = syncSidebarLayout;
-  sidebarLayoutCleanup = () => {
+  setSyncRelatedSidebarLayout(syncSidebarLayout);
+  setSidebarLayoutCleanup(() => {
     compactSidebarMedia.removeEventListener("change", onSidebarMediaChange);
-    if (syncRelatedSidebarLayout === syncSidebarLayout) syncRelatedSidebarLayout = null;
-  };
+    if (syncRelatedSidebarLayout === syncSidebarLayout) setSyncRelatedSidebarLayout(null);
+  });
   syncSidebarLayout();
   $("#open-sidebar").onclick = () => setSidebarOpen(!sidebarIsOpen());
   sidebarBackdrop.onpointerdown = event => {
@@ -396,7 +391,7 @@ export function shell() {
   $("#connection-state").onclick = refreshConnectionFromIndicator;
   const toolsTrigger = $("#open-session-tools");
   toolsTrigger.append(icon("tools"));
-  sessionTools = mountSessionTools({
+  setSessionTools(mountSessionTools({
     workspace: $(".workspace"), trigger: $("#open-session-tools"),
     sidePanel: workspaceSidePanel,
     onFileContextMenu: openWorkspaceFileContextMenu,
@@ -413,8 +408,8 @@ export function shell() {
     openImagePreview,
     openVideoPreview: (trigger, source, poster, name) => openVideoPreview(trigger, source, poster, name, prepareRemoteTunnelAccess),
     copyText
-  });
-  sessionMenu = mountSessionMenu({
+  }));
+  setSessionMenu(mountSessionMenu({
     trigger: toolsTrigger,
     getContext: () => {
       const parentThreadId = relatedSessionView?.kind === "side"
@@ -450,7 +445,7 @@ export function shell() {
       closePopup(); closeComposerMenus(); closeMobileSidebar({ focus: false }); rememberTransientHistory();
     },
     onError: error => notice(error.message || "无法读取会话菜单", true)
-  });
+  }));
   restoreRelatedOperations();
   syncRelatedSessionLayout();
   $("#appearance-button").onclick = openAppearance;

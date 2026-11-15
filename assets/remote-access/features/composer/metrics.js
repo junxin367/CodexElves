@@ -2,23 +2,23 @@
 
 import { $, element } from "../../ui/dom.js";
 import { closePopup } from "../../ui/popup.js";
+import { closeComposerMenus } from "../../core/actions.js";
 import {
-  connected, creating, nativeConnectionVersion, pageLeaving, selectedId, selectionVersion, session,
-  thread, turns
+  creating, nativeConnectionVersion, pageLeaving, selectedId, selectionVersion, session, thread,
+  turns
 } from "../../core/state.js";
-import { api } from "../api.js";
-import { closeComposerMenus } from "./composer-menus.js";
-import { messageVersion } from "../conversation/history.js";
-import { activeBackend, isActiveThread, privateInputScope } from "../session/capabilities.js";
+import { messageVersion } from "../conversation/history-state.js";
+import { activeBackend, privateInputScope } from "../session/capabilities.js";
 import { activeInstanceId } from "../session/instances.js";
-import { currentThreadDisplay, rememberThreadDisplay } from "../session/thread-cache.js";
+import { currentThreadDisplay } from "../session/thread-cache.js";
 
 export let contextUsageTip = null;
-let composerMetricsState = null;
+export let composerMetricsState = null;
+export function setComposerMetricsState(value) { return composerMetricsState = value; }
 function composerMetricsNumber(value) {
   return typeof value === "number" && Number.isFinite(value) && value >= 0 && value <= Number.MAX_SAFE_INTEGER;
 }
-function composerMetricsHasTurn(value) {
+export function composerMetricsHasTurn(value) {
   return ["tokensPerSecond", "steps", "turnTokens"].some(key => composerMetricsNumber(value?.[key]));
 }
 export function normalizeComposerMetrics(value) {
@@ -129,7 +129,7 @@ function composerMetricNumber(state, key, value, format = String) {
   void Promise.all(animations.map(animation => animation.finished)).then(dispose, dispose);
   return record.node;
 }
-function composerMetricsContext() {
+export function composerMetricsContext() {
   const owner = privateInputScope(session), instanceId = activeInstanceId();
   if (!owner || !instanceId || creating || !selectedId || thread?.id !== selectedId
       || thread.viewKind === "subagent" || pageLeaving || document.hidden
@@ -154,14 +154,14 @@ export function fitComposerMetrics() {
   // 用户要求手机共用已有底行：额度保持原右侧位置；只限制新增统计的可用宽度，避免数字变长后盖住额度。
   node.style.setProperty("--composer-quota-width", `${quota && !quota.hidden ? quota.getBoundingClientRect().width + 8 : 0}px`);
 }
-function composerMetricsLatestTurn(state) {
+export function composerMetricsLatestTurn(state) {
   if (state.turnsReference !== turns || state.turnsSize !== turns.size || state.messageVersion !== messageVersion) {
     state.turnsReference = turns; state.turnsSize = turns.size; state.messageVersion = messageVersion;
     state.latestTurn = [...turns.values()].at(-1);
   }
   return state.latestTurn;
 }
-function renderComposerMetrics() {
+export function renderComposerMetrics() {
   const node = $("#session-metrics"), state = composerMetricsState;
   if (!node) return;
   const value = state?.value;
@@ -217,57 +217,6 @@ function renderComposerMetrics() {
   node.title = description;
   node.setAttribute("aria-label", `${labels.join("，")}。${description}`);
   fitComposerMetrics();
-}
-export function syncComposerMetrics() {
-  if (!$("#session-metrics")) return;
-  const context = composerMetricsContext();
-  if (!context) { resetComposerMetrics(); return; }
-  if (composerMetricsState?.key !== context.key) {
-    resetComposerMetrics();
-    composerMetricsState = { key: context.key, value: normalizeComposerMetrics(currentThreadDisplay()?.sessionMetrics),
-      checkedAt: 0, pending: false, controller: null, timer: null, fingerprint: "", retryAt: 0 };
-  }
-  const state = composerMetricsState, active = isActiveThread();
-  const fingerprint = JSON.stringify([composerMetricsLatestTurn(state)?.id, active]);
-  if (state.fingerprint !== fingerprint) { state.fingerprint = fingerprint; state.checkedAt = 0; }
-  renderComposerMetrics();
-  clearTimeout(state.timer); state.timer = null;
-  if (!connected) { state.controller?.abort(); return; }
-  if (state.pending) return;
-  // 统计只在可见的当前会话后台读取；执行中每 2 秒、空闲每 15 秒，发送与停止均不等待统计。
-  const interval = active ? 2000 : 15000;
-  const remaining = Math.max(state.retryAt - Date.now(), state.checkedAt + interval - Date.now());
-  if (remaining > 0) {
-    state.timer = setTimeout(() => { if (composerMetricsState === state) syncComposerMetrics(); }, remaining);
-    return;
-  }
-  state.pending = true;
-  const controller = new AbortController();
-  state.controller = controller;
-  void api("/api/read/sessionMetrics", context.payload, undefined, controller.signal, { resourcePriority: "background" })
-    .then(result => {
-      if (composerMetricsState !== state || state.controller !== controller || controller.signal.aborted
-          || composerMetricsContext()?.key !== state.key
-          || result?.ok !== true || result.threadId !== context.payload.threadId || result.backend !== context.payload.backend) return;
-      const value = normalizeComposerMetrics(result.metrics);
-      // 新轮次可能先只返回累计或空统计；这时保留上一轮快照，等本轮速度、步数或 Token 实测值到达再替换。
-      if (value && (!composerMetricsHasTurn(state.value) || composerMetricsHasTurn(value))) {
-        state.value = value;
-        if (thread?.id === result.threadId) thread.sessionMetrics = value;
-        rememberThreadDisplay({ id: result.threadId, sessionMetrics: value }, { persist: !isActiveThread() });
-      }
-      state.retryAt = 0;
-    })
-    .catch(() => {
-      if (composerMetricsState === state && state.controller === controller && !controller.signal.aborted)
-        state.retryAt = Date.now() + 15000;
-    })
-    .finally(() => {
-      if (composerMetricsState !== state || state.controller !== controller) return;
-      state.checkedAt = !controller.signal.aborted && state.fingerprint === fingerprint ? Date.now() : 0;
-      state.pending = false; state.controller = null;
-      syncComposerMetrics();
-    });
 }
 export function tokenCount(value) { return value >= 1000 ? `${Number((value / 1000).toFixed(1))}k` : String(Math.round(value)); }
 export function contextUsage(info) {

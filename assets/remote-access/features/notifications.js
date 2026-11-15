@@ -3,9 +3,9 @@
 import { isAndroidContainer } from "../platform.js";
 import { $ } from "../ui/dom.js";
 import { notice } from "../ui/notice.js";
+import { selectThread } from "../core/actions.js";
 import { pageLeaving, session } from "../core/state.js";
-import { selectThread } from "./conversation/selection.js";
-import { initialAuthenticationRequired } from "./session/login.js";
+import { initialAuthenticationRequired } from "./session/connection-state.js";
 
 export let pendingNotificationOpen = null;
 export function setPendingNotificationOpen(value) { return pendingNotificationOpen = value; }

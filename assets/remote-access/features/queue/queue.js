@@ -1,4 +1,4 @@
-// 排队消息：队列快照、拖动排序、引导与删除及队列区渲染。
+// 排队消息：应用队列快照与读取结果、拖动排序、引导与删除及队列区渲染；拖拽、快照版本与排队编辑等共享状态在 queue/state.js。
 
 import { renderQueuedMessageAttachments } from "../../attachments.js";
 import { recordDiagnostic } from "../../diagnostics.js";
@@ -7,41 +7,34 @@ import { $, button, element } from "../../ui/dom.js";
 import { icon } from "../../ui/icons.js";
 import { notice } from "../../ui/notice.js";
 import { closePopup, openPopup, togglePopup } from "../../ui/popup.js";
+import {
+  closeComposerMenus, mutate, reloadThread, renderMessages, renderQueuedEditRecoveryControls,
+  updateComposer
+} from "../../core/actions.js";
 import { busy, connected, selectedId, selectionVersion, session, setBusy, stopping, thread } from "../../core/state.js";
 import { api } from "../api.js";
-import { closeComposerMenus } from "../composer/composer-menus.js";
-import { updateComposer } from "../composer/composer.js";
 import { persistQueuedEditDraft, persistQueuedEdits, recoveryGeneration } from "../composer/drafts.js";
 import { compactionLocked } from "../conversation/compaction.js";
-import { scheduleReload } from "../conversation/events.js";
-import { renderMessages } from "../conversation/history-view.js";
-import { reloadThread } from "../conversation/history.js";
-import { mutate, pending, reportMutationError } from "../conversation/pending.js";
+import { scheduleReload } from "../conversation/event-sync.js";
+import { pending, reportMutationError } from "../conversation/pending-state.js";
 import { editingMessage } from "../messages/message-edit.js";
+import { beginQueuedMessageEdit, finishQueuedMessageEdit, restoreUnfinishedQueuedMessageEdit } from "./queued-edit.js";
 import {
-  beginQueuedMessageEdit, editingQueuedMessage, finishQueuedMessageEdit, queuedEditActions,
-  queuedEditCheckVersion, queuedEdits, renderQueuedEditRecoveryControls,
-  restoreUnfinishedQueuedMessageEdit
-} from "./queued-edit.js";
-import {
-  confirmedSendDisplayFor, confirmSendDisplay, finishSendDisplay, reconcileSentMessageDisplays,
+  confirmSendDisplay, confirmedSendDisplayFor, finishSendDisplay, reconcileSentMessageDisplays,
   rememberSendDisplay, sentMessageDisplayFor
 } from "./sent-display.js";
+import {
+  editingQueuedMessage, moveQueueDrag, moveQueueItem, notifiedQueue, pendingSteer, queueDrag,
+  queueMessageIdentity, queueMessageText, queueReorder, queueRequest, queueSnapshotIsVersioned,
+  queueSnapshotRemovedMessage, queueSnapshotVersion, queueVersion, queuedActionBusy,
+  queuedEditActions, queuedEditCheckVersion, queuedEdits, retiredQueueEpochs, sameQueueOrder,
+  scrollQueueDrag, setNotifiedQueue, setNotifiedQueueEdits, setPendingSteer, setQueueDrag,
+  setQueueReorder, setQueueRequest, setQueueSnapshotVersion, setQueueVersion
+} from "./state.js";
 import { isActiveThread, privateInputScope, threadReadOnly } from "../session/capabilities.js";
-import { currentThreadDisplay, rememberThreadDisplay } from "../session/thread-cache.js";
+import { currentThreadDisplay } from "../session/thread-cache.js";
+import { rememberThreadDisplay } from "../session/thread-display.js";
 
-export let queueVersion = 0, notifiedQueue = null, notifiedQueueEdits = null, queueRequest = null;
-export function setQueueVersion(value) { return queueVersion = value; }
-export function setNotifiedQueue(value) { return notifiedQueue = value; }
-export function setNotifiedQueueEdits(value) { return notifiedQueueEdits = value; }
-export let queueSnapshotVersion = null;
-export function setQueueSnapshotVersion(value) { return queueSnapshotVersion = value; }
-export const retiredQueueEpochs = new Set();
-export let queueDrag = null, queueReorder = null;
-export let pendingSteer = null;
-export function setPendingSteer(value) { return pendingSteer = value; }
-export const queuedActionBusy = new Set();
-const sameQueueOrder = (left, right) => left.length === right.length && left.every((id, index) => id === right[index]);
 function queueReorderAvailable() {
   const messages = thread?.queuedMessages;
   return (thread?.backend !== "claude" || thread.capabilities?.remoteQueue === true)
@@ -52,11 +45,6 @@ function queueReorderAvailable() {
     && messages.every(message => message?.id && message.remoteDeliveryState !== "accepted"
       && !confirmedSendDisplayFor(message)
       && (!message.submission?.status || message.submission.status === "queued"));
-}
-function moveQueueItem(ids, messageId, index) {
-  const order = ids.filter(id => id !== messageId);
-  order.splice(Math.max(0, Math.min(index, order.length)), 0, messageId);
-  return order;
 }
 function queueDisplayMessages(messages) {
   if (!Array.isArray(messages)) return messages;
@@ -84,7 +72,7 @@ async function reorderQueuedMessages(threadId, expectedMessageIds, messageIds, f
   }
   const payload = { threadId, messageIds, expectedMessageIds }, readVersion = queueVersion;
   const preview = { ...payload, deviceId: session.device.id };
-  queueReorder = preview;
+  setQueueReorder(preview);
   setBusy(true); updateComposer();
   try {
     const result = await mutate("reorderQueued", payload, { reliable: true });
@@ -93,7 +81,7 @@ async function reorderQueuedMessages(threadId, expectedMessageIds, messageIds, f
     reportMutationError(error);
     if (!pending && selectedId === threadId) void reloadQueue().catch(error => notice(error.message, true));
   } finally {
-    if (queueReorder === preview) queueReorder = null;
+    if (queueReorder === preview) setQueueReorder(null);
     setBusy(false); updateComposer();
     if (focusId && selectedId === threadId) {
       const row = [...document.querySelectorAll(".queued-message[data-message-id]")].find(row => row.dataset.messageId === focusId);
@@ -110,7 +98,7 @@ async function reorderQueuedMessages(threadId, expectedMessageIds, messageIds, f
 export function finishQueueDrag({ commit = false, render = true, hapticEnd = false } = {}) {
   const drag = queueDrag;
   if (!drag) return;
-  queueDrag = null;
+  setQueueDrag(null);
   clearTimeout(drag.timer); cancelAnimationFrame(drag.frame);
   document.removeEventListener("pointermove", drag.move);
   document.removeEventListener("pointerup", drag.up);
@@ -129,35 +117,6 @@ export function finishQueueDrag({ commit = false, render = true, hapticEnd = fal
     if (hapticEnd && drag.userInitiated && hapticEndAllowed) performAndroidHapticFeedback("drag-end");
   } else if (render) renderQueueArea();
 }
-function moveQueueDrag(drag) {
-  if (queueDrag !== drag || !drag.active) return;
-  const previousOrder = [...drag.queue.children].map(row => row.dataset.messageId);
-  const rows = [...drag.queue.children].filter(row => row !== drag.row);
-  const before = rows.find(row => {
-    const rect = row.getBoundingClientRect();
-    return drag.y < rect.top + rect.height / 2;
-  });
-  if (drag.row.nextElementSibling !== (before || null)) drag.queue.insertBefore(drag.row, before || null);
-  const order = [...drag.queue.children].map(row => row.dataset.messageId);
-  drag.order = order;
-  if (drag.userInitiated && !sameQueueOrder(previousOrder, order))
-    performAndroidHapticFeedback("drag-tick");
-}
-function scrollQueueDrag(drag) {
-  if (queueDrag !== drag || !drag.active || drag.frame != null) return;
-  const scroll = drag.queue;
-  if (!scroll || scroll.scrollHeight <= scroll.clientHeight) return;
-  const rect = scroll.getBoundingClientRect();
-  const direction = drag.y < rect.top + 28 ? -1 : drag.y > rect.bottom - 28 ? 1 : 0;
-  if (!direction) return;
-  drag.frame = requestAnimationFrame(() => {
-    drag.frame = null;
-    if (queueDrag !== drag) return;
-    const before = scroll.scrollTop;
-    scroll.scrollTop += direction * 8;
-    if (before !== scroll.scrollTop) { moveQueueDrag(drag); scrollQueueDrag(drag); }
-  });
-}
 function beginQueueDrag(event, handle, row, queue, messageId) {
   if (event.button !== 0 || event.isPrimary === false || queueDrag || !queueReorderAvailable()) return;
   event.preventDefault();
@@ -168,7 +127,7 @@ function beginQueueDrag(event, handle, row, queue, messageId) {
     x: event.clientX, y: event.clientY, startY: event.clientY,
     userInitiated: event.isTrusted === true, active: false, order: [], timer: null, frame: null
   };
-  queueDrag = drag;
+  setQueueDrag(drag);
   const activate = () => {
     if (queueDrag !== drag || !handle.isConnected || !queueReorderAvailable()) { finishQueueDrag(); return; }
     if (drag.active) return;
@@ -204,21 +163,6 @@ function beginQueueDrag(event, handle, row, queue, messageId) {
   queue.addEventListener("lostpointercapture", drag.cancel);
   try { queue.setPointerCapture(event.pointerId); } catch {}
 }
-export function queueSnapshotIsVersioned(snapshot) {
-  return typeof snapshot?.queueEpoch === "string" && snapshot.queueEpoch.length > 0
-    && Number.isSafeInteger(snapshot.queueRevision) && snapshot.queueRevision >= 0;
-}
-export function queueMessageIdentity(message) {
-  return message?.clientUserMessageId ?? message?.submissionOptions?.clientUserMessageId
-    ?? (!message?.serverQueuedMessageId ? message?.id : null);
-}
-function queueSnapshotRemovedMessage(previous, next) {
-  const nextIds = new Set((next || []).map(queueMessageIdentity).filter(Boolean));
-  return (previous || []).some(message => {
-    const id = queueMessageIdentity(message);
-    return id && !nextIds.has(id);
-  });
-}
 function reconcileQueuedEditRecovery(threadId, edits) {
   if (!Array.isArray(edits)) return;
   const activeIds = new Set(edits.map(edit => edit?.editId).filter(id => typeof id === "string"));
@@ -248,13 +192,13 @@ export function applyQueueSnapshot(id, messages, edits, snapshot = null, { autho
       if (!authoritative || readVersion !== null && readVersion !== queueVersion) return false;
       retiredQueueEpochs.add(queueSnapshotVersion.queueEpoch);
     }
-    queueSnapshotVersion = { queueEpoch: snapshot.queueEpoch, queueRevision: snapshot.queueRevision };
+    setQueueSnapshotVersion({ queueEpoch: snapshot.queueEpoch, queueRevision: snapshot.queueRevision });
   } else {
     if (queueSnapshotVersion) return false;
-    queueSnapshotVersion = null;
+    setQueueSnapshotVersion(null);
   }
-  notifiedQueue = messages; ++queueVersion;
-  if (Array.isArray(edits)) notifiedQueueEdits = edits;
+  setNotifiedQueue(messages); setQueueVersion(queueVersion + 1);
+  if (Array.isArray(edits)) setNotifiedQueueEdits(edits);
   reconcileQueuedEditRecovery(id, edits);
   if (thread?.id === id) {
     thread.queuedMessages = messages;
@@ -296,9 +240,9 @@ export async function reloadQueue() {
         request.again = true;
     } while (request.again && version === selectionVersion && selectedId === id);
   })();
-  queueRequest = request;
+  setQueueRequest(request);
   try { await request.promise; }
-  finally { if (queueRequest === request) queueRequest = null; }
+  finally { if (queueRequest === request) setQueueRequest(null); }
 }
 export function applyQueuedSendResult(id, result, readVersion, payload = null) {
   if (!id || result?.threadId && result.threadId !== id) return false;
@@ -317,9 +261,6 @@ export function applyQueuedSendResult(id, result, readVersion, payload = null) {
       }));
   }
   return true;
-}
-export function queueMessageText(message) {
-  return message?.text ?? message?.context?.prompt ?? message?.prompt ?? message?.message?.prompt ?? "";
 }
 export function confirmQueuedSteerDisplay(id, messageId, result) {
   let record = sentMessageDisplayFor({ id: messageId }, id);
@@ -553,7 +494,7 @@ async function steerQueuedMessage(threadId, messageId) {
   if (sendDisplay) sendDisplay.messageId = messageId;
   queuedActionBusy.add(key);
   // 引导中不插入正文；成功后使用同一份确认展示缓存，不能因历史尚未同步而移除。
-  pendingSteer = preview;
+  setPendingSteer(preview);
   recordDiagnostic("remote.steer", { phase: "request" });
   renderMessages();
   if (selectedId === threadId) renderQueueArea();
@@ -565,7 +506,7 @@ async function steerQueuedMessage(threadId, messageId) {
     const result = await request;
     if (!currentAuthorization()) return;
     if (sendDisplay) confirmSendDisplay(sendDisplay.payload, result, { steering: true });
-    if (pendingSteer === preview) pendingSteer = null;
+    if (pendingSteer === preview) setPendingSteer(null);
     if (selectedId === threadId && thread?.id === threadId) {
       if (readVersion === queueVersion || queueSnapshotIsVersioned(result))
         applyQueueSnapshot(threadId, Array.isArray(result?.queuedMessages)
@@ -594,7 +535,7 @@ async function steerQueuedMessage(threadId, messageId) {
     if (!currentAuthorization()) return;
     finishSendDisplay(sendDisplay, !pending);
     if (pendingSteer === preview) {
-      pendingSteer = null;
+      setPendingSteer(null);
       renderMessages();
     }
     recordDiagnostic("remote.steer", {
@@ -603,7 +544,7 @@ async function steerQueuedMessage(threadId, messageId) {
     });
     reportMutationError(error);
   } finally {
-    if (pendingSteer === preview && (!currentAuthorization() || selectedId !== threadId)) pendingSteer = null;
+    if (pendingSteer === preview && (!currentAuthorization() || selectedId !== threadId)) setPendingSteer(null);
     queuedActionBusy.delete(key);
     if (currentAuthorization() && selectedId === threadId) updateComposer();
   }

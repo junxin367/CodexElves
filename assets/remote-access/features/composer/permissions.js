@@ -1,48 +1,30 @@
-// 输入区权限选择：按实例读取可用权限模式，记住每个会话及新建草稿的选择并提交修改。
+// 输入区权限选择：按实例读取可用权限模式、更新权限控件并提交修改；权限目录与每个会话、新建草稿的选择记录在 options-state.js。
 
-import { permissionLabel, permissionModeKnown, permissionOptions } from "../../permissions.js";
+import { permissionLabel, permissionOptions } from "../../permissions.js";
 import { $ } from "../../ui/dom.js";
 import { notice } from "../../ui/notice.js";
 import { setSelectOptions } from "../../ui/select.js";
-import { busy, connected, creating, selectedId, session, stopping, thread } from "../../core/state.js";
+import { mutate, updateComposer } from "../../core/actions.js";
+import { busy, connected, creating, selectedId, session, stopping } from "../../core/state.js";
 import { api } from "../api.js";
-import { updateComposer } from "./composer.js";
 import { draftKey, snapshotDraft, storeDraft } from "./drafts.js";
 import {
   codexCreationDefaults, newClaudePermissionMode, newCodexPermissionMode, rememberNewChatSettings,
   syncCodexCreationDefaults
-} from "./new-chat.js";
-import { mutate, pending } from "../conversation/pending.js";
-import { editingMessage } from "../messages/message-edit.js";
-import { editingQueuedMessage } from "../queue/queued-edit.js";
+} from "./new-chat-settings.js";
 import {
-  activeBackend, claudeThreadId, isActiveThread, isClaude, privateInputScope, threadReadOnly
-} from "../session/capabilities.js";
+  draftPermissionChoices, instancePermissionCatalogs, instancePermissionReads, permissionSelections,
+  permissionWrites, rememberInstancePermissionCatalog, rememberPermissionSelection
+} from "./options-state.js";
+import { pending } from "../conversation/pending-state.js";
+import { editingMessage } from "../messages/message-edit.js";
+import { editingQueuedMessage } from "../queue/state.js";
+import { activeBackend, isActiveThread, isClaude, privateInputScope, threadReadOnly } from "../session/capabilities.js";
 import { activeInstanceId, sessionInstanceEnabled } from "../session/instances.js";
-import { relatedSessionView } from "../session/related.js";
+import { relatedSessionView } from "../session/related-state.js";
 import { currentThreadDisplay } from "../session/thread-cache.js";
-import { threadDeletionLocked } from "../sidebar/actions.js";
+import { threadDeletionLocked } from "../sidebar/deletion-state.js";
 
-// 会话权限按授权及真实会话保存；新建页的选择按实例/项目草稿隔离，不写入全局设置。
-export const draftPermissionChoices = new Map(), permissionSelections = new Map(), permissionWrites = new Map();
-export const instancePermissionCatalogs = new Map(), instancePermissionReads = new Map();
-export function rememberPermissionSelection(id, mode, revision = 0) {
-  const backend = claudeThreadId(id) ? "claude" : "codex";
-  if (!id || !permissionModeKnown(backend, mode)) return;
-  const scope = privateInputScope(session), previous = permissionSelections.get(id);
-  if (previous?.scope === scope && previous.revision > revision) return;
-  permissionSelections.set(id, { scope, mode, revision });
-  if (thread?.id === id) {
-    thread.permissionMode = mode;
-    thread.permissionRevision = revision;
-  }
-}
-export function rememberInstancePermissionCatalog(id, value) {
-  if (value.backend !== "claude" || value.instanceId !== id || !Array.isArray(value.supportedModes)) return;
-  instancePermissionCatalogs.set(id, { scope: privateInputScope(session), modes: value.supportedModes,
-    defaultMode: typeof value.settings?.permissionMode === "string" ? value.settings.permissionMode : "",
-    loadedAt: Date.now() });
-}
 export async function loadInstancePermissionCatalog(id) {
   if (!id || !id.startsWith("claude:")) return;
   const scope = privateInputScope(session);

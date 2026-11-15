@@ -2,7 +2,7 @@
 
 import { connected, creating, pageLeaving, selectedId, thread } from "../../core/state.js";
 import { markVisibleThreadRead } from "../messages/user-content.js";
-import { sidebarAttentionState } from "../sidebar/list.js";
+import { sidebarAttentionState } from "../sidebar/list-state.js";
 
 // PC 右侧侧边会话使用独立页面；外层标签已提供名称，因此面板内隐藏整段顶部信息、主侧栏与返回入口。
 // 文件工具在本面板内打开，避免嵌套第二个标签面板；手机普通关联会话页不使用此标记。

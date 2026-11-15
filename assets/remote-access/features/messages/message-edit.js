@@ -3,24 +3,24 @@
 import { $, button, element } from "../../ui/dom.js";
 import { notice } from "../../ui/notice.js";
 import {
+  closeComposerMenus, loadSidebar, mutate, renderMessages, scheduleMessages, selectThread,
+  updateComposer
+} from "../../core/actions.js";
+import {
   busy, connected, selectedId, selectionVersion, session, setBusy, stopping, thread, turns
 } from "../../core/state.js";
 import { randomId } from "../../core/util.js";
-import { closeComposerMenus } from "../composer/composer-menus.js";
-import { updateComposer } from "../composer/composer.js";
 import { rememberDraft } from "../composer/drafts.js";
-import { currentModelId, selectedEffort, selectedModel } from "../composer/models.js";
+import { currentModelId } from "../composer/model-choice.js";
+import { selectedEffort, selectedModel } from "../composer/options-state.js";
 import { resizeEditorInput } from "../composer/prompt-editor.js";
 import { compactionLocked } from "../conversation/compaction.js";
-import { renderMessages, scheduleMessages } from "../conversation/history-view.js";
-import { mutate, pending, reportMutationError } from "../conversation/pending.js";
-import { selectThread } from "../conversation/selection.js";
+import { pending, reportMutationError } from "../conversation/pending-state.js";
 import { messageCopyText } from "./user-content.js";
-import { queuedActionBusy } from "../queue/queue.js";
-import { editingQueuedMessage } from "../queue/queued-edit.js";
 import { clearSentMessageDisplays } from "../queue/sent-display.js";
-import { isActiveThread, threadReadOnly, threadSentMessageEditAllowed } from "../session/capabilities.js";
-import { loadSidebar } from "../sidebar/list.js";
+import { editingQueuedMessage, queuedActionBusy } from "../queue/state.js";
+import { threadSentMessageEditAllowed } from "../session/action-capabilities.js";
+import { isActiveThread, threadReadOnly } from "../session/capabilities.js";
 
 export let editingMessage = null;
 export function setEditingMessage(value) { return editingMessage = value; }

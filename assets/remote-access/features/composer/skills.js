@@ -1,92 +1,56 @@
-// 斜杠命令与 Skill：命令菜单、Skill 目录缓存与刷新、选择 Skill/压缩命令及输入事件处理。
+// 斜杠命令与 Skill：命令菜单渲染与更新、Skill 目录的读取与刷新调度、选择压缩命令及输入事件处理；目录状态与缓存判断在 skill-catalog.js，选择 Skill 在 selected-skills.js。
 
 import { $, button, element } from "../../ui/dom.js";
-import { icon } from "../../ui/icons.js";
-import { notice } from "../../ui/notice.js";
 import { closePopup } from "../../ui/popup.js";
+import { closeComposerMenus, loadModels, scheduleMessages, updateComposer } from "../../core/actions.js";
 import {
-  busy, connected, creating, pageLeaving, selectedId, selectionVersion, session, sidebar, stopping,
-  thread
+  busy, connected, creating, pageLeaving, selectedId, selectionVersion, session, stopping, thread
 } from "../../core/state.js";
 import { readCache } from "../../core/stores.js";
 import { randomId } from "../../core/util.js";
 import { api } from "../api.js";
-import { closeComposerMenus, closeSkillMenu, fitComposerMenu } from "./composer-menus.js";
-import { updateComposer } from "./composer.js";
+import { closeSkillMenu, fitComposerMenu } from "./composer-menus.js";
 import { rememberDraft, rememberQueuedMessageEdit } from "./drafts.js";
 import { closeContextUsageTip, compactUsageDescription, contextUsage } from "./metrics.js";
+import { modelContextKey } from "./model-catalog.js";
 import {
-  loadModels, modelContextKey, modelDefaults, modelsLoadedAt, modelsPromise, modelsRetryAt,
-  modelsScope, setModelDefaults
-} from "./models.js";
+  modelDefaults, modelsLoadedAt, modelsPromise, modelsRetryAt, modelsScope, setModelDefaults
+} from "./options-state.js";
 import {
-  forgetPromptCanonicalText, promptBoundaryOffset, promptDomText, promptSelection,
-  promptSkillPlacements, promptTokenPlacements, promptTokensBeforeBoundary,
-  restorePromptCanonicalContent, setPromptSelection, skillIdentity, skillNodeKey, skillVisibleName,
-  syncPromptTrailingBreak, syncSelectedSkillsFromPrompt, writePromptContent
+  forgetPromptCanonicalText, promptDomText, promptSelection, restorePromptCanonicalContent,
+  setPromptSelection, skillIdentity, skillVisibleName, syncPromptTrailingBreak,
+  syncSelectedSkillsFromPrompt, writePromptContent
 } from "./prompt-editor.js";
-import { compactContext, compactionLocked } from "../conversation/compaction.js";
-import { scheduleMessages } from "../conversation/history-view.js";
-import { pending } from "../conversation/pending.js";
-import { goalCommandMatches, goalComposerReason, selectedGoal, selectGoalCommand } from "../goal/composer.js";
-import { editingMessage } from "../messages/message-edit.js";
-import { editingQueuedMessage } from "../queue/queued-edit.js";
+import { selectSkill } from "./selected-skills.js";
 import {
-  backendCapability, claudeCommandSupported, isClaude, privateInputScope, threadReadOnly
-} from "../session/capabilities.js";
+  appliedGlobalSkills, appliedSkillCatalog, catalogCacheMs, catalogFallbackMs, catalogFresh,
+  catalogNeedsRefresh, catalogRefreshAheadMs, catalogRetryMs, catalogUsable, compactCommandIcon,
+  compactCommandMatches, globalSkillChoices, globalSkillEpoch, globalSkillsLoadedAt,
+  goalComposerIcon, normalizeSlashIndex, selectedSkills, setAppliedGlobalSkills,
+  setAppliedSkillCatalog, setCatalogRefreshTimer, setGlobalSkillChoices, setGlobalSkillEpoch,
+  setGlobalSkillsInvalidated, setGlobalSkillsLoadedAt, setMessageSkillLoadScope,
+  setSkillCatalogRevision, setSkillChoices, setSkillIndex, setSkillLoadVersion, setSkillLoading,
+  setSkillRenderVersion, setSkillScope, skillCatalogFresh, skillCatalogNeedsRefresh,
+  skillCatalogRequests, skillCatalogRetryAt, skillCatalogRevision, skillCatalogUsable,
+  skillCatalogs, skillChoices, skillCwdKey, skillIndex, skillLoadVersion, skillLoading,
+  skillRenderVersion, skillScope, skillScopeAliases, skillScopeKey, slashQuery, stopCatalogRefresh,
+  validCachedSkill
+} from "./skill-catalog.js";
+import { compactContext, compactionLocked } from "../conversation/compaction.js";
+import { pending } from "../conversation/pending-state.js";
+import { goalComposerReason, selectGoalCommand } from "../goal/composer.js";
+import { goalCommandMatches, selectedGoal } from "../goal/state.js";
+import { editingMessage } from "../messages/message-edit.js";
+import { editingQueuedMessage } from "../queue/state.js";
+import { claudeCommandSupported } from "../session/action-capabilities.js";
+import { backendCapability, isClaude, privateInputScope, threadReadOnly } from "../session/capabilities.js";
 import { activeInstanceId } from "../session/instances.js";
 import { cacheDisplayData, currentThreadDisplay, optionalCachedRead, readScope } from "../session/thread-cache.js";
 
-const catalogCacheMs = 60 * 60 * 1000;
-export const catalogRefreshAheadMs = 5 * 60 * 1000, catalogRetryMs = 60 * 1000;
-export const catalogFallbackMs = 7 * 24 * 60 * 60 * 1000;
-export const skillCatalogs = new Map(), skillScopeAliases = new Map(), skillCatalogRequests = new Map();
-export const skillCatalogRetryAt = new Map();
-export let globalSkillChoices = [], globalSkillsLoadedAt = 0;
-export function setGlobalSkillChoices(value) { return globalSkillChoices = value; }
-export function setGlobalSkillsLoadedAt(value) { return globalSkillsLoadedAt = value; }
-export let skillCatalogRevision = 0, globalSkillEpoch = "", globalSkillsInvalidated = false;
-export function setSkillCatalogRevision(value) { return skillCatalogRevision = value; }
-export function setGlobalSkillEpoch(value) { return globalSkillEpoch = value; }
-export function setGlobalSkillsInvalidated(value) { return globalSkillsInvalidated = value; }
-export let appliedSkillCatalog = null, appliedGlobalSkills = null;
-export function setAppliedSkillCatalog(value) { return appliedSkillCatalog = value; }
-export function setAppliedGlobalSkills(value) { return appliedGlobalSkills = value; }
-let catalogRefreshTimer = null;
-export let selectedSkills = [];
-export function setSelectedSkills(value) { return selectedSkills = value; }
-export let skillChoices = [], skillIndex = 0, skillLoadVersion = 0, skillScope = "";
-export function setSkillChoices(value) { return skillChoices = value; }
-export function setSkillLoadVersion(value) { return skillLoadVersion = value; }
-export function setSkillScope(value) { return skillScope = value; }
-export let skillLoading = null;
-export function setSkillLoading(value) { return skillLoading = value; }
-export let skillRenderVersion = 0, messageSkillLoadScope = "";
-export function setSkillRenderVersion(value) { return skillRenderVersion = value; }
-export function setMessageSkillLoadScope(value) { return messageSkillLoadScope = value; }
-export function renderSelectedSkills() {
-  const prompt = $("#prompt");
-  if (!prompt) return;
-  const selection = promptSelection(prompt), offsets = new Map(promptSkillPlacements(prompt).map(item => [item.key, item.offset]));
-  for (const skill of selectedSkills) if (offsets.has(skillNodeKey(skill))) skill._offset = offsets.get(skillNodeKey(skill));
-  writePromptContent(prompt, prompt.value);
-  if (document.activeElement === prompt) setPromptSelection(prompt, selection.start, selection.end, selection);
-  updateComposer();
-}
-export function slashQuery() {
-  const prompt = $("#prompt");
-  if (!prompt || prompt.selectionStart !== prompt.selectionEnd) return null;
-  const text = prompt.value.slice(0, prompt.selectionStart);
-  const match = /(?:^|\s)\/([^\s/]*)$/.exec(text);
-  return match ? { query: match[1].toLowerCase(), start: prompt.selectionStart - match[1].length - 1, end: prompt.selectionStart } : null;
-}
 export function compactCommandAvailable() {
   if (isClaude() && !claudeCommandSupported("compact")) return false;
   return !!session && !creating && !!selectedId && thread?.id === selectedId && !threadReadOnly() && connected
     && !busy && !stopping && !pending && !editingMessage && !editingQueuedMessage && !compactionLocked(selectedId);
-}
-function compactCommandMatches(query) {
-  return ["压缩", "compact", "context", "上下文"].some(value => value.includes(query));
 }
 export function slashMenuEntries(query = slashQuery()) {
   if (!query) return [];
@@ -101,28 +65,6 @@ export function slashMenuEntries(query = slashQuery()) {
   if (goalCommandMatches(query.query) && (!isClaude() || claudeCommandSupported("goal")))
     entries.push({ type: "goal", enabled: !goalComposerReason() });
   return entries;
-}
-function compactCommandIcon() {
-  const node = icon("compactContext");
-  node.classList.add("slash-command-icon");
-  return node;
-}
-export function goalComposerIcon() {
-  const node = element("span", "ui-icon slash-command-icon");
-  node.setAttribute("aria-hidden", "true");
-  node.innerHTML = '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.15"><circle cx="8" cy="8" r="6.25"/><circle cx="8" cy="8" r="3.25"/><circle cx="8" cy="8" r=".7" fill="currentColor" stroke="none"/></svg>';
-  return node;
-}
-function normalizeSlashIndex(entries) {
-  if (entries[skillIndex]?.enabled) return;
-  const first = entries.findIndex(entry => entry.enabled);
-  skillIndex = first < 0 ? 0 : first;
-}
-export function moveSlashIndex(entries, offset) {
-  const enabled = entries.map((entry, index) => entry.enabled ? index : -1).filter(index => index >= 0);
-  if (!enabled.length) return;
-  const current = enabled.indexOf(skillIndex);
-  skillIndex = enabled[(current < 0 ? 0 : current + offset + enabled.length) % enabled.length];
 }
 export function renderSkillMenu(message) {
   const menu = $("#skill-menu"), query = slashQuery();
@@ -187,17 +129,6 @@ export function renderSkillMenu(message) {
       $(`#skill-option-${active}`)?.scrollIntoView({ block: "nearest" });
   } else $("#prompt").removeAttribute("aria-activedescendant");
 }
-function catalogFresh(value) {
-  const age = Date.now() - value?.loadedAt;
-  return Number.isFinite(age) && age >= 0 && age < catalogCacheMs;
-}
-export function catalogUsable(value) {
-  const age = Date.now() - value?.loadedAt;
-  return Number.isFinite(value?.loadedAt) && value.loadedAt > 0 && age >= 0 && age < catalogFallbackMs;
-}
-export function catalogNeedsRefresh(value) {
-  return !catalogFresh(value) || Date.now() - value.loadedAt >= catalogCacheMs - catalogRefreshAheadMs;
-}
 function activeSkillCatalogContext() {
   const projectId = creating ? $("#project-select")?.value : "";
   const scope = selectedId ? `thread:${selectedId}` : projectId ? `project:${projectId}`
@@ -209,9 +140,6 @@ function activeSkillCatalogContext() {
   // 同一项目在不同 WSL 中可加载不同 Skill，不能复用 Codex 或其他实例的目录。
   return instanceId ? { scope: `claude:${instanceId}:${scope}`,
     payload: { ...payload, backend: "claude", instanceId } } : null;
-}
-export function stopCatalogRefresh() {
-  clearTimeout(catalogRefreshTimer); catalogRefreshTimer = null;
 }
 export function scheduleCatalogRefresh() {
   stopCatalogRefresh();
@@ -230,7 +158,7 @@ export function scheduleCatalogRefresh() {
       : Math.min(record ? due(record.loadedAt) : Infinity, due(globalSkillsLoadedAt)),
       skillCatalogRetryAt.get(key) || 0));
   }
-  if (deadlines.length) catalogRefreshTimer = setTimeout(refreshCachedCatalogs, Math.max(0, Math.min(...deadlines) - time));
+  if (deadlines.length) setCatalogRefreshTimer(setTimeout(refreshCachedCatalogs, Math.max(0, Math.min(...deadlines) - time)));
 }
 export function refreshCachedCatalogs() {
   stopCatalogRefresh();
@@ -242,65 +170,24 @@ export function refreshCachedCatalogs() {
     void loadSkillChoices(context.scope, context.payload).catch(() => {});
   scheduleCatalogRefresh();
 }
-export function validCachedSkill(skill) {
-  return typeof skill?.name === "string" && typeof skill?.path === "string"
-    && (skill.backend !== "claude" || skill.command === skill.name
-      && /^[\p{L}\p{N}_.:-]{1,256}$/u.test(skill.command) && skill.path === `claude-skill:${skill.command}`);
-}
-function skillCwdKey(cwd) {
-  if (typeof cwd !== "string" || !cwd) return null;
-  const path = cwd.replaceAll("\\", "/").replace(/\/+$/, "") || "/";
-  return `cwd:${/^[a-z]:\//i.test(path) || path.startsWith("//") ? path.toLowerCase() : path}`;
-}
-function skillScopeKey(scope) {
-  if (skillScopeAliases.has(scope)) return skillScopeAliases.get(scope);
-  if (scope.startsWith("claude:")) return `context:${scope}`;
-  let cwd;
-  if (scope.startsWith("thread:")) {
-    const id = scope.slice(7);
-    cwd = thread?.id === id ? thread.cwd
-      : [...(sidebar?.recent || []), ...(sidebar?.pinnedThreads || []),
-        ...(sidebar?.projects || []).flatMap(project => project.threads || [])].find(item => item.id === id)?.cwd;
-  } else if (scope.startsWith("project:"))
-    cwd = sidebar?.projects?.find(project => project.id === scope.slice(8))?.roots?.[0];
-  return skillCwdKey(cwd) || `context:${scope}`;
-}
-function skillCatalogFresh(scope) {
-  const record = skillCatalogs.get(skillScopeKey(scope));
-  if (scope.startsWith("claude:"))
-    return record?.backend === "claude" && record.epoch === globalSkillEpoch && catalogFresh(record);
-  return !globalSkillsInvalidated && (record?.epoch || "") === globalSkillEpoch
-    && catalogFresh(record) && catalogFresh({ loadedAt: globalSkillsLoadedAt });
-}
-function skillCatalogUsable(scope) {
-  if (scope.startsWith("claude:")) {
-    const record = skillCatalogs.get(skillScopeKey(scope));
-    return record?.backend === "claude" && catalogUsable(record);
-  }
-  return catalogUsable(skillCatalogs.get(skillScopeKey(scope))) && catalogUsable({ loadedAt: globalSkillsLoadedAt });
-}
-function skillCatalogNeedsRefresh(scope) {
-  return !skillCatalogFresh(scope) || catalogNeedsRefresh(skillCatalogs.get(skillScopeKey(scope)))
-    || !scope.startsWith("claude:") && catalogNeedsRefresh({ loadedAt: globalSkillsLoadedAt });
-}
 function applySkillCatalog(record, scope) {
   if (skillScope === scope && appliedSkillCatalog === record && appliedGlobalSkills === globalSkillChoices) return;
   const previous = skillScope === scope ? slashMenuEntries()[skillIndex] : null;
   const allowedGlobals = new Set(record.globalPaths);
-  skillChoices = record.backend === "claude" ? [...record.data]
-    : [...globalSkillChoices.filter(skill => allowedGlobals.has(skill.path)), ...record.data];
+  setSkillChoices(record.backend === "claude" ? [...record.data]
+    : [...globalSkillChoices.filter(skill => allowedGlobals.has(skill.path)), ...record.data]);
   if (record.backend === "claude" && isClaude() && modelsScope === modelContextKey() && record.nativeCapabilities) {
     // 同次原生探测也确认压缩/目标能力；历史会话没有完整模型目录时也能打开菜单底部入口。
     setModelDefaults({ ...modelDefaults, nativeCapabilities: record.nativeCapabilities });
   }
-  skillScope = scope; skillIndex = 0;
+  setSkillScope(scope); setSkillIndex(0);
   if (previous) {
     const index = slashMenuEntries().findIndex(entry => entry.type === previous.type
       && (entry.type !== "skill" || skillIdentity(entry.skill) === skillIdentity(previous.skill)));
-    if (index >= 0) skillIndex = index;
+    if (index >= 0) setSkillIndex(index);
   }
-  appliedSkillCatalog = record; appliedGlobalSkills = globalSkillChoices;
-  ++skillRenderVersion; scheduleMessages();
+  setAppliedSkillCatalog(record); setAppliedGlobalSkills(globalSkillChoices);
+  setSkillRenderVersion(skillRenderVersion + 1); scheduleMessages();
 }
 async function readSkillCatalog(scope, payload, force) {
   const key = skillScopeKey(scope), owner = privateInputScope(session), revision = skillCatalogRevision;
@@ -310,9 +197,9 @@ async function readSkillCatalog(scope, payload, force) {
     if (!claude && !catalogUsable({ loadedAt: globalSkillsLoadedAt })) {
       const global = await optionalCachedRead(readCache.get(owner, "skills", "global"), 50);
       if (current() && catalogUsable(global) && Array.isArray(global.data) && global.data.every(validCachedSkill)) {
-        globalSkillChoices = global.data; globalSkillsLoadedAt = global.loadedAt;
-        globalSkillEpoch = typeof global.epoch === "string" ? global.epoch : "";
-        globalSkillsInvalidated = global.invalidated === true;
+        setGlobalSkillChoices(global.data); setGlobalSkillsLoadedAt(global.loadedAt);
+        setGlobalSkillEpoch(typeof global.epoch === "string" ? global.epoch : "");
+        setGlobalSkillsInvalidated(global.invalidated === true);
       }
     }
     const cached = await optionalCachedRead(readCache.get(owner, "skills", key), 50);
@@ -364,7 +251,7 @@ async function refreshSkillCatalogRecord(scope, payload, force) {
       : skillCwdKey(result.cwd) || key;
     // 完整新目录生成后再替换；刷新过程中保留原列表和已选项。
     if (!claude) {
-      globalSkillChoices = nextGlobals; globalSkillsLoadedAt = loadedAt; globalSkillsInvalidated = false;
+      setGlobalSkillChoices(nextGlobals); setGlobalSkillsLoadedAt(loadedAt); setGlobalSkillsInvalidated(false);
     }
     skillScopeAliases.set(scope, resolvedKey);
     skillCatalogs.delete(resolvedKey); skillCatalogs.set(resolvedKey, record);
@@ -401,11 +288,11 @@ async function refreshSkillCatalogRecord(scope, payload, force) {
 }
 export async function loadSkillChoices(scope, payload, { force = false } = {}) {
   if (!force && skillLoading?.scope === scope) return skillLoading.promise;
-  const version = ++skillLoadVersion, selection = selectionVersion, owner = privateInputScope(session);
-  const loading = skillLoading = { scope };
+  const version = setSkillLoadVersion(skillLoadVersion + 1), selection = selectionVersion, owner = privateInputScope(session);
+  const loading = setSkillLoading({ scope });
   if (skillScope !== scope) {
-    skillChoices = payload.backend === "claude" ? [] : [...globalSkillChoices]; skillScope = ""; ++skillRenderVersion;
-    appliedSkillCatalog = appliedGlobalSkills = null;
+    setSkillChoices(payload.backend === "claude" ? [] : [...globalSkillChoices]); setSkillScope(""); setSkillRenderVersion(skillRenderVersion + 1);
+    setAppliedSkillCatalog(setAppliedGlobalSkills(null));
   }
   loading.promise = (async () => {
     try {
@@ -415,15 +302,15 @@ export async function loadSkillChoices(scope, payload, { force = false } = {}) {
         applySkillCatalog(skillCatalogs.get(skillScopeKey(scope)) || record, scope);
       }
     } finally {
-      if (skillLoading === loading) { skillLoading = null; scheduleCatalogRefresh(); }
+      if (skillLoading === loading) { setSkillLoading(null); scheduleCatalogRefresh(); }
     }
   })();
   return loading.promise;
 }
 function invalidateSkillCatalogs() {
-  skillCatalogRevision++; skillCatalogRequests.clear(); skillCatalogRetryAt.clear();
-  globalSkillEpoch = randomId(); globalSkillsInvalidated = true;
-  skillLoading = null; ++skillLoadVersion; messageSkillLoadScope = "";
+  setSkillCatalogRevision(skillCatalogRevision + 1); skillCatalogRequests.clear(); skillCatalogRetryAt.clear();
+  setGlobalSkillEpoch(randomId()); setGlobalSkillsInvalidated(true);
+  setSkillLoading(null); setSkillLoadVersion(skillLoadVersion + 1); setMessageSkillLoadScope("");
   if (globalSkillsLoadedAt) cacheDisplayData("skills", "global", {
     data: globalSkillChoices, loadedAt: globalSkillsLoadedAt, epoch: globalSkillEpoch, invalidated: true
   }, { maxAge: catalogFallbackMs });
@@ -462,24 +349,6 @@ export async function updateSkillMenu() {
         && $("#skill-menu") && !$("#skill-menu").hidden) renderSkillMenu(error.message);
   }
 }
-export function selectSkill(skill) {
-  const query = slashQuery();
-  if (isClaude()) {
-    const prompt = $("#prompt"), command = skill?.command;
-    if (!query || selectedGoal || (prompt.value || "").slice(0, query.start).trim()
-        || skill.backend !== "claude" || typeof command !== "string"
-        || !/^[\p{L}\p{N}_.:-]{1,256}$/u.test(command)) return;
-    // Claude 使用原生 /skill-name 参数文本，不构造 Codex 的 $标记、文件路径或额外系统提示。
-    prompt.setRangeText(`/${command} `, query.start, query.end, "end");
-    rememberDraft(); closeComposerMenus(); updateComposer(); prompt.focus();
-    return;
-  }
-  if (!query || selectedSkills.length >= 16) { if (selectedSkills.length >= 16) notice("最多选择 16 项 Skill", true); return; }
-  const prompt = $("#prompt");
-  prompt.setRangeText("", query.start, query.end, "end");
-  selectedSkills.push({ ...skill, _offset: query.start });
-  renderSelectedSkills(); rememberDraft(); closeComposerMenus(); prompt.focus(); setPromptSelection(prompt, query.start, query.start, true);
-}
 export function selectCompactCommand() {
   const query = slashQuery();
   if (!query || !compactCommandAvailable()) return;
@@ -487,25 +356,6 @@ export function selectCompactCommand() {
   prompt.setRangeText("", query.start, query.end, "end");
   closeComposerMenus(); updateComposer(); prompt.focus();
   void compactContext();
-}
-export function removeAdjacentPromptToken(prompt, direction) {
-  const selection = window.getSelection();
-  if (!selection?.rangeCount || !selection.isCollapsed) return false;
-  const range = selection.getRangeAt(0);
-  if (!prompt.contains(range.startContainer)) return false;
-  const caret = promptBoundaryOffset(prompt, range.startContainer, range.startOffset);
-  const before = promptTokensBeforeBoundary(prompt, range.startContainer, range.startOffset);
-  const adjacent = promptTokenPlacements(prompt).filter(placement => placement.offset === caret
-    && before.has(placement.key) === (direction < 0));
-  const token = direction < 0 ? adjacent.at(-1) : adjacent[0];
-  if (!token) return false;
-  prompt.editHistory?.begin("token");
-  const nextRange = range.cloneRange();
-  token.node.remove();
-  syncSelectedSkillsFromPrompt(prompt); syncPromptTrailingBreak(prompt);
-  selection.removeAllRanges(); selection.addRange(nextRange);
-  rememberDraft(); updateComposer(); closeSkillMenu();
-  return true;
 }
 export function handlePromptInput(event, { preserveCanonical = false } = {}) {
   if (!preserveCanonical) forgetPromptCanonicalText();
@@ -523,6 +373,6 @@ export function handlePromptInput(event, { preserveCanonical = false } = {}) {
   syncPromptTrailingBreak($("#prompt"));
   rememberDraft();
   updateComposer();
-  skillIndex = 0; void updateSkillMenu();
+  setSkillIndex(0); void updateSkillMenu();
   $("#prompt")?.editHistory?.commit();
 }

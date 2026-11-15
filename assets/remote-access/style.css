@@ -885,6 +885,8 @@ input:focus,textarea:focus,.prompt-editor:focus,button:focus-visible{outline:1px
 .user-question-reply+.user-question-reply{margin-top:10px}
 .user-reply-question{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--muted);font-size:.93em;font-weight:400}
 .user-reply-answer{white-space:pre-wrap}
+/* Claude 提问中未作答的题目：沿用问题行的弱化颜色，与已回答内容区分。 */
+.user-reply-answer.unanswered{color:var(--muted)}
 .message-action-space{min-height:26px;width:100%}
 .message-actions{display:flex;align-items:center;gap:6px;min-height:26px;color:var(--muted);font-size:.78571rem}
 .user-message-action{justify-content:flex-end;opacity:0;transition:opacity var(--duration-control)}

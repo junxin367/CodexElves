@@ -3,12 +3,12 @@
 import { confirmAction } from "../../ui/dialog.js";
 import { button, element } from "../../ui/dom.js";
 import { notice } from "../../ui/notice.js";
+import { reloadThread, updateComposer } from "../../core/actions.js";
 import { busy, connected, selectedId, session, stopping, thread } from "../../core/state.js";
 import { randomId } from "../../core/util.js";
 import { api } from "../api.js";
-import { pendingFeedbackReady, updateComposer } from "../composer/composer.js";
-import { reloadThread } from "./history.js";
-import { pending } from "./pending.js";
+import { pendingFeedbackReady } from "../composer/send-state.js";
+import { pending } from "./pending-state.js";
 import { claudeNativeQueue, isClaude, serviceSideThread, threadReadOnly } from "../session/capabilities.js";
 
 export let compactionVersion = 0;
