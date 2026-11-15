@@ -65,6 +65,9 @@ impl DesktopObservers {
         let now = Instant::now();
         self.renew_catalog_interest();
         let mut watches = self.watches.lock().await;
+        if self.projection.lock().await.is_deleted(id) {
+            return;
+        }
         watches.retain(|_, watch| !watch.task.is_finished());
         if let Some(watch) = watches.get(id) {
             *watch.touched.lock().unwrap() = now;

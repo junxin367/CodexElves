@@ -8041,7 +8041,7 @@ test("旧版删除unknown回执使用删除提示且核对时绝不重发", asyn
   h.context.threadDeletionChecks = new Set();
   h.context.api = async path => {
     reads.push(path);
-    return { state: "unknown", result: { message: legacy } };
+    return { requestId: record.id, state: "unknown", result: { message: legacy } };
   };
   vm.runInContext(sourceSection("async function checkThre"), h.context);
   await h.context.checkThreadDeletion(record);
@@ -8077,7 +8077,7 @@ test("旧服务删除回执恢复后只核对原回执，不再次派发删除",
   h.context.threadDeletions.set(h.context.threadDeletionKey(h.target.id), record);
   h.context.api = async path => {
     reads.push(path);
-    return { state: "completed", result: {
+    return { requestId: record.id, state: "completed", result: {
       ok: true, threadId: h.target.id, deleted: true, status: "local_deleted", executionTransport: "app-server-stdio",
     } };
   };
@@ -8088,6 +8088,51 @@ test("旧服务删除回执恢复后只核对原回执，不再次派发删除",
   assert.equal(h.context.threadDeleted(h.target.id), true);
   assert.deepEqual(h.notices, [{ message: "已确认会话永久删除", error: false }]);
   h.assertControlRetained();
+});
+
+test("删除核对拒绝串回执和矛盾成功，始终保留原会话、草稿和请求标识", async () => {
+  for (const override of [
+    { requestId: "different-request" },
+    { state: "pending" },
+    { state: "unknown" },
+    { state: "failed" },
+    { result: { ok: true, deleted: true, threadId: "delete-target", outcomeUnknown: true } },
+    { result: { ok: true, deleted: true, threadId: "another-thread" } },
+  ]) {
+    const h = sidebarDeletionHarness();
+    const record = { id: "original-delete-receipt", threadId: h.target.id, deviceId: "device-a", state: "unknown" };
+    const key = h.context.threadDeletionKey(h.target.id);
+    h.context.threadDeletions.set(key, record);
+    h.context.threadDeletionChecks = new Set();
+    h.context.api = async () => ({ requestId: record.id, state: "completed",
+      result: { ok: true, deleted: true, threadId: h.target.id }, ...override });
+    vm.runInContext(sourceSection("async function checkThre"), h.context);
+    await h.context.checkThreadDeletion(record);
+    assert.equal(h.context.threadDeleted(h.target.id), false);
+    assert.equal(h.context.threadDeletions.get(key).id, record.id);
+    assert.equal(h.context.drafts.get(h.target.id), "删除目标草稿");
+    assert.equal(h.calls.length, 0);
+    h.assertControlRetained();
+  }
+});
+
+test("明确删除失败核对解除锁定，部分清理成功仍移除已删除会话", async () => {
+  for (const outcome of ["failed", "partial"]) {
+    const h = sidebarDeletionHarness();
+    const record = { id: "original-delete-receipt", threadId: h.target.id, deviceId: "device-a", state: "unknown" };
+    const key = h.context.threadDeletionKey(h.target.id);
+    h.context.threadDeletions.set(key, record);
+    h.context.threadDeletionChecks = new Set();
+    h.context.api = async () => ({ requestId: record.id, state: outcome === "failed" ? "failed" : "completed",
+      result: outcome === "failed" ? { ok: false, notSent: true, message: "本次未删除" }
+        : { ok: true, deleted: true, threadId: h.target.id, status: "partial", message: "已删除，清理待完成" } });
+    vm.runInContext(sourceSection("async function checkThre"), h.context);
+    await h.context.checkThreadDeletion(record);
+    assert.equal(h.context.threadDeleted(h.target.id), outcome === "partial");
+    assert.equal(h.context.drafts.has(h.target.id), outcome === "failed");
+    assert.equal(h.calls.length, 0);
+    h.assertControlRetained();
+  }
 });
 
 for (const [label, deletedId, deviceId] of [

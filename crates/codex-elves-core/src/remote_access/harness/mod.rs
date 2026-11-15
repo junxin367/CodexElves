@@ -3,6 +3,7 @@
 mod catalog;
 mod commands;
 mod defaults;
+mod deletion;
 mod desktop;
 mod fast;
 mod pins;
@@ -97,13 +98,20 @@ impl Harness {
     pub fn new(directory: &Path) -> anyhow::Result<Arc<Self>> {
         let (events, receiver) = mpsc::channel(512);
         let audit = Arc::new(execution::Audit::default());
-        let projection = Arc::new(Mutex::new(Projection::default()));
+        let store = Store::open(directory)?;
+        let mut initial_projection = Projection::default();
+        for (id, deletion) in &store.data.deletions {
+            if deletion.state == "deleted" {
+                initial_projection.forget_deleted_thread(id);
+            }
+        }
+        let projection = Arc::new(Mutex::new(initial_projection));
         Ok(Arc::new(Self {
             audit: audit.clone(),
             runtime: Arc::new(Runtime::new(events, audit.clone())),
             catalog: Arc::new(Catalog::default()),
             projection: projection.clone(),
-            store: Mutex::new(Store::open(directory)?),
+            store: Mutex::new(store),
             #[cfg(test)]
             project_codex_home: directory.to_path_buf(),
             controller: OnceLock::new(),
@@ -154,6 +162,32 @@ impl Harness {
                         let Some(service) = weak.upgrade() else { break };
                         // 执行权随引擎加载生命周期变化；已释放的旧标记不能永久屏蔽桌面观察。
                         let generation = frame["_generation"].as_str().unwrap_or("");
+                        if frame["method"] == "thread/deleted"
+                            && generation == service.projection.lock().await.generation
+                        {
+                            if let Some(id) = frame["params"]["threadId"]
+                                .as_str()
+                                .filter(|id| !id.is_empty())
+                            {
+                                // 先发布不可回退的删除事实，再按会话写锁清理；事件线程不能等待正在等 RPC 的写操作。
+                                service.projection.lock().await.push(
+                                    json!({"method":"thread/deleted","params":{"threadId":id}}),
+                                );
+                                service.catalog.observe(&frame).await;
+                                let id = id.to_owned();
+                                let cleanup = service.clone();
+                                execution::spawn_service(
+                                    service.audit.clone(),
+                                    "delete-cleanup",
+                                    async move {
+                                        let lock = cleanup.thread_lock(&id).await;
+                                        let _serial = lock.lock().await;
+                                        cleanup.confirm_thread_deleted(&id).await;
+                                    },
+                                );
+                            }
+                            continue;
+                        }
                         if frame["method"] == "thread/closed"
                             || frame["method"] == "thread/status/changed"
                                 && frame["params"]["status"]["type"] == "notLoaded"
@@ -260,6 +294,11 @@ impl Harness {
         let queues_empty = store.data.queues.values().all(Vec::is_empty);
         let edits_empty = store.data.edits.is_empty();
         let queue_gates_empty = store.data.queue_gates.is_empty();
+        let deletions_confirmed = store
+            .data
+            .deletions
+            .values()
+            .all(|deletion| deletion.state == "deleted");
         drop(store);
         let projection = self.projection.lock().await;
         let threads_safe = projection.threads.values().all(|thread| {
@@ -274,6 +313,7 @@ impl Harness {
         queues_empty
             && edits_empty
             && queue_gates_empty
+            && deletions_confirmed
             && projection.active.is_empty()
             && projection.requests.is_empty()
             && projection.compactions.is_empty()
@@ -288,7 +328,7 @@ impl Harness {
         self.loaded.lock().await.clear();
     }
 
-    async fn thread_lock(&self, id: &str) -> Arc<Mutex<()>> {
+    pub(in crate::remote_access) async fn thread_lock(&self, id: &str) -> Arc<Mutex<()>> {
         self.locks
             .lock()
             .await
@@ -456,6 +496,12 @@ impl Harness {
         if let Some(authorization) = authorization {
             authorization.check().await?;
         }
+        if action != "deleteThread"
+            && let Some(id) = payload["threadId"].as_str()
+            && self.projection.lock().await.is_deleted(id)
+        {
+            return Err(error(410, "会话已永久删除，请刷新会话列表。"));
+        }
         // 用户要求过期后仍能查看和确认已读；已保留的侧边只处理本地内存，不等待失效引擎重连。
         let retained_side = if matches!(
             action,
@@ -469,8 +515,22 @@ impl Harness {
         } else {
             false
         };
-        if !retained_side {
-            self.start().await?;
+        let retained_deletion = action == "deleteThread"
+            && self
+                .store
+                .lock()
+                .await
+                .data
+                .deletions
+                .contains_key(payload["threadId"].as_str().unwrap_or(""));
+        if !retained_side && !retained_deletion {
+            self.start().await.map_err(|failure| {
+                if action == "deleteThread" {
+                    deletion::delete_preflight_failure(failure)
+                } else {
+                    failure
+                }
+            })?;
         }
         let result = match action {
             "events" => {
@@ -523,7 +583,10 @@ impl Harness {
                 self.command(action, payload, authorization).await
             }
         }?;
-        if let Some(authorization) = authorization {
+        // 删除已被原生确认后保留成功回执；HTTP 出口仍检查授权，不能将事后过期写成“未删除”。
+        if let Some(authorization) = authorization
+            && !(action == "deleteThread" && result["deleted"] == true)
+        {
             authorization.check().await?;
         }
         Ok(result)
@@ -600,6 +663,9 @@ impl Harness {
             let Ok(_serial) = lock.try_lock() else {
                 continue;
             };
+            if self.check_deletion_barrier(&id).await.is_err() {
+                continue;
+            }
             if self.projection.lock().await.active.contains_key(&id) {
                 continue;
             }
@@ -690,6 +756,7 @@ impl Harness {
         authorization: &RemoteAuthorization,
     ) -> anyhow::Result<()> {
         authorization.check().await?;
+        self.check_deletion_barrier(id).await?;
         if self.known_side(id).await {
             return self
                 .dispatch_side_queued(id, message, authorization, false)

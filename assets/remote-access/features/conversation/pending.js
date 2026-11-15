@@ -133,6 +133,12 @@ export async function mutate(action, payload, { reliable = false, receiptId = nu
     }
     throw error;
   }
+  // 删除回执必须匹配原请求且具有明确状态；缺字段或串回执不能被当成成功并清理会话。
+  if (action === "deleteThread" && (result?.requestId !== id
+      || !["pending", "unknown", "failed", "completed"].includes(result?.state))) {
+    throw Object.assign(new Error("删除回执不完整或与原请求不匹配，请核对原回执，勿重复删除。"),
+      { receiptId: id, operationState: "unknown", outcomeUnknown: true });
+  }
   if (goalAction) {
     const data = result.result || {};
     const goalSubmission = goalSubmissionState(data.goalSubmission, action);

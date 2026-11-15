@@ -190,6 +190,9 @@ impl Harness {
             flags["unread"] = json!(flags["unread"] == true || unread);
         }
         for row in rows {
+            if projection.is_deleted(row["id"].as_str().unwrap_or("")) {
+                continue;
+            }
             let Ok(mut thread) = normalize_thread(&row) else {
                 continue;
             };

@@ -27,6 +27,7 @@ pub(super) struct Projection {
     pub generation: String,
     generation_index: u64,
     hidden_threads: HashSet<String>,
+    deleted_threads: HashSet<String>,
     pub threads: HashMap<String, Value>,
     pub subagents: super::subagents::SubagentState,
     pub sides: super::sides::SideState,
@@ -51,6 +52,7 @@ impl Default for Projection {
             generation: String::new(),
             generation_index: 0,
             hidden_threads: HashSet::new(),
+            deleted_threads: HashSet::new(),
             threads: HashMap::new(),
             subagents: super::subagents::SubagentState::default(),
             sides: super::sides::SideState::default(),
@@ -70,7 +72,25 @@ impl Default for Projection {
 }
 
 impl Projection {
+    pub fn is_deleted(&self, id: &str) -> bool {
+        self.deleted_threads.contains(id)
+    }
+
+    pub fn forget_deleted_thread(&mut self, id: &str) {
+        // 删除事实跨引擎重连保留；迟到的桌面快照、状态和审批不能复活此 ID。
+        self.deleted_threads.insert(id.to_owned());
+        self.desktop.remove(id);
+        self.clear_side_runtime(id);
+        self.queue_turn_outcomes.remove(id);
+        self.notifications.retain(|entry| entry["threadId"] != id);
+        self.pending_notifications
+            .retain(|_, entry| entry["threadId"] != id);
+    }
+
     pub fn observe_desktop(&mut self, id: &str, snapshot: &Value, events: &Value) {
+        if self.is_deleted(id) {
+            return;
+        }
         let Ok(thread) =
             crate::codex_service::normalize_owner_thread(snapshot, self.threads.get(id))
         else {
@@ -219,7 +239,7 @@ impl Projection {
 
     pub fn push(&mut self, event: Value) {
         if event["method"] == "thread/deleted" {
-            self.forget_compactions(event["params"]["threadId"].as_str().unwrap_or(""));
+            self.forget_deleted_thread(event["params"]["threadId"].as_str().unwrap_or(""));
         }
         self.sequence += 1;
         self.events.push_back((self.sequence, event));
@@ -531,6 +551,9 @@ impl Projection {
             .or_else(|| frame["params"]["thread"]["id"].as_str())
             .unwrap_or("")
             .to_owned();
+        if self.is_deleted(&id) && method != "thread/deleted" {
+            return;
+        }
         let side = self.sides.threads.contains_key(&id);
         if let Some((_, closed)) = self.sides.observe(&frame) {
             if closed {
@@ -881,6 +904,31 @@ fn turn_started_ms(turn: &Value) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn harness_deleted_projection_rejects_late_activity_and_approvals_across_reconnect() {
+        let mut projection = Projection::default();
+        projection.ingest(json!({"method":"thread/status/changed","params":{"threadId":"gone","status":{"type":"active"}}}));
+        projection.ingest(
+            json!({"method":"turn/started","params":{"threadId":"gone","turn":{"id":"turn"}}}),
+        );
+        projection.ingest(json!({"id":1,"method":"item/commandExecution/requestApproval","params":{"threadId":"gone"}}));
+        projection.push(json!({"method":"thread/deleted","params":{"threadId":"gone"}}));
+        assert!(!projection.threads.contains_key("gone"));
+        assert!(!projection.active.contains_key("gone"));
+        assert!(projection.requests_for("gone").is_empty());
+        projection
+            .ingest(json!({"method":"harness/connected","_generation":"new","_generationIndex":1}));
+        let sequence = projection.sequence;
+        projection.ingest(json!({"method":"thread/status/changed","params":{"threadId":"gone","status":{"type":"active"}}}));
+        projection.ingest(json!({"id":2,"method":"item/commandExecution/requestApproval","params":{"threadId":"gone"}}));
+        assert!(projection.is_deleted("gone"));
+        assert!(!projection.threads.contains_key("gone"));
+        assert!(projection.requests_for("gone").is_empty());
+        assert_eq!(projection.sequence, sequence);
+        projection.ingest(json!({"method":"thread/status/changed","params":{"threadId":"control","status":{"type":"idle"}}}));
+        assert!(projection.threads.contains_key("control"));
+    }
 
     #[test]
     fn desktop_edges_incomplete_approvals_do_not_claim_known_empty() {

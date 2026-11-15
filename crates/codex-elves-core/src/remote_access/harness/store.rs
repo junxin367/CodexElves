@@ -80,6 +80,16 @@ pub(super) struct QueueGate {
     pub reason: String,
 }
 
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct Deletion {
+    pub state: String,
+    pub device_id: String,
+    pub request_id: Option<String>,
+    #[serde(default)]
+    pub cleanup_pending: bool,
+}
+
 #[derive(Clone, Default, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub(super) struct Data {
@@ -95,6 +105,7 @@ pub(super) struct Data {
     pub answered_questions: BTreeMap<String, Value>,
     pub thread_devices: BTreeMap<String, String>,
     pub queue_gates: BTreeMap<String, QueueGate>,
+    pub deletions: BTreeMap<String, Deletion>,
 }
 
 pub(super) struct Store {
@@ -114,6 +125,12 @@ impl Store {
             Err(error) => return Err(error.into()),
         };
         // 用户要求重连后可继续操作；已派发但无回执的消息必须待核对，不能重发。
+        // 删除保护按会话持久保存，不能因刷新、换设备或服务重启丢失原操作的未知状态。
+        for deletion in data.deletions.values_mut() {
+            if deletion.state == "pending" {
+                deletion.state = "unknown".into();
+            }
+        }
         for queue in data.queues.values_mut() {
             for message in queue
                 .iter_mut()
@@ -278,6 +295,37 @@ mod tests {
                 "outcome-unknown"
             );
         }
+    }
+
+    #[test]
+    fn harness_store_restart_preserves_delete_identity_and_unknown_protection() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut store = Store::open(directory.path()).unwrap();
+        store
+            .commit(|data| {
+                for state in ["pending", "unknown", "deleted"] {
+                    data.deletions.insert(
+                        state.into(),
+                        Deletion {
+                            state: state.into(),
+                            device_id: "device".into(),
+                            request_id: Some(format!("delete-{state}")),
+                            cleanup_pending: false,
+                        },
+                    );
+                }
+                Ok(())
+            })
+            .unwrap();
+        let reopened = Store::open(directory.path()).unwrap();
+        assert_eq!(reopened.data.deletions["pending"].state, "unknown");
+        assert_eq!(
+            reopened.data.deletions["pending"].request_id.as_deref(),
+            Some("delete-pending")
+        );
+        assert_eq!(reopened.data.deletions["unknown"].state, "unknown");
+        assert_eq!(reopened.data.deletions["deleted"].state, "deleted");
+        assert_eq!(reopened.data.deletions.len(), 3);
     }
 
     #[test]

@@ -1119,6 +1119,14 @@ impl RemoteAccessController {
             if claude::Claude::is_subagent_id(id) {
                 return Err(ApiError::new(403, "子智能体仅支持只读查看").into());
             }
+            let _codex_serial = if !claude::Claude::owns_id(id) {
+                Some(self.harness.thread_lock(id).await.lock_owned().await)
+            } else {
+                None
+            };
+            if !claude::Claude::owns_id(id) {
+                self.harness.check_deletion_barrier(id).await?;
+            }
             // 用户要求侧边继承主会话权限且没有独立切换入口；接口同样禁止保存侧边权限覆盖。
             if self.harness.known_side(id).await {
                 return Err(ApiError::new(409, "侧边会话沿用创建时继承的主会话权限").into());
@@ -1713,8 +1721,10 @@ impl RemoteAccessController {
                 if receipt.payload_hash != digest {
                     return Err(ApiError::new(409, "请求 ID 已用于不同操作"));
                 }
-                let value = receipt_value(receipt);
+                let receipt = receipt.clone();
+                let value = receipt_value(&receipt);
                 drop(auth);
+                let value = self.harness.recover_delete_receipt(&receipt, value).await;
                 self.authorization(device, None)
                     .check()
                     .await
@@ -4281,8 +4291,14 @@ async fn receipt(
         .receipts
         .get(&format!("{}:{id}", device.id))
         .ok_or_else(|| ApiError::new(404, "未找到此请求回执"))?;
-    let value = receipt_value(receipt);
+    let receipt = receipt.clone();
+    let value = receipt_value(&receipt);
     drop(auth);
+    let value = state
+        .controller
+        .harness
+        .recover_delete_receipt(&receipt, value)
+        .await;
     state
         .controller
         .authorization(device, None)
@@ -6220,6 +6236,22 @@ readline.createInterface({input:process.stdin}).on('line',line=>{
   case 'thread/delete':
     if(t?.name==='reject-delete'){output({id:q.id,error:{code:-32001,message:'fixture deletion rejected'}});return;}
     if(t?.name==='busy-delete'){output({id:q.id,error:{code:-32600,message:`thread ${p.threadId} already has an active writer`}});return;}
+    if(fs.existsSync(__dirname+'/delete-policy.json')){
+      const policy=JSON.parse(fs.readFileSync(__dirname+'/delete-policy.json','utf8'));
+      const complete=()=>{
+        if(policy.blockStore){
+          fs.renameSync(__dirname+'/remote-harness-state.json',__dirname+'/harness-before-delete.json');
+          fs.mkdirSync(__dirname+'/remote-harness-state.json');
+        }
+        if(policy.error){output({id:q.id,error:policy.error});return;}
+        if(policy.disconnect){process.exit(0);return;}
+        if(policy.malformed){output({id:q.id,result:null});return;}
+        threads.delete(p.threadId);related.rows=related.rows.filter(row=>row.id!==p.threadId);
+        if(policy.notification)event('thread/deleted',{threadId:p.threadId});
+        output({id:q.id,result:{}});
+      };
+      setTimeout(complete,policy.delayMs||0);return;
+    }
     threads.delete(p.threadId);related.rows=related.rows.filter(row=>row.id!==p.threadId);break;
  case 'thread/readState/update':result={readState:{firstUnread:null,revision:'r2'}};break;
  case 'skills/list':result={data:p.cwds.map(cwd=>({cwd,skills:[],errors:[]}))};break;
@@ -6598,6 +6630,464 @@ readline.createInterface({input:process.stdin}).on('line',line=>{
             2
         );
         controller.harness.enabled.store(false, Ordering::Release);
+        controller.harness.release().await;
+    }
+
+    async fn deletion_fixture() -> (tempfile::TempDir, RemoteAuthorization, String) {
+        let (directory, authorization) = harness_fixture().await;
+        let created = authorization
+            .controller
+            .call_authorized(
+                "create",
+                json!({"projectId":"project-a","prompt":"ready"}),
+                &authorization,
+            )
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(60)).await;
+        (
+            directory,
+            authorization,
+            created["threadId"].as_str().unwrap().to_owned(),
+        )
+    }
+
+    #[tokio::test]
+    async fn harness_delete_concurrent_new_requests_delete_once_and_never_resume() {
+        let (directory, authorization, id) = deletion_fixture().await;
+        std::fs::write(
+            directory.path().join("delete-policy.json"),
+            r#"{"delayMs":150,"notification":true}"#,
+        )
+        .unwrap();
+        let controller = &authorization.controller;
+        let remove = |request: &str| {
+            controller.execute(
+                authorization.device.clone(),
+                request.into(),
+                "deleteThread".into(),
+                json!({"threadId":id}),
+            )
+        };
+        let (first, second) = tokio::join!(remove("delete-first"), remove("delete-second"));
+        assert_eq!(first.unwrap()["result"]["deleted"], true);
+        assert_eq!(second.unwrap()["result"]["deleted"], true);
+        let writes = harness_engine_requests(directory.path());
+        assert_eq!(
+            writes
+                .iter()
+                .filter(|frame| frame["method"] == "thread/delete")
+                .count(),
+            1
+        );
+        assert!(!writes.iter().any(|frame| matches!(
+            frame["method"].as_str(),
+            Some("thread/resume" | "thread/unsubscribe")
+        )));
+        controller.harness.release().await;
+    }
+
+    #[tokio::test]
+    async fn harness_delete_unknown_blocks_new_ids_writes_and_survives_restart() {
+        let (directory, authorization, id) = deletion_fixture().await;
+        let controller = &authorization.controller;
+        std::fs::write(
+            directory.path().join("delete-policy.json"),
+            r#"{"error":{"code":-32603,"message":"lost deletion result"}}"#,
+        )
+        .unwrap();
+        let first = controller
+            .execute(
+                authorization.device.clone(),
+                "delete-unknown".into(),
+                "deleteThread".into(),
+                json!({"threadId":id}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(first["state"], "unknown");
+        let mut other_device = authorization.device.clone();
+        other_device.id = "delete-other-device".into();
+        controller
+            .auth
+            .lock()
+            .await
+            .devices
+            .push(other_device.clone());
+        let second = controller
+            .execute(
+                other_device,
+                "delete-new".into(),
+                "deleteThread".into(),
+                json!({"threadId":id}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(second["state"], "failed");
+        assert_eq!(second["result"]["notSent"], true);
+        let before = harness_engine_requests(directory.path()).len();
+        for action in [
+            "send",
+            "rename",
+            "compact",
+            "pinThread",
+            "setFast",
+            "createSideThread",
+            "setPermissions",
+        ] {
+            assert!(controller.call_authorized(action,
+                json!({"threadId":id,"title":"changed","prompt":"do not send","enabled":true}),
+                &authorization).await.is_err(), "{action}");
+        }
+        assert_eq!(harness_engine_requests(directory.path()).len(), before);
+        let reopened = harness::Harness::new(directory.path()).unwrap();
+        let rejected = reopened
+            .call("deleteThread", json!({"threadId":id}), Some(&authorization))
+            .await
+            .unwrap_err();
+        assert!(rejected.to_string().contains("尚未确认"));
+        assert_eq!(
+            harness_engine_requests(directory.path())
+                .iter()
+                .filter(|frame| frame["method"] == "thread/delete")
+                .count(),
+            1
+        );
+        controller.harness.release().await;
+    }
+
+    #[tokio::test]
+    async fn harness_delete_busy_and_preflight_failures_never_dispatch_delete() {
+        let (directory, authorization, id) = deletion_fixture().await;
+        let controller = &authorization.controller;
+        controller
+            .call_authorized(
+                "send",
+                json!({"threadId":id,"prompt":"wait","clientUserMessageId":"wait-delete"}),
+                &authorization,
+            )
+            .await
+            .unwrap();
+        let busy = controller
+            .execute(
+                authorization.device.clone(),
+                "delete-running".into(),
+                "deleteThread".into(),
+                json!({"threadId":id}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(busy["state"], "failed");
+        assert_eq!(busy["result"]["notSent"], true);
+        assert!(
+            busy["result"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("本次未删除")
+        );
+        let missing = controller
+            .execute(
+                authorization.device.clone(),
+                "delete-missing".into(),
+                "deleteThread".into(),
+                json!({"threadId":uuid::Uuid::new_v4().to_string()}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(missing["state"], "failed");
+        assert_eq!(missing["result"]["notSent"], true);
+        assert!(
+            missing["result"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("删除前校验失败")
+        );
+        assert!(
+            !harness_engine_requests(directory.path())
+                .iter()
+                .any(|frame| matches!(
+                    frame["method"].as_str(),
+                    Some("thread/delete" | "thread/unsubscribe" | "turn/interrupt")
+                ))
+        );
+        controller.harness.release().await;
+    }
+
+    #[tokio::test]
+    async fn harness_delete_native_success_survives_cleanup_failure_and_clears_only_target() {
+        let (directory, authorization, id) = deletion_fixture().await;
+        let controller = &authorization.controller;
+        let control = controller
+            .call_authorized(
+                "create",
+                json!({"projectId":"project-a","prompt":"control"}),
+                &authorization,
+            )
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(60)).await;
+        std::fs::write(
+            directory.path().join("delete-policy.json"),
+            r#"{"blockStore":true}"#,
+        )
+        .unwrap();
+        let first = controller
+            .execute(
+                authorization.device.clone(),
+                "delete-cleanup".into(),
+                "deleteThread".into(),
+                json!({"threadId":id}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(first["state"], "completed");
+        assert_eq!(first["result"]["deleted"], true);
+        assert_eq!(first["result"]["status"], "partial");
+        // 只恢复隔离引擎故意阻塞的空目录；随后重复请求仅重做本地清理，不重放原生删除。
+        std::fs::remove_dir(directory.path().join("remote-harness-state.json")).unwrap();
+        std::fs::rename(
+            directory.path().join("harness-before-delete.json"),
+            directory.path().join("remote-harness-state.json"),
+        )
+        .unwrap();
+        let again = controller
+            .execute(
+                authorization.device.clone(),
+                "delete-cleanup-new".into(),
+                "deleteThread".into(),
+                json!({"threadId":id}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(again["result"]["status"], "local_deleted");
+        let state: Value = serde_json::from_slice(
+            &std::fs::read(directory.path().join("remote-harness-state.json")).unwrap(),
+        )
+        .unwrap();
+        assert!(state["settings"].get(&id).is_none());
+        assert!(state["threadDevices"].get(&id).is_none());
+        assert!(
+            !state["sent"]
+                .as_object()
+                .unwrap()
+                .keys()
+                .any(|key| key.starts_with(&format!("{id}:")))
+        );
+        assert_eq!(state["deletions"][&id]["state"], "deleted");
+        assert!(
+            state["settings"]
+                .get(control["threadId"].as_str().unwrap())
+                .is_some()
+        );
+        assert_eq!(
+            harness_engine_requests(directory.path())
+                .iter()
+                .filter(|frame| frame["method"] == "thread/delete")
+                .count(),
+            1
+        );
+        controller.harness.release().await;
+    }
+
+    #[tokio::test]
+    async fn harness_delete_late_native_confirmation_recovers_only_original_receipt() {
+        let (directory, authorization, id) = deletion_fixture().await;
+        let controller = &authorization.controller;
+        std::fs::write(
+            directory.path().join("delete-policy.json"),
+            r#"{"malformed":true}"#,
+        )
+        .unwrap();
+        let remove = || {
+            controller.execute(
+                authorization.device.clone(),
+                "delete-late".into(),
+                "deleteThread".into(),
+                json!({"threadId":id}),
+            )
+        };
+        assert_eq!(remove().await.unwrap()["state"], "unknown");
+        controller
+            .harness
+            .seed_test_history(json!({"threadId":id,"events":[
+                {"method":"thread/deleted","params":{"threadId":id}}
+            ]}))
+            .await
+            .unwrap();
+        let recovered = tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                let receipt = remove().await.unwrap();
+                if receipt["state"] == "completed" {
+                    break receipt;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(recovered["result"]["deleted"], true);
+        let original = controller.auth.lock().await.receipts
+            [&format!("{}:delete-late", authorization.device.id)]
+            .clone();
+        for changed_field in ["device", "request", "operation"] {
+            let mut altered = original.clone();
+            match changed_field {
+                "device" => altered.device_id = "unrelated-device".into(),
+                "request" => altered.request_id = "unrelated-request".into(),
+                _ => altered.payload_hash = hash(&json!(["rename", {"threadId":id}]).to_string()),
+            }
+            let value = receipt_value(&altered);
+            assert_eq!(
+                controller
+                    .harness
+                    .recover_delete_receipt(&altered, value)
+                    .await["state"],
+                "unknown"
+            );
+        }
+        controller.harness.seed_test_history(json!({"threadId":id,"events":[
+            {"method":"thread/started","params":{"thread":{"id":id,"ephemeral":false,"source":"appServer","threadSource":"user","cwd":directory.path()}}},
+            {"method":"thread/status/changed","params":{"threadId":id,"status":{"type":"active"}}}
+        ]})).await.unwrap();
+        let sidebar = controller
+            .call_authorized("sidebar", json!({}), &authorization)
+            .await
+            .unwrap();
+        assert!(
+            !sidebar["recent"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|row| row["id"] == id)
+        );
+        assert_eq!(
+            harness_engine_requests(directory.path())
+                .iter()
+                .filter(|frame| frame["method"] == "thread/delete")
+                .count(),
+            1
+        );
+        let reopened = harness::Harness::new(directory.path()).unwrap();
+        assert_eq!(
+            reopened
+                .call("deleteThread", json!({"threadId":id}), Some(&authorization))
+                .await
+                .unwrap()["deleted"],
+            true
+        );
+        controller.harness.release().await;
+    }
+
+    #[tokio::test]
+    async fn harness_delete_unsupported_is_known_failure_but_descendant_errors_are_unknown() {
+        for (engine_code, message, expected_state) in [
+            (-32601, "unknown method thread/delete", "failed"),
+            (
+                -32600,
+                "thread descendant already has an active writer",
+                "unknown",
+            ),
+        ] {
+            let (directory, authorization, id) = deletion_fixture().await;
+            std::fs::write(
+                directory.path().join("delete-policy.json"),
+                json!({"error":{"code":engine_code,"message":message}}).to_string(),
+            )
+            .unwrap();
+            let controller = &authorization.controller;
+            let result = controller
+                .execute(
+                    authorization.device.clone(),
+                    "delete-error".into(),
+                    "deleteThread".into(),
+                    json!({"threadId":id}),
+                )
+                .await
+                .unwrap();
+            assert_eq!(result["state"], expected_state);
+            assert_ne!(result["result"]["deleted"], true);
+            controller.harness.release().await;
+        }
+    }
+
+    #[tokio::test]
+    async fn harness_delete_intent_persistence_failure_does_not_dispatch() {
+        let (directory, authorization, id) = deletion_fixture().await;
+        let controller = &authorization.controller;
+        let path = directory.path().join("remote-harness-state.json");
+        let backup = directory.path().join("harness-before-delete.json");
+        std::fs::rename(&path, &backup).unwrap();
+        std::fs::create_dir(&path).unwrap();
+        let result = controller
+            .execute(
+                authorization.device.clone(),
+                "delete-no-storage".into(),
+                "deleteThread".into(),
+                json!({"threadId":id}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(result["state"], "failed");
+        assert_eq!(result["result"]["notSent"], true);
+        assert!(
+            !harness_engine_requests(directory.path())
+                .iter()
+                .any(|frame| frame["method"] == "thread/delete")
+        );
+        std::fs::remove_dir(&path).unwrap();
+        std::fs::rename(&backup, &path).unwrap();
+        assert_eq!(
+            controller
+                .execute(
+                    authorization.device.clone(),
+                    "delete-storage-restored".into(),
+                    "deleteThread".into(),
+                    json!({"threadId":id})
+                )
+                .await
+                .unwrap()["result"]["deleted"],
+            true
+        );
+        controller.harness.release().await;
+    }
+
+    #[tokio::test]
+    async fn harness_delete_disconnect_retains_protection_without_reconnecting_to_delete() {
+        let (directory, authorization, id) = deletion_fixture().await;
+        let controller = &authorization.controller;
+        std::fs::write(
+            directory.path().join("delete-policy.json"),
+            r#"{"disconnect":true}"#,
+        )
+        .unwrap();
+        let result = controller
+            .execute(
+                authorization.device.clone(),
+                "delete-disconnect".into(),
+                "deleteThread".into(),
+                json!({"threadId":id}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(result["state"], "unknown");
+        let repeated = controller
+            .execute(
+                authorization.device.clone(),
+                "delete-after-disconnect".into(),
+                "deleteThread".into(),
+                json!({"threadId":id}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(repeated["state"], "failed");
+        assert_eq!(repeated["result"]["notSent"], true);
+        assert_eq!(
+            harness_engine_requests(directory.path())
+                .iter()
+                .filter(|frame| frame["method"] == "thread/delete")
+                .count(),
+            1
+        );
         controller.harness.release().await;
     }
 

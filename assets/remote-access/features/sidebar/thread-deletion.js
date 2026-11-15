@@ -121,7 +121,7 @@ export async function deleteSidebarThread(item) {
     const claude = claudeThreadId(item.id);
     const confirmed = await confirmAction(claude ? "移除 Claude 会话" : "删除会话",
       claude ? `将从远程列表移除“${record.title}”。Claude 原生会话历史仍保留，项目文件不受影响。`
-        : `将永久删除“${record.title}”及其会话记录，此操作不可恢复。确定删除吗？`,
+        : `将永久删除“${record.title}”、其会话记录及原生子智能体会话，项目文件不受影响。此操作不可恢复。执行中的任务需先停止，其他客户端占用的会话需在对应客户端处理。确定删除吗？`,
       claude ? "移除会话" : "删除会话", true);
     if (!confirmed || session?.device.id !== deviceId || session.readOnly || !connected) return;
     if (threadDeletions.get(key) !== record || threadDeletionConflict(item.id)) return;
@@ -129,7 +129,7 @@ export async function deleteSidebarThread(item) {
     setThreadDeletion(key, record, true);
     renderSidebar(); updateComposer();
     const result = await mutate("deleteThread", { threadId: item.id }, { receiptId: record.id });
-    if (result?.ok !== true || result.deleted !== true || result.threadId !== item.id)
+    if (result?.ok !== true || result.deleted !== true || result.threadId !== item.id || result.outcomeUnknown === true)
       throw Object.assign(new Error(result?.message || "删除结果尚未确认，请核对回执，勿重复删除。"), { outcomeUnknown: true });
     applyThreadDeletion(item.id, deviceId);
     if (session?.device.id === deviceId) {
@@ -157,13 +157,21 @@ export async function checkThreadDeletion(record) {
   try {
     const receipt = await api(`/api/receipts/${record.id}`);
     if (threadDeleted(record.threadId, record.deviceId) || threadDeletions.get(key)?.id !== record.id) return;
+    if (receipt?.requestId !== record.id) {
+      setThreadDeletion(key, { ...record, state: "unknown" });
+      if (session?.device.id === record.deviceId)
+        notice("删除回执与原请求不匹配，原记录已保留；不会重复删除。", true);
+      return;
+    }
     const result = receipt.result;
-    if (result?.ok === true && result.deleted === true && result.threadId === record.threadId) {
+    if (receipt.state === "completed" && result?.outcomeUnknown !== true
+        && result?.ok === true && result.deleted === true && result.threadId === record.threadId) {
       applyThreadDeletion(record.threadId, record.deviceId);
       if (session?.device.id === record.deviceId) notice(result.message || "已确认会话永久删除", result.status === "partial");
-    } else if (receipt.state === "failed" && result?.outcomeUnknown !== true) {
+    } else if (receipt.state === "failed" && result?.outcomeUnknown !== true
+        && result?.ok === false && result?.deleted !== true) {
       setThreadDeletion(key, null);
-      if (session?.device.id === record.deviceId) notice(result?.message || "会话未删除，可重新操作", true);
+      if (session?.device.id === record.deviceId) notice(deletionMessage(result?.message) || "会话未删除，可重新操作", true);
     } else {
       setThreadDeletion(key, { ...record, state: receipt.state === "pending" ? "pending" : "unknown" });
       if (session?.device.id === record.deviceId) notice(deletionMessage(result?.message) || "删除结果尚未确认，请在本机核对；不会自动重试删除。", true);
