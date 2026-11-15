@@ -12051,7 +12051,7 @@ test("队列编辑中选择模型和深度仅更新后续选择，不改写队�
   assert.deepEqual(Object.keys(h.context.editingQueuedMessage), ["state"]);
 });
 
-test("Claude 完整模型 ID 匹配原生别名，显示已选模型和推理等级，重选同模型保留 Max", () => {
+test("Claude 完整模型 ID 匹配原生别名，重选和切换模型保留受支持的思考深度", () => {
   const h = claudeAliasModelMenuHarness();
   h.context.renderModelMenu();
   assert.equal(h.context.currentModel(), h.context.models[0]);
@@ -12068,7 +12068,14 @@ test("Claude 完整模型 ID 匹配原生别名，显示已选模型和推理等
   assert.equal(h.context.selectedEffort, "high");
   h.choices("model-options").find(node => node.dataset.choiceKey === "model:sonnet").onclick();
   assert.equal(h.context.selectedModel, "sonnet");
-  assert.equal(h.context.selectedEffort, "medium");
+  assert.equal(h.context.selectedEffort, "high", "目标模型支持当前深度时，切换不能重置为中");
+  h.choices("model-options").find(node => node.dataset.choiceKey === "model:opus").onclick();
+  assert.equal(h.context.currentEffort(), "high", "切回原模型也应沿用当前深度");
+  h.choices("effort-options").find(node => node.dataset.choiceKey === "effort:max").onclick();
+  h.context.models[1].supportedReasoningEfforts.push({ reasoningEffort: "max" });
+  h.context.renderModelMenu();
+  h.choices("model-options").find(node => node.dataset.choiceKey === "model:sonnet").onclick();
+  assert.equal(h.context.currentEffort(), "max", "目标模型报告支持 Max 时，切换必须保留 Max");
 });
 
 test("Claude 模型确认期间展示待切换选择，拒绝后恢复原模型并保留后来选择", () => {

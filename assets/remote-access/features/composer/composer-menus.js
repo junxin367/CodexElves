@@ -15,7 +15,6 @@ import {
 } from "./options-state.js";
 import { effortLabels } from "./prompt-editor.js";
 import { fitGoalEditor } from "../goal/state.js";
-import { isClaude } from "../session/capabilities.js";
 import { scheduleDesktopObservation } from "../sidebar/list-state.js";
 
 export function closeSkillMenu() {
@@ -73,8 +72,9 @@ export function renderModelMenu() {
   const visibleModels = models.filter(model => `${model.displayName || ""} ${model.model}`.toLowerCase().includes(modelQuery.trim().toLowerCase()));
   for (const model of visibleModels) group.append(choice(model.displayName || model.model, matchedModel === model, () => {
     if (currentModel() !== model) {
-      // 新建会话保留目标模型仍支持的记忆深度；已有 Claude 会话继续沿用原生切换规则。
-      const previousEffort = isClaude() && !creating ? "" : currentEffort();
+      // 用户要求切换模型不丢弃思考深度，Claude 和 Codex 的已有及新建会话共用此规则。
+      // 必须先读取当前深度再更新模型；仅在目标模型未报告支持原深度时才回退到其可用默认值。
+      const previousEffort = currentEffort();
       setSelectedModel(model.model);
       setSelectedEffort(defaultModelEffort(model, previousEffort));
     }
