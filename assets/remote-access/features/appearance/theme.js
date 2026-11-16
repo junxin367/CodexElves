@@ -50,21 +50,7 @@ export function readAppearance() {
     if (["light", "dark"].includes(saved.theme)) value.theme = saved.theme;
     if (["auto", "manual"].includes(saved.themeMode)) value.themeMode = saved.themeMode;
     if (Object.hasOwn(appearanceThemes, saved.themePreset)) value.themePreset = saved.themePreset;
-    if (Number.isInteger(saved.conversationWidth))
-      value.conversationWidth = Math.min(conversationWidthMax, Math.max(conversationWidthMin, saved.conversationWidth));
-    if (typeof saved.sessionFilter === "string" && /^[a-z][a-z0-9:-]{0,255}$/.test(saved.sessionFilter))
-      value.sessionFilter = saved.sessionFilter;
-    else if (Array.isArray(saved.sessionFilter)) {
-      const selected = [...new Set(saved.sessionFilter.filter(id =>
-        typeof id === "string" && /^[a-z][a-z0-9:-]{0,255}$/.test(id)))];
-      value.sessionFilter = !selected.length || selected.includes("all") ? "all" : selected;
-    }
-    if (saved.sessionTypes && typeof saved.sessionTypes === "object") {
-      value.sessionTypes = { codex: saved.sessionTypes.codex !== false, claude: saved.sessionTypes.claude === true };
-    }
-    if (saved.sessionInstances && typeof saved.sessionInstances === "object" && !Array.isArray(saved.sessionInstances))
-      value.sessionInstances = Object.fromEntries(Object.entries(saved.sessionInstances)
-        .filter(([id, enabled]) => id.length <= 160 && typeof enabled === "boolean"));
+    // 用户要求除外观外跨端共用；旧字段仅由迁移流程读取，不能在连接新服务前恢复成设备独有配置。
     for (const key of ["uiFont", "codeFont"]) if (validFontFamily(saved[key])) value[key] = saved[key].trim();
     for (const key of ["uiFontWeight", "codeFontWeight"])
       if ([400, 500, 600].includes(saved[key])) value[key] = saved[key];
@@ -75,7 +61,6 @@ export function readAppearance() {
     if (Number.isInteger(saved.fontSize)) value.fontSize = Math.min(20, Math.max(10, saved.fontSize));
     if (Number.isInteger(saved.fileReadingFontSize))
       value.fileReadingFontSize = Math.min(fileReadingFontMax, Math.max(fileReadingFontMin, saved.fileReadingFontSize));
-    if (projectThreadLimits.includes(saved.projectThreadLimit)) value.projectThreadLimit = saved.projectThreadLimit;
     for (const preset of Object.keys(appearanceThemes)) for (const theme of ["light", "dark"]) {
       for (const name of ["background", "foreground", "accent"]) {
         const color = saved.palettes?.[preset]?.[theme]?.[name]
@@ -90,6 +75,32 @@ export function readAppearance() {
     value.colors = value.palettes[value.themePreset];
   } catch {}
   return value;
+}
+export function localAppearance(value = appearance) {
+  const keys = ["theme", "themeMode", "automaticThemeLightLux", "fontSize", "codeFontSize",
+    "uiFont", "codeFont", "uiFontWeight", "codeFontWeight", "themePreset", "palettes", "colors",
+    "fileReadingFontSize", "backgroundOpacity", "backgroundFit"];
+  return Object.fromEntries(keys.map(key => [key, value[key]]));
+}
+export function legacySharedAppearance() {
+  try {
+    const saved = JSON.parse(localStorage.getItem("codex-elves-web-appearance") || "null"), patch = {};
+    if (!saved || typeof saved !== "object" || Array.isArray(saved)) return patch;
+    if (Number.isInteger(saved.conversationWidth) && saved.conversationWidth >= 320 && saved.conversationWidth <= 3840)
+      patch.conversationWidth = saved.conversationWidth;
+    if (projectThreadLimits.includes(saved.projectThreadLimit)) patch.projectThreadLimit = saved.projectThreadLimit;
+    for (const key of ["sessionTypes", "sessionInstances"]) {
+      if (saved[key] && typeof saved[key] === "object" && !Array.isArray(saved[key]))
+        patch[key] = Object.fromEntries(Object.entries(saved[key]).filter(([id, enabled]) =>
+          /^[a-z][a-z0-9:_-]{0,159}$/.test(id) && typeof enabled === "boolean"));
+    }
+    const filter = saved.sessionFilter;
+    const filters = Array.isArray(filter) ? filter : typeof filter === "string" ? [filter] : [];
+    const ids = [...new Set(filters.filter(id => typeof id === "string" && /^[a-z][a-z0-9:_-]{0,159}$/.test(id)))];
+    if (filters.includes("all")) patch.sessionFilter = "all";
+    else if (ids.length) patch.sessionFilter = ids;
+    return patch;
+  } catch { return {}; }
 }
 export function currentFileReadingFontSize() {
   // 用户已将默认值改为固定 12px；兼容旧版保存的 null，旧范围内的 15/16px 则收敛到 14px。

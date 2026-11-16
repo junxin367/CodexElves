@@ -2,9 +2,9 @@
 
 import { $ } from "../../ui/dom.js";
 import { icon } from "../../ui/icons.js";
+import { notice } from "../../ui/notice.js";
 import { activePopup, renderPopup } from "../../ui/popup.js";
-import { renderSidebar } from "../../core/actions.js";
-import { applyAppearance } from "../appearance/apply.js";
+import { renderSidebar, saveSharedSettings } from "../../core/actions.js";
 import { appearance } from "../appearance/theme.js";
 import { availableSessionInstances, conversationInstanceId, sessionInstanceEnabled } from "../session/instances.js";
 import { projectVisibleThreadCounts, setRecentLimit } from "./list-state.js";
@@ -18,7 +18,7 @@ export function sessionFilterValue(preferences = appearance) {
   for (const value of values) {
     if (typeof value !== "string" || !/^[a-z][a-z0-9:-]{0,255}$/.test(value)) continue;
     if (value.includes(":")) { selected.push(value); continue; }
-    // 旧类型选择优先迁到已启用的原默认实例，其次同类型首个已启用实例。
+    // 旧类型选择优先迁到设为显示的原默认实例，其次同类型首个设为显示的实例。
     // 同类型全部关闭时保留默认实例筛选为空，不能意外扩大到其它类型。
     const instances = availableSessionInstances().filter(instance => instance.backend === value);
     const enabled = instances.filter(instance => sessionInstanceEnabled(instance.id, preferences));
@@ -66,8 +66,11 @@ export function renderSessionFilter() {
     // 用户要求仅一个已开启实例时点击关闭，多个时保留；options 含“全部会话”，故超过两项才表示多个实例。
     keepOpen: options.length > 2,
     action: () => {
-      if (!toggleSessionFilter(option.value)) return;
-      applyAppearance(true); setRecentLimit(40); projectVisibleThreadCounts.clear(); renderSidebar();
+      const next = { ...appearance };
+      if (!toggleSessionFilter(option.value, next)) return;
+      void saveSharedSettings({ sessionFilter: next.sessionFilter }).then(() => {
+        setRecentLimit(40); projectVisibleThreadCounts.clear(); renderSidebar();
+      }).catch(error => notice(error.message, true));
     },
   }));
   if (activePopup?.trigger === trigger) renderPopup();

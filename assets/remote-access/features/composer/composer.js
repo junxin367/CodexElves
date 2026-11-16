@@ -314,7 +314,7 @@ export function updateComposer() {
     || (modelsPromise || selectedId && !thread ? "正在读取模型…" : "模型信息暂不可用");
   $("#model-button").replaceChildren(element("span", "model-name", name));
   if (effort) $("#model-button").append(document.createTextNode(" "), element("span", "model-effort", effortLabels[effort] || effort));
-  $("#model-button").title = modelLoadError || `模型：${name}${effort ? ` · 思考深度：${effortLabels[effort] || effort}` : ""}`;
+  $("#model-button").title = modelLoadError || `模型：${name}${effort ? ` · 思考等级：${effortLabels[effort] || effort}` : ""}`;
   const modelChange = claudePendingSetting("model"), effortChange = claudePendingSetting("effort");
   const nativeChange = !selectedModel && modelChange || !selectedEffort && effortChange;
   if (nativeChange) {

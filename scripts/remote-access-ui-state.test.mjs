@@ -10,6 +10,7 @@ import { menuHorizontalLeft } from "../assets/remote-access/ui/position.js";
 import { localFileReference } from "../assets/remote-access/file-reference.js";
 import { copyLocalInput, isLocalInput, localInputBridge, validateLocalInputs } from "../assets/remote-access/local-inputs.js";
 import { marked, Renderer } from "../assets/remote-access/vendor/marked.esm.js";
+import { defaultSharedSettings } from "../assets/remote-access/features/settings/shared-state.js";
 
 function storage() {
   const records = new Map();
@@ -85,7 +86,68 @@ test("最近置顶分组显隐保存布尔值，与排序和设备授权分别�
 
 // 远程网页已拆分为 app.js 入口与 ui/core/features 模块；app 为全部模块的合并文本，仅用于整体检索。
 const remoteSource = await loadRemoteAppSource();
-const nodeVm = remoteSource.wireVm(rawVm);
+const sharedFixtureServers = new WeakMap();
+function sharedFixtureServer(context) {
+  const key = context.localStorage || context.sharedServer || context.sidebarPreferenceStore || context;
+  const created = !sharedFixtureServers.has(key);
+  if (created) sharedFixtureServers.set(key, defaultSharedSettings());
+  const settings = sharedFixtureServers.get(key);
+  const scope = context.privateInputScope?.(context.session);
+  if (!context.sharedFixtureMigrated) {
+    context.sharedFixtureMigrated = true;
+    if (created) Object.assign(settings.sidebar, context.sidebarFilters || {}, context.sidebarPreferenceStore?.read(scope) || {});
+  }
+  // 新建页用例模拟服务端首次迁移旧记录，后续通过同一个模拟服务共享，不再向浏览器写偏好。
+  if (context.localStorage?.records) for (const [name, text] of context.localStorage.records) {
+    const prefix = `codex-elves-new-chat-settings:${scope}`, modelPrefix = `codex-elves-new-chat-model:${scope}`;
+    if (name.startsWith(prefix)) {
+      const id = name.slice(prefix.length).replace(/^:/, "") || "codex:local";
+      try { const value = JSON.parse(text); if (value?.version === 1) settings.newChat[id] ??= {
+        model: value.model || "", reasoningEffort: value.reasoningEffort || "", permissionMode: value.permissionMode || "" }; } catch {}
+    } else if (name.startsWith(modelPrefix)) {
+      const id = name.slice(modelPrefix.length).replace(/^:/, "") || "codex:local";
+      settings.newChat[id] ??= { model: text };
+    }
+  }
+  return settings;
+}
+function installSharedFixture(context, code) {
+  if (!/\bsharedSettingsState\b|\bsaveSharedSettings\(/.test(code)) return;
+  context.sharedSettingsState ??= {
+    ready: true, saving: false,
+    get scope() { return context.privateInputScope?.(context.session); },
+    get settings() { return sharedFixtureServer(context); }
+  };
+  context.saveSharedSettings ??= patch => {
+    if (context.sharedSaveError || context.session?.readOnly || context.connected === false)
+      return Promise.reject(new Error(context.sharedSaveError || "共享设置需要联网且可写的授权。"));
+    const settings = sharedFixtureServer(context);
+    function merge(target, patch) {
+      for (const [key, value] of Object.entries(patch)) {
+        if (value && typeof value === "object" && !Array.isArray(value)) {
+          if (!target[key] || typeof target[key] !== "object") target[key] = {};
+          merge(target[key], value);
+        } else target[key] = value;
+      }
+    }
+    merge(settings, patch);
+    if (context.appearance) for (const key of ["conversationWidth", "projectThreadLimit", "sessionTypes", "sessionInstances", "sessionFilter"])
+      if (Object.hasOwn(patch, key)) context.appearance[key] = structuredClone(settings[key]);
+    if (patch.sidebar) {
+      context.sidebarPreferenceScope = null;
+      context.restoreSidebarPreferences?.();
+    }
+    context.renderSidebar?.();
+    return Promise.resolve({ settings });
+  };
+}
+const nodeVm = remoteSource.wireVm({
+  ...rawVm,
+  runInContext(code, context, options) {
+    installSharedFixture(context, String(code));
+    return rawVm.runInContext(code, context, options);
+  },
+});
 const app = remoteSource.corpus;
 const composerFast = await readFile(new URL("../assets/inject/composer-fast.js", import.meta.url), "utf8");
 const currentModelCatalogCacheVersion = Number(app.match(/const modelCatalogCacheVersion = (\d+)/)[1]);
@@ -2580,7 +2642,7 @@ test("新会话设置默认仅 Codex、正文950和系统14px字体，兼容旧�
   disk.setItem("codex-elves-web-appearance", JSON.stringify({ fontSize: 17, conversationWidth: 100000,
     uiFont: "Consolas;url(invalid)", colors: { dark: { background: "#232323" } } }));
   const migrated = context.readAppearance();
-  assert.equal(migrated.fontSize, 17); assert.equal(migrated.conversationWidth, 3840);
+  assert.equal(migrated.fontSize, 17); assert.equal(migrated.conversationWidth, 950);
   assert.equal(migrated.uiFont, "");
   assert.equal(migrated.colors.dark.background, "#232323");
   assert.equal(migrated.palettes["vscode-plus"].dark.background, "#1f1f1f");
@@ -2624,9 +2686,10 @@ test("外观恢复默认先说明范围并等待二次确认，取消不修改�
   const h = appearanceResetHarness(), operation = h.control.onclick();
   assert.equal(h.calls.length, 1);
   assert.equal(h.calls[0][0], "confirm");
-  assert.equal(h.calls[0][1], "恢复默认设置");
-  assert.match(h.calls[0][2], /配色.*字体.*字号.*会话宽度.*项目会话数.*会话筛选.*实例开关.*背景图片/);
-  assert.equal(h.calls[0][3], "恢复默认");
+  assert.equal(h.calls[0][1], "恢复默认外观");
+  assert.match(h.calls[0][2], /当前客户端.*配色.*字体.*字号.*背景图片/);
+  assert.doesNotMatch(h.calls[0][2], /会话宽度|项目会话数|会话筛选|实例开关/);
+  assert.equal(h.calls[0][3], "恢复默认外观");
   assert.equal(h.context.remoteBackgroundBusy, false, "等待确认不启动背景删除");
   assert.equal(h.context.appearance, h.original);
   assert.equal(h.context.remoteBackground, h.background);
@@ -2646,11 +2709,12 @@ test("外观恢复默认仅在确认后删除背景并保存默认设置，完�
   assert.deepEqual(h.calls.map(call => call[0]), ["confirm", "sync", "deleteBackground"]);
   assert.equal(h.context.appearance, h.original, "背景删除完成前不提前覆盖原设置");
   h.deletion.resolve(); await operation;
-  assert.equal(h.context.appearance, h.defaults);
+  assert.equal(h.context.appearance.fontSize, h.defaults.fontSize);
+  assert.equal(h.context.appearance.themePreset, h.defaults.themePreset);
   assert.deepEqual(JSON.parse(JSON.stringify(h.context.remoteBackground)), { dataUrl: "", name: "" });
   assert.equal(h.context.projectVisibleThreadCounts.size, 0);
   assert.deepEqual(h.calls.slice(3), [
-    ["defaults", "dark"], ["backend", "codex"], ["apply", true], ["renderSidebar"],
+    ["defaults", "dark"], ["apply", true], ["renderSidebar"],
     ["updateComposer"], ["closeMenu"], ["loadSidebar", null, true], ["syncControls"]
   ]);
   assert.equal(h.context.remoteBackgroundBusy, false);
@@ -2805,8 +2869,8 @@ test("实例筛选可持久保存，旧类型选择迁到启用的默认实例�
   vm.runInContext((sourceSection("const appearancePresets =", "let ambientLightStatus =") + sourceSection("function conversationBackend(", "function privateInputScope(") + sourceSection("function sessionFilterValue(")), context);
   disk.setItem("codex-elves-web-appearance", JSON.stringify({ sessionFilter: "claude:wsl:b",
     sessionInstances: { "codex:local": true, "claude:wsl:a": true, "claude:wsl:b": true } }));
-  const preferences = context.readAppearance();
-  assert.equal(preferences.sessionFilter, "claude:wsl:b");
+  const preferences = { ...context.readAppearance(), ...context.legacySharedAppearance() };
+  assert.deepEqual(Array.from(preferences.sessionFilter), ["claude:wsl:b"]);
   preferences.sessionFilter = "claude";
   assert.deepEqual(Array.from(context.sessionFilterValue(preferences)), ["claude:wsl:a"]);
   preferences.sessionInstances["claude:wsl:a"] = false;
@@ -2914,6 +2978,11 @@ function sessionFilterPopupHarness({ enabled = ["codex:local", "claude:wsl:a", "
     activePopup: null, contextUsageTip: null, recentLimit: 100, projectVisibleThreadCounts: new Map(),
     fitPopup() {}, closeComposerMenus() {}, closeContextUsageTip() {}, closeModelMenu() {},
     applyAppearance(save) { assert.equal(save, true); saved.push(JSON.parse(JSON.stringify(context.appearance))); },
+    saveSharedSettings(patch) {
+      Object.assign(context.appearance, patch);
+      saved.push(JSON.parse(JSON.stringify(patch))); context.renderSidebar();
+      return Promise.resolve();
+    },
     renderSidebar: () => context.renderSessionFilter(), updateComposer() {}, notice() {}, loadSidebar: async () => {},
   });
   vm.runInContext(sourceSection("function closePopup(", "function fitPopup("), context);
@@ -3130,7 +3199,7 @@ test("多选筛选持久恢复时去重，混入全部项时以全部为准，�
     [[], "all"],
   ]) {
     disk.setItem("codex-elves-web-appearance", JSON.stringify({ sessionFilter: saved }));
-    const filter = context.readAppearance().sessionFilter;
+    const filter = context.legacySharedAppearance().sessionFilter || "all";
     assert.deepEqual(Array.isArray(filter) ? Array.from(filter) : filter, expected);
   }
 });
@@ -3722,7 +3791,7 @@ test("实例偏好重新打开后保留全部关闭，草稿及模型上下文�
     session: { claudeInstanceId: "claude:wsl:1" } });
   vm.runInContext((sourceSection("const appearancePresets =", "let ambientLightStatus =") + sourceSection("function conversationBackend(", "function privateInputScope(") + sourceSection("function sessionFilterValue(")), context);
   disk.setItem("codex-elves-web-appearance", JSON.stringify({ sessionInstances: {}, sessionTypes: { codex: true, claude: true } }));
-  context.appearance = context.readAppearance();
+  context.appearance = { ...context.readAppearance(), ...context.legacySharedAppearance() };
   assert.equal(context.sessionInstanceEnabled("codex:local"), false);
   assert.equal(context.newChatBackendOptions().length, 0);
   const a = context.newDraftKey("project", "claude", "claude:wsl:1");
@@ -3842,7 +3911,7 @@ function selectComponentHarness() {
 
 test("统一 Select 的程序同步不触发 change，用户选择只触发一次并拒绝禁用项", () => {
   const h = selectComponentHarness();
-  const node = h.selectControl("weight", "程序字重", [
+  const node = h.selectControl("weight", "界面字重", [
     { value: "400", label: "常规" }, { value: "500", label: "中等" }, { value: "600", label: "半粗", disabled: true },
   ], 400);
   assert.equal(node.value, "400");
@@ -6142,7 +6211,7 @@ test("队列编辑保存只持久化一次最新草稿，再提交可靠写入",
   assert.equal(context.busy, false);
 });
 
-test("取回队列消息重新发送只更新输入，不携带另选的模型和思考深度", async () => {
+test("取回队列消息重新发送只更新输入，不携带另选的模型和思考等级", async () => {
   const { context, submissions } = queuedEditPersistenceHarness();
   context.selectedModel = "gpt-6.1-other";
   context.selectedEffort = "high";
@@ -6946,16 +7015,16 @@ test("Claude 模型和等级变化沿用 Codex 变更行，纯等级调整不显
   const effort = render({ id: "effort", type: "modelChanged", source: "claude",
     fromModel: "claude-opus-5-5", toModel: "claude-opus-5-5", fromEffort: "max", toEffort: "xhigh" });
   assert.match(effort.className, /transcript-event.*model-change/);
-  assert.match(effort.textContent, /思考深度已从 Max 更改为 极高/);
+  assert.match(effort.textContent, /思考等级已从 Max 更改为 极高/);
   assert.doesNotMatch(effort.textContent, /模型已从|command-name|local-command-stdout/);
   assert.match(effort.attributes["aria-label"], /原生实际请求确认/);
   const partial = render({ id: "partial", type: "modelChanged", source: "claude",
     fromModel: null, toModel: "model-b", fromEffort: "high", toEffort: "max" });
-  assert.match(partial.textContent, /思考深度已从 高 更改为 Max/);
+  assert.match(partial.textContent, /思考等级已从 高 更改为 Max/);
   assert.doesNotMatch(partial.textContent, /模型已从|未知模型/, "缺失旧型号不能猜造型号切换");
   const both = render({ id: "both", type: "modelChanged", source: "claude",
     fromModel: "model-a", toModel: "model-b", fromEffort: "high", toEffort: "max" });
-  assert.match(both.textContent, /模型已从 model-a 更改为 model-b，思考深度从 高 更改为 Max/);
+  assert.match(both.textContent, /模型已从 model-a 更改为 model-b，思考等级从 高 更改为 Max/);
   const codex = render({ id: "codex", type: "modelChanged", fromModel: "model-a", toModel: "model-b" });
   assert.equal(codex.textContent, "模型已从 model-a 更改为 model-b");
   assert.match(codex.attributes["aria-label"], /模型切换可能触发上下文压缩/);
@@ -7301,10 +7370,10 @@ function client(disk, extra = {}) {
     sidebar: { preferences: { mode: "list" } },
     sidebarFilters: { mode: null, chats: null, projects: null, pinned: null },
     sidebarPreferenceScope: null,
-    sidebarPreferenceStore: createSidebarPreferenceStore({ storage: disk }),
+    sidebarPreferenceStore: createSidebarPreferenceStore({ storage: disk }), sharedServer: disk,
     privateInputScope: value => value?.device
       ? JSON.stringify([value.device.id, value.device.createdAtMs]) : null,
-    rendered: [], notices: [], bridgeCalls: 0, connected: false,
+    rendered: [], notices: [], bridgeCalls: 0, connected: true,
     mutate: () => { context.bridgeCalls++; throw new Error("CDP 与 CLI 均不可用"); },
     notice: message => context.notices.push(message),
     renderSidebar: () => context.rendered.push(context.sidebarFilters.mode),
@@ -7316,7 +7385,7 @@ function client(disk, extra = {}) {
   return context;
 }
 
-test("CDP、CLI 不可用且连接断开时，实际切换函数仍持久保存并刷新恢复", () => {
+test("侧栏视图通过共享设置保存并刷新恢复，不调用会话引擎", () => {
   const disk = storage(), current = client(disk);
   current.changeSidebarView("project");
   assert.equal(current.sidebarFilters.mode, "project");
@@ -7327,63 +7396,67 @@ test("CDP、CLI 不可用且连接断开时，实际切换函数仍持久保存�
   assert.equal(reopened.bridgeCalls, 0);
 });
 
-test("只读授权允许修改本客户端视图，不调用任何会话写入", () => {
+test("只读授权不能改写所有客户端共用的侧栏视图", async () => {
   const current = client(storage());
   current.session.readOnly = true;
-  current.changeSidebarView("project");
-  current.changeSidebarView("list");
-  assert.equal(current.sidebarFilters.mode, "list");
+  await current.changeSidebarView("project");
+  await current.changeSidebarView("list");
+  assert.equal(current.sidebarFilters.mode, null);
   assert.equal(current.bridgeCalls, 0);
-  assert.equal(current.notices.length, 0);
+  assert.equal(current.notices.length, 2);
 });
 
-test("快速切换以最后一次选择为准，服务器偏好刷新不覆盖本地值", () => {
+test("快速切换以最后一次共享选择为准，不再依赖本地存储", () => {
   const current = client(storage());
   for (const mode of ["project", "list", "project"]) current.changeSidebarView(mode);
   current.sidebar.preferences.mode = "list";
   current.restoreSidebarPreferences();
   assert.equal(current.sidebarFilters.mode, "project");
-  assert.equal(current.sidebarPreferenceStore.read('["device-a",1]').mode, "project");
+  assert.equal(current.sharedSettingsState.settings.sidebar.mode, "project");
+  assert.equal(current.sidebarPreferenceStore.read('["device-a",1]').mode, undefined);
   assert.equal(current.bridgeCalls, 0);
 });
 
-test("本地保存失败保留本页选择并明确提示，不能报成 CDP 故障或撤销切换", () => {
+test("共享设置保存失败保留已确认值并明确提示，不只在本页生效", async () => {
   const disk = storage();
   disk.setItem = () => { throw Object.assign(new Error("quota"), { name: "QuotaExceededError" }); };
-  const current = client(disk);
-  current.changeSidebarView("project");
-  assert.equal(current.sidebarFilters.mode, "project");
-  assert.equal(current.rendered.at(-1), "project");
+  const current = client(disk, { sharedSaveError: "共享设置保存失败" });
+  await current.changeSidebarView("project");
+  assert.equal(current.sidebarFilters.mode, null);
   assert.equal(current.notices.length, 1);
-  assert.match(current.notices[0], /本地保存失败/);
+  assert.match(current.notices[0], /共享设置保存失败/);
   assert.equal(current.bridgeCalls, 0);
 });
 
-test("更换设备授权不继承旧偏好，旧设备重新打开仍能恢复", () => {
+test("同一远程服务的不同设备授权共用侧栏偏好", () => {
   const current = client(storage());
   current.changeSidebarView("project");
   current.session = { device: { id: "device-b", createdAtMs: 1 } };
   current.restoreSidebarPreferences();
-  assert.equal(current.sidebarFilters.mode, null);
+  assert.equal(current.sidebarFilters.mode, "project");
   current.changeSidebarView("list");
   current.session = { device: { id: "device-a", createdAtMs: 1 } };
   current.restoreSidebarPreferences();
-  assert.equal(current.sidebarFilters.mode, "project");
+  assert.equal(current.sidebarFilters.mode, "list");
 });
 
-test("最近置顶分组开关在只读离线时仍保存，刷新及更换授权按本客户端恢复", () => {
+test("最近置顶分组开关在可写时共享，只读与离线不产生本地覆盖", async () => {
   const disk = storage(), current = client(disk);
   current.restoreSidebarPreferences();
   assert.equal(current.sidebarFilters.showPinned, false);
-  current.session.readOnly = true;
-  current.setRecentPinnedVisible(true);
+  await current.setRecentPinnedVisible(true);
   assert.equal(current.sidebarFilters.showPinned, true);
   const reopened = client(disk); reopened.restoreSidebarPreferences();
   assert.equal(reopened.sidebarFilters.showPinned, true);
   reopened.session = { device: { id: "device-b", createdAtMs: 1 } };
   reopened.restoreSidebarPreferences();
-  assert.equal(reopened.sidebarFilters.showPinned, false);
-  reopened.setRecentPinnedVisible(false);
+  assert.equal(reopened.sidebarFilters.showPinned, true);
+  reopened.session.readOnly = true;
+  await reopened.setRecentPinnedVisible(false);
+  assert.equal(reopened.sidebarFilters.showPinned, true);
+  reopened.session.readOnly = false; reopened.connected = false;
+  await reopened.setRecentPinnedVisible(false);
+  assert.equal(reopened.sidebarFilters.showPinned, true);
   assert.equal(current.bridgeCalls + reopened.bridgeCalls, 0);
   assert.equal(current.notices.length, 0);
 });
@@ -7450,12 +7523,12 @@ function recentSidebarHarness({ disk = storage(), showPinned = false } = {}) {
   const selected = [], renders = [];
   context = vm.createContext({
     document, element, Date, Set, Map, selectedId: "running", thread: { id: "running" },
-    session: { device: { id: "device-a", createdAtMs: 1 }, readOnly: true },
+    session: { device: { id: "device-a", createdAtMs: 1 }, readOnly: false },
     sidebar: { recent: [running, pinned, unread, regular], pinnedThreads: [pinned, unread], projects: [],
       preferences: { mode: "list", chats: "updated_at", pinned: "manual", projects: "manual" } },
     sidebarFilters: { mode: null, chats: null, pinned: null, projects: null, showPinned },
     sidebarPreferenceScope: '["device-a",1]',
-    sidebarPreferenceStore: createSidebarPreferenceStore({ storage: disk }), connected: false,
+    sidebarPreferenceStore: createSidebarPreferenceStore({ storage: disk }), connected: true,
     privateInputScope: value => value?.device ? JSON.stringify([value.device.id, value.device.createdAtMs]) : null,
     $: selector => controls.get(selector),
     icon: name => { const node = element("span", "ui-icon"); node.dataset.icon = name; return node; },
@@ -7469,6 +7542,12 @@ function recentSidebarHarness({ disk = storage(), showPinned = false } = {}) {
     sessionTypeVisible: item => !context.enabled || context.enabled.has(item.instanceId),
     projectTypeVisible: () => true, collapsed: new Set(), collapsedSidebarSections: new Set(),
     projectVisibleThreadCounts: new Map(), recentLimit: 40, recentPriorityIds: null,
+    threadDeletions: new Map(),
+    threadDeletionKey: id => JSON.stringify(["device-a", id]),
+    threadDeletionChecks: new Set(), threadDeletionConflict: () => false,
+    independentThreadWindowAvailable: () => false, threadOpenInMenu: () => [],
+    threadMenuOptions: () => [], bindSidebarRowMenu() {},
+    rowMenu: (id, label, options) => Object.assign(element("button", "row-menu-button"), { id, menuOptions: options }),
     recentPriorityKnownIds: new Set(), recentPriorityOpenedAt: 0, recentPrioritySelectionSuppressions: new Set(),
     activePopup: null, fitPopup() {}, renderPopup: () => renders.push(context.activePopup),
     closePopup: () => { context.activePopup = null; },
@@ -7572,7 +7651,7 @@ test("空优先事项仍可开启置顶分组，折叠和切换项目视图不�
   h.context.session.device.id = "device-b";
   h.context.renderSidebar();
   stale.action();
-  assert.equal(h.context.sidebarFilters.showPinned, false, "旧授权菜单不能修改新授权偏好");
+  assert.equal(h.context.sidebarFilters.showPinned, true, "旧菜单不能改写同一服务已经共享的偏好");
 });
 
 // 在单个模块内截取源码片段；省略 end 表示截取到该模块末尾。跨模块片段须分段截取。
@@ -9648,7 +9727,7 @@ test("远程新建首条携带草稿 Fast 布尔值，开启时明确默认模�
   }
 });
 
-test("Codex 新建将已解析的模型、思考深度和权限一并送达，读取期间换项目则取消发送", async () => {
+test("Codex 新建将已解析的模型、思考等级和权限一并送达，读取期间换项目则取消发送", async () => {
   for (const changeProject of [false, true]) {
     const h = sendRecoveryHarness(), c = h.context, defaults = deferred();
     Object.assign(c, { creating: true, selectedId: null, isClaude: () => false,
@@ -10020,7 +10099,7 @@ test("离开会话时只缓存已加载轮次和未见原生正文的成功投�
     transcriptCache: { put: (_device, _id, snapshot, view) => { saved.push({ snapshot, view }); return snapshot; } },
     cacheDisplayData: (_kind, _id, value) => persisted.push(value),
   });
-  vm.runInContext((sourceSection("function rememberTranscr") + "\n" + sourceSection("function leg", "let historyC")), context);
+  vm.runInContext((sourceSection("function rememberTranscr") + "\n" + sourceSection("function legacySentDisplayTurn(", "let historyC")), context);
   context.turns = new Map([["turn-x", turn("turn-x", "x", "已接替消息")], ["latest", turn("latest", "latest-client", "最近一轮")]]);
   context.confirmSendDisplay({ threadId: "main", clientUserMessageId: "x", prompt: "已接替消息" },
     { ok: true, threadId: "main", clientUserMessageId: "x", deliveryState: "accepted", turnId: "turn-x" });
@@ -10067,7 +10146,7 @@ test("升级后恢复旧缓存时剔除旧版补插的提问轮次，真实轮�
     normalizeRelatedView: () => null, syncRelatedSessionLayout() {}, replaceTranscriptEvents() {},
     renderMessages() {}, $: () => null,
   });
-  vm.runInContext((sourceSection("function leg", "let historyC") + "\n" + sourceSection("function restoreTran")), context);
+  vm.runInContext((sourceSection("function legacySentDisplayTurn(", "let historyC") + "\n" + sourceSection("function restoreTran")), context);
   assert.equal(context.restoreTranscript("main"), cached);
   assert.deepEqual([...context.turns.keys()], ["latest", "question-only", "remote-confirmed-turn:p"]);
   assert.deepEqual(texts(), ["最近一轮", "只有提问的真实轮次", "尚未同步的成功消息"]);
@@ -13324,7 +13403,7 @@ test("Claude 新建记住模型和思考等级，重复新建及刷新后继续�
   assert.equal(reopened.context.currentEffort(), "max");
 });
 
-test("Claude 模型、权限和等级按实例及授权隔离，Codex 偏好不串用", () => {
+test("Claude 模型、权限和等级按实例共享，Codex 偏好不串用", () => {
   const a = claudeNewChatPreferenceHarness(), bId = "claude:wsl:other-fixture";
   a.context.rememberNewChatSettings({ model: "gpt-6.1-sol", reasoningEffort: "max", permissionMode: "plan" });
   const b = claudeNewChatPreferenceHarness(a.disk, bId);
@@ -13339,7 +13418,7 @@ test("Claude 模型、权限和等级按实例及授权隔离，Codex 偏好不�
   assert.equal(codex.context.rememberedNewChatModel(), null);
   assert.equal(codex.context.rememberedNewChatSettings().permissionMode, undefined);
   reopened.context.session.device.createdAtMs = 2;
-  assert.equal(reopened.context.rememberedNewChatModel(), null);
+  assert.equal(reopened.context.rememberedNewChatModel().model, "gpt-6.1-sol");
   assert.equal(reopened.context.newClaudePermissionMode(), "");
 });
 
@@ -13411,7 +13490,7 @@ test("Claude 权限按钮恢复新建记忆，已有会话切换权限不覆盖�
   assert.equal(later.button.value, "plan", "已有会话的权限选择不能覆盖新建默认值");
 });
 
-test("Codex 新建按模型记住思考深度，刷新和再次新建不恢复全局 xhigh", () => {
+test("Codex 新建按模型记住思考等级，刷新和再次新建不恢复全局 xhigh", () => {
   const h = codexDefaultModelHarness();
   h.context.renderModelMenu();
   h.choices("effort-options").find(node => node.dataset.choiceKey === "effort:high").onclick();
@@ -13433,7 +13512,7 @@ test("Codex 新建按模型记住思考深度，刷新和再次新建不恢复�
   assert.equal(reopened.context.currentEffort(), "medium");
 });
 
-test("Codex 新建偏好按授权隔离，旧模型记录可迁移，已有会话保持自己的模型和深度", () => {
+test("Codex 新建偏好在同一服务共享，旧模型记录可迁移，已有会话保持自己的模型和深度", () => {
   const h = codexDefaultModelHarness();
   const scope = h.context.newChatPreferenceScope();
   h.disk.setItem(`codex-elves-new-chat-model:${scope}`, "gpt-fixture");
@@ -13445,8 +13524,8 @@ test("Codex 新建偏好按授权隔离，旧模型记录可迁移，已有会�
   assert.equal(h.context.currentEffort(), "max");
   h.context.creating = true; h.context.selectedId = null;
   h.context.session.device.createdAtMs = 2;
-  assert.equal(h.context.rememberedNewChatModel(), null);
-  assert.equal(h.context.rememberedNewChatSettings().permissionMode, undefined);
+  assert.equal(h.context.rememberedNewChatModel().model, "gpt-fixture");
+  assert.equal(h.context.rememberedNewChatSettings().permissionMode, "full-access");
 });
 
 test("Codex 切换模型保留仍受支持的深度，目标模型不支持时才使用其默认值", () => {
@@ -13525,7 +13604,7 @@ test("队列编辑中选择模型和深度仅更新后续选择，不改写队�
   assert.deepEqual(Object.keys(h.context.editingQueuedMessage), ["state"]);
 });
 
-test("Claude 完整模型 ID 匹配原生别名，重选和切换模型保留受支持的思考深度", () => {
+test("Claude 完整模型 ID 匹配原生别名，重选和切换模型保留受支持的思考等级", () => {
   const h = claudeAliasModelMenuHarness();
   h.context.renderModelMenu();
   assert.equal(h.context.currentModel(), h.context.models[0]);
@@ -13656,12 +13735,12 @@ test("Claude 新建默认等级与记住的完整模型 ID 复用同一别名目
   const h = claudeAliasModelMenuHarness();
   Object.assign(h.context, { creating: true, selectedId: null, creationBackend: "claude",
     creationInstanceId: "claude:wsl:fixture", selectedModel: "claude-opus-5-5" });
-  h.context.newChatModels.set("model-device:claude:wsl:fixture", "claude-opus-5-5");
+  h.context.sharedSettingsState.settings.newChat["claude:wsl:fixture"] = { model: "claude-opus-5-5" };
   assert.equal(h.context.rememberedNewChatModel(), h.context.models[0]);
   assert.equal(h.context.currentEffort(), "high");
 });
 
-test("历史当前模型不进入共用目录，点击选择器时读取完整模型和思考深度", async () => {
+test("历史当前模型不进入共用目录，点击选择器时读取完整模型和思考等级", async () => {
   const h = claudeHistoryModelMenuHarness();
   const history = h.context.loadModels();
   assert.equal(h.reads[0].payload.includeAvailable, false, "单纯显示历史不能触发能力初始化");
@@ -14807,7 +14886,7 @@ test("Claude 压缩与发送消息一样触发所选模型切换，选择未变�
   assert.equal(context.selectedEffort, "");
   // 选择与会话当前设置相同：不发切换，也不清除选择。
   assert.deepEqual({ ...await run({ selectedModel: "claude-opus-5-5", selectedEffort: "xhigh" }) }, { threadId: "claude-thread" });
-  // 只改思考深度。
+  // 只改思考等级。
   assert.deepEqual({ ...await run({ selectedEffort: "max" }) }, { threadId: "claude-thread", reasoningEffort: "max" });
   // 换模型时深度一并带上，即使数值恰好与旧模型当前深度相同，避免服务端按“换模型即清空深度”处理。
   assert.deepEqual({ ...await run({ selectedModel: "claude-haiku-5-5", selectedEffort: "xhigh" }) },

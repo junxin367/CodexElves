@@ -8,7 +8,7 @@ import { $ } from "../../ui/dom.js";
 import { notice } from "../../ui/notice.js";
 import {
   loadModels, loadSidebar, receive, renderApprovals, renderSidebar, resolvePending, shell,
-  showWelcome, updateComposer
+  showWelcome, syncSharedSettings, updateComposer
 } from "../../core/actions.js";
 import {
   connected, creating, nativeConnectionVersion, pageLeaving, selectedId, selectionVersion, session,
@@ -94,6 +94,7 @@ export async function reconnectChangedAuthorization() {
   disconnect();
   setPendingNotificationOpen(null);
   setSession(null); setSelectedId(null); setSidebar(null); setThread(null);
+  syncSharedSettings(null);
   turns.clear(); transcriptEvents.clear();
   await connect();
 }
@@ -186,6 +187,7 @@ export function startConnectionPoll(deviceId) {
       if (privateInputScope(current) !== privateInputScope(session)) { await reconnectChangedAuthorization(); return; }
       const wasConnected = connected;
       setSession(current);
+      syncSharedSettings(current);
       setConnection(backendAvailable(current) && stream?.readyState === EventSource.OPEN);
       // 连接在线不等于当前会话已读完；只补失败或未完成的读取，成功后停止补读。
       if (connected && (!wasConnected || selectedThreadReadIncomplete()
@@ -279,6 +281,7 @@ async function connectPage(signal) {
   setAuthenticationRequired(false);
   restoreSmallInputRecoveries();
   postPlatformMessage("authenticated");
+  syncSharedSettings(session);
   setPageLeaving(false);
   setConnected(false); shell(); restoreGoalComposerDrafts();
   void loadSessionInstances().then(() => loadSidebar(null, { fresh: true })).catch(() => {});

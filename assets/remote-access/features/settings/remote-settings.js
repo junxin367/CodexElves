@@ -25,7 +25,7 @@ export function mountRemoteSettings(dialog) {
   const keyFor = value => JSON.stringify([privateInputScope(session), value]);
   // 用户要求正常读取后不显示“已读取”；检测、读取及撤销编辑恢复原文时均留空。
   const dirty = () => current && input.value !== current.content;
-  // 历史会话保留的已卸载实例不能冒充当前安装；本机 Codex 仍允许通过已连接桌面管理全局指令。
+  // 历史会话保留的已卸载实例不能冒充当前安装；本机 Codex 通过独立远程服务管理全局指令。
   const instanceAvailable = id => instances.some(value => value.id === id && environments?.some(environment =>
     environment.id === value.environmentId && environment.user === value.user && !environment.error
       && (value.id === "codex:local" || !!environment.executables?.[value.backend])));
@@ -58,7 +58,7 @@ export function mountRemoteSettings(dialog) {
         environments = result.environments;
         instances = result.instances;
         renderInstances();
-        if (detectionStatus) detectionStatus.textContent = "检测安装位置，未配置的 Claude 回顾默认关闭；不启动模型会话。实例显示开关仅影响当前设备。";
+        if (detectionStatus) detectionStatus.textContent = "检测安装位置，未配置的 Claude 离开期间回顾默认关闭；实例配置与显示此实例开关由同一远程服务的各客户端共用。";
         if (current) status.textContent = instanceAvailable(current.instanceId)
           ? dirty() ? "未保存的草稿" : ""
           : "所选实例暂不可用，草稿已保留。";
@@ -137,6 +137,11 @@ export function mountRemoteSettings(dialog) {
   if (detectionButton) detectionButton.onclick = () => void detect(true);
   update();
   return {
+    refreshInstance(id) {
+      if (!alive() || saving || id && id !== instance.value) return;
+      if (dirty()) { status.textContent = "原生指令已在其他客户端更新，未保存的草稿已保留，请重新读取后合并。"; return; }
+      void read();
+    },
     async show(page) {
       if (!environments) await detect();
       if (page === "instructions" && alive() && !current) await read();
@@ -158,7 +163,7 @@ export function mountClaudeRecapSettings({
   const row = element("label", "appearance-field appearance-notification-row");
   const copy = element("span", "appearance-environment-copy");
   copy.append(element("strong", "", "离开期间回顾"),
-    element("small", "muted", "离开后返回时自动回顾会话进展。关闭后不再生成，已有回顾保留。"));
+    element("small", "muted", "离开后返回时自动回顾会话进展；关闭后保留已有回顾。"));
   const control = element("input", "appearance-notification-switch");
   control.id = "claude-recap-enabled"; control.type = "checkbox";
   control.setAttribute("role", "switch"); control.setAttribute("aria-label", "离开期间回顾");

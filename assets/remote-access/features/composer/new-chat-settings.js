@@ -4,14 +4,14 @@ import { permissionModeKnown, permissionOptions } from "../../permissions.js";
 import { setWorkspaceBranch } from "../../session-files.js";
 import { $ } from "../../ui/dom.js";
 import { notice } from "../../ui/notice.js";
-import { selectThread, updateComposer } from "../../core/actions.js";
+import { saveSharedSettings, selectThread, updateComposer } from "../../core/actions.js";
 import {
   connected, creating, nativeConnectionVersion, selectionToken, selectionVersion, session
 } from "../../core/state.js";
 import { api } from "../api.js";
 import {
   codexCreationDefaultsState, creationBranchRead, creationBranchSnapshot, creationProject,
-  newChatModels, resetNewChatBranch, setCodexCreationDefaultsState, setCreationBranchRead,
+  resetNewChatBranch, setCodexCreationDefaultsState, setCreationBranchRead,
   setCreationBranchSnapshot
 } from "./creation-state.js";
 import { deleteDraft, draftKey, snapshotDraft, storeDraft } from "./drafts.js";
@@ -19,6 +19,7 @@ import { modelForId } from "./model-catalog.js";
 import { instancePermissionCatalogs, modelSettingsVersion } from "./options-state.js";
 import { activeBackend, isClaude, privateInputScope } from "../session/capabilities.js";
 import { activeInstanceId } from "../session/instances.js";
+import { sharedSettingsState } from "../settings/shared-state.js";
 
 export function refreshNewChatBranch() {
   const badge = $("#new-chat-branch");
@@ -77,35 +78,19 @@ export function newChatPreferenceScope() {
 export function rememberedNewChatSettings() {
   const scope = newChatPreferenceScope();
   if (!scope) return {};
-  if (!newChatModels.has(scope)) {
-    let model = "";
-    try { model = localStorage.getItem(`codex-elves-new-chat-model:${scope}`) || ""; } catch {}
-    let settings = { model };
-    try {
-      const saved = JSON.parse(localStorage.getItem(`codex-elves-new-chat-settings:${scope}`) || "null");
-      if (saved?.version === 1 && typeof saved.model === "string"
-          && (saved.reasoningEffort == null || typeof saved.reasoningEffort === "string")
-          && (saved.permissionMode == null || saved.permissionMode === "" || permissionModeKnown(activeBackend(), saved.permissionMode))) {
-        settings = { model: saved.model, reasoningEffort: saved.reasoningEffort || "",
-          permissionMode: saved.permissionMode || "" };
-      }
-    } catch {}
-    newChatModels.set(scope, settings);
-  }
-  const settings = newChatModels.get(scope);
-  // 用户要求 Claude 与 Codex 同样记住三项选择；旧版只保存模型的字符串记录仍可读取，实例之间不串用。
-  return typeof settings === "string" ? { model: settings } : settings || {};
+  // 用户要求多端共用模型、思考与权限记忆；仅使用当前授权服务的快照，旧本地值由首次迁移单独处理。
+  if (sharedSettingsState.ready && sharedSettingsState.scope === privateInputScope(session))
+    return sharedSettingsState.settings.newChat[activeInstanceId()] || {};
+  return {};
 }
 export function rememberNewChatSettings(patch) {
   if (!["codex", "claude"].includes(activeBackend())) return;
   const scope = newChatPreferenceScope();
   if (!scope) return;
-  const settings = { ...rememberedNewChatSettings(), ...patch };
-  newChatModels.set(scope, settings);
-  try {
-    localStorage.setItem(`codex-elves-new-chat-settings:${scope}`, JSON.stringify({ version: 1, ...settings, model: settings.model || "" }));
-    if (settings.model) localStorage.setItem(`codex-elves-new-chat-model:${scope}`, settings.model);
-  } catch {}
+  const owner = privateInputScope(session);
+  void saveSharedSettings({ newChat: { [activeInstanceId()]: patch } }).catch(error => {
+    if (owner === privateInputScope(session)) notice(`新会话偏好未能共享：${error.message}`, true);
+  });
 }
 export function codexCreationDefaultsKey() {
   // 实例模型设置变更后，新建默认值和在途旧读取同时失效，不能继续显示旧模型或已关闭的 Ultra。

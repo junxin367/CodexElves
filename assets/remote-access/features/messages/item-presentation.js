@@ -99,9 +99,9 @@ export function renderTranscriptEvent(item, previous) {
     const effort = value => effortLabels[value] || value;
     // 用户要求沿用 Codex 的紧凑变更行；只改等级也显示，恢复时同配置重设不冒充新的模型切换。
     label = effortChanged && !modelChanged
-      ? `思考深度已从 ${effort(item.fromEffort)} 更改为 ${effort(item.toEffort)}`
+      ? `思考等级已从 ${effort(item.fromEffort)} 更改为 ${effort(item.toEffort)}`
       : (item.type === "modelRerouted" ? `模型已从 ${from} 重新路由到 ${to}` : `模型已从 ${from} 更改为 ${to}`)
-        + (effortChanged ? `，思考深度从 ${effort(item.fromEffort)} 更改为 ${effort(item.toEffort)}` : "");
+        + (effortChanged ? `，思考等级从 ${effort(item.fromEffort)} 更改为 ${effort(item.toEffort)}` : "");
     description = item.source === "claude"
       ? `已根据 Claude 原生实际请求确认${item.remoteInlineEvent ? "，从此处开始使用此配置" : "，此配置用于下方消息"}。`
       : `模型切换可能触发上下文压缩。${item.reason ? ` 原因：${item.reason}` : ""}`;

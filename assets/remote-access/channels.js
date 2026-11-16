@@ -206,7 +206,7 @@ export async function requestRemote(path, options, consume, measurements = chann
     throw notSubmitted("请求参数无效，操作未提交。");
   if (options.signal?.aborted) throw notSubmitted("请求已取消，操作未提交。");
   const pathname = target.pathname;
-  const read = options.method === "GET" && (["/api/session", "/api/channels", "/api/channel-events"].includes(pathname)
+  const read = options.method === "GET" && (["/api/session", "/api/channels", "/api/channel-events", "/api/settings/shared", "/api/settings/conversation-naming"].includes(pathname)
       || /^\/api\/receipts\/[a-zA-Z0-9-]{1,100}$/.test(pathname))
     || options.method === "POST" && (/^\/api\/read\/[a-zA-Z]+$/.test(pathname)
       || ["/api/workspace/context", "/api/workspace/changes", "/api/workspace/change", "/api/workspace/files", "/api/workspace/file",

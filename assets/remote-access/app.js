@@ -31,6 +31,7 @@ import { renderItem } from "./features/messages/items.js";
 import { installMarkdownRefresh } from "./features/messages/media.js";
 import { messageEditor } from "./features/messages/message-edit.js";
 import { installNotificationOpenListener } from "./features/notifications.js";
+import { receiveSharedSettings, saveSharedSettings, syncSharedSettings } from "./features/settings/shared.js";
 import { applyQueuedSendResult, renderQueueArea } from "./features/queue/queue.js";
 import { renderQueuedEditRecoveryControls } from "./features/queue/queued-edit-recovery.js";
 import { restoreQueuedEdits } from "./features/queue/state.js";
@@ -52,6 +53,7 @@ import { loadSidebar, renderSidebar } from "./features/sidebar/list.js";
 // 上层动作须在任何安装函数运行前注册：下层模块经 core/actions.js 调用这些实现，见 docs/remote-access-web-architecture.md。
 registerActions({
   applyQueuedSendResult, closeComposerMenus, loadModels, loadSidebar, loadSkillChoices, refreshSkillCatalog,
+  receiveSharedSettings, saveSharedSettings, syncSharedSettings,
   messageEditor, mutate, receive, reconnectChangedAuthorization, reloadThread, renderApprovals,
   renderGoalStatus, renderItem, renderMessages, renderQueueArea, renderQueuedEditRecoveryControls,
   renderSidebar, requireAuthentication, resolvePending, retryConnectionRecovery, scheduleMessages,

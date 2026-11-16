@@ -114,6 +114,7 @@ impl SessionPermissions {
 }
 
 pub(super) struct ConfigFile {
+    pub instance_id: String,
     pub path: PathBuf,
     pub display: String,
     pub backend: String,
@@ -149,6 +150,7 @@ pub(super) fn config_target(
         return Err(ApiError::new(403, "实例配置目录无效"));
     }
     Ok(ConfigFile {
+        instance_id: instance_id.to_owned(),
         path: root.join(name),
         display: format!("{}/{name}", home.trim_end_matches(['/', '\\'])),
         backend: instance.backend.clone(),
@@ -323,9 +325,14 @@ pub(super) async fn save_settings_file(
             .prepare_dispatch()
             .await
             .map_err(super::authorization_error)?;
-        return permit
+        permit
             .commit(|| save_file(&target.path, text, expected))
-            .map_err(super::authorization_error);
+            .map_err(super::authorization_error)?;
+        authorization
+            .controller
+            .shared_settings
+            .instance_changed(&authorization.controller, &target.instance_id);
+        return Ok(());
     };
     // 用户要求保存原生配置时保留 Linux 权限；不能用 Windows Permissions 经 UNC 重建文件。
     // 只向所属发行版/用户发送一个允许的设置值，文件内容和凭据留在原实例内。
@@ -401,6 +408,10 @@ pub(super) async fn save_settings_file(
                 .unwrap_or("Claude 配置保存失败，请重新读取核对"),
         ));
     }
+    authorization
+        .controller
+        .shared_settings
+        .instance_changed(&authorization.controller, &target.instance_id);
     Ok(())
 }
 

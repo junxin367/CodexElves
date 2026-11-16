@@ -121,6 +121,12 @@ impl Harness {
                 Ok(json!({"ok":true,"threadId":id,"compaction":compaction}))
             }
             "rename" => {
+                // 自动命名仅在原生名称仍与生成前一致时写回；该比较位于会话写锁内，防止覆盖另一端的手动改名。
+                if let Some(expected) = payload["expectedName"].as_str()
+                    && identity["thread"]["name"].as_str().unwrap_or("") != expected
+                {
+                    return Err(error(409, "会话名称已变化，已丢弃自动命名结果"));
+                }
                 let title = required(&payload, "title")?.trim();
                 if title.chars().count() > 200 {
                     return Err(error(400, "标题需为 1–200 个字符"));

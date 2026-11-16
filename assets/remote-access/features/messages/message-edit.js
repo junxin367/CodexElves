@@ -71,7 +71,7 @@ export function updateMessageEditor() {
   edit.send.disabled = locked || unavailable || unsupportedModelSettings || !edit.text.trim();
   edit.cancel.disabled = locked;
   edit.status.textContent = pending ? "正在确认送达，请勿重复发送。" : edit.error
-    || (unsupportedModelSettings ? "当前服务版本不支持编辑消息时切换模型或思考深度，请更新程序后再发送。"
+    || (unsupportedModelSettings ? "当前服务版本不支持编辑消息时切换模型或思考等级，请更新程序后再发送。"
       : unavailable ? "会话状态已变化，暂不能重新发送。可取消后重新编辑。" : "");
   edit.status.hidden = !edit.status.textContent;
 }

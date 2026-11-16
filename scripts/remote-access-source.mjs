@@ -71,6 +71,10 @@ export async function loadRemoteAppSource(root = defaultRoot) {
     return module.text;
   }
   function wire(code, context, runInContext) {
+    if (!Object.hasOwn(context, "syncSharedSettings") && /\bsyncSharedSettings\(/.test(code))
+      context.syncSharedSettings = () => {};
+    if (!Object.hasOwn(context, "selectedEffort") && /\bselectedEffort\b/.test(code))
+      context.selectedEffort = "";
     // 实例设置新增的模型配置版本由入口模块初始化；源码片段测试只加载函数时也从同一初值开始。
     if (!Object.hasOwn(context, "modelSettingsVersion") && /\bmodelSettingsVersion\b/.test(code))
       context.modelSettingsVersion = 0;
@@ -81,6 +85,7 @@ export async function loadRemoteAppSource(root = defaultRoot) {
     })) if (!Object.hasOwn(context, name)) context[name] = value;
     const missing = name => !Object.hasOwn(context, name) && new RegExp(`\\b${name}\\(`).test(code);
     const definitions = [];
+    if (missing("localAppearance")) definitions.push(section("function localAppearance(", "function legacySharedAppearance("));
     for (const [setter, name] of setters) if (missing(setter)) definitions.push(`function ${setter}(value) { return ${name} = value; }`);
     if (missing("closeAppMenus"))
       definitions.push('function closeAppMenus() { if (typeof closeComposerMenus === "function") closeComposerMenus(); }');

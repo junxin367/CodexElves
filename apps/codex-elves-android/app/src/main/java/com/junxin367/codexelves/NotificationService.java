@@ -260,6 +260,42 @@ public final class NotificationService extends Service {
         NotificationIdentity connectionIdentity, long connectionGeneration
     ) {
         return new NotificationStreamClient.Callback() {
+            private long sharedPreferenceRevision = -1;
+
+            @Override
+            public void sharedSettings(JSONObject snapshot) throws java.io.IOException, org.json.JSONException {
+                long revision = snapshot.getLong("revision");
+                NotificationSettings settings = NotificationSettings.parse(
+                    snapshot.getJSONObject("settings").getJSONObject("notifications"));
+                synchronized (IDENTITY_LOCK) {
+                    if (!active() || revision < sharedPreferenceRevision) return;
+                    sharedPreferenceRevision = revision;
+                    NotificationSettings previous = NotificationSettings.read(NotificationService.this);
+                    if (previous.enabled == settings.enabled && previous.approval == settings.approval
+                        && previous.question == settings.question && previous.completed == settings.completed) return;
+                }
+                // 系统授权仍属于此设备；这里只应用同一服务返回的开关与事件类型，身份变化或迟到旧版本不得写入。
+                if (!settings.save(NotificationService.this, IDENTITY_LOCK,
+                        () -> active() && sharedPreferenceRevision == revision)) {
+                    synchronized (IDENTITY_LOCK) {
+                        if (active() && sharedPreferenceRevision == revision)
+                            throw new java.io.IOException("Cannot apply shared notification settings");
+                    }
+                    return;
+                }
+                MAIN.post(() -> {
+                    synchronized (IDENTITY_LOCK) {
+                        NotificationIdentity current = currentIdentity(NotificationService.this);
+                        if (running != NotificationService.this || connectionGeneration != generation
+                            || current == null || !connectionIdentity.digest.equals(current.digest)
+                            || sharedPreferenceRevision != revision) return;
+                        NotificationPublisher.clearDisabled(NotificationService.this);
+                        if (!settings.enabled) stop(NotificationService.this, "disabled", true);
+                        else publish(connectionIdentity.digest, delivery(connectionIdentity.digest));
+                    }
+                });
+            }
+
             @Override
             public boolean active() {
                 synchronized (IDENTITY_LOCK) {

@@ -76,7 +76,7 @@ export function mountInstancePermissions({
   const syncButtons = () => {
     const record = records.get(selected), loading = reading.has(selected), busy = writing.has(selected);
     save.disabled = !allowed() || loading || busy || !record || !Object.keys(changes(record)).length;
-    save.textContent = busy ? "保存中…" : "保存权限";
+    save.textContent = busy ? "正在保存…" : "保存权限";
     save.setAttribute("aria-busy", String(busy));
     reload.disabled = loading || busy;
     instances.disabled = !getInstances().length;
@@ -108,19 +108,19 @@ export function mountInstancePermissions({
     path.textContent = record?.path || "";
     status.textContent = reading.has(selected) ? "正在读取实例权限…" : record?.message || "";
     if (record) {
-      const defaults = { value: "", label: "沿用原生默认" };
+      const defaults = { value: "", label: "使用原生默认" };
       if (record.backend === "codex") {
         addField("批准策略", "approvalPolicy",
-          [defaults, { value: "on-request", label: "按请求" }, { value: "never", label: "从不请求批准" }],
+          [defaults, { value: "on-request", label: "请求批准" }, { value: "never", label: "从不请求批准" }],
           record.draft.approvalPolicy);
         addField("沙盒设置", "sandboxMode", [defaults,
           { value: "read-only", label: "只读" }, { value: "workspace-write", label: "工作区写入" },
-          { value: "danger-full-access", label: "完整访问权限" }],
+          { value: "danger-full-access", label: "完全访问权限" }],
         record.permissionProfile ? "__profile__" : record.draft.sandboxMode, !!record.permissionProfile);
         const hint = element("p", "appearance-hint",
           record.permissionProfile
             ? "当前访问范围包含本界面不支持的配置，请在原生 config.toml 中调整。"
-            : "沙盒控制可访问范围，批准策略控制是否请求确认；完整访问范围与“从不请求批准”分别设置。");
+            : "沙盒控制可访问范围，批准策略控制是否请求批准；“完全访问权限”与“从不请求批准”分别设置。");
         fields.append(hint);
       } else {
         const modes = permissionOptions("claude", record.supportedModes).filter(option => option.value !== "configured");

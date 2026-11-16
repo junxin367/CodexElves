@@ -634,6 +634,10 @@ pub(super) async fn instructions(
             })
             .map_err(super::authorization_error)?;
         (text, exists, revision) = read_instruction(&path)?;
+        state.controller.shared_settings.instance_changed(
+            &state.controller,
+            payload["instanceId"].as_str().unwrap_or(""),
+        );
     }
     authorization
         .check()

@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="notification_approval">需要授权</string>
+    <string name="notification_approval">需要批准</string>
     <string name="notification_question">需要回答</string>
     <string name="notification_completed">执行完成</string>
     <string name="notification_untitled_thread">未命名会话</string>

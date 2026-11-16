@@ -20,6 +20,9 @@ export function loadModels(...args) { return run("loadModels", args); } // featu
 export function loadSidebar(...args) { return run("loadSidebar", args); } // features/sidebar/list.js
 export function loadSkillChoices(...args) { return run("loadSkillChoices", args); } // features/composer/skills.js
 export function refreshSkillCatalog(...args) { return run("refreshSkillCatalog", args); } // features/composer/skills.js
+export function saveSharedSettings(...args) { return run("saveSharedSettings", args); }
+export function syncSharedSettings(...args) { return run("syncSharedSettings", args); }
+export function receiveSharedSettings(...args) { return run("receiveSharedSettings", args); }
 export function messageEditor(...args) { return run("messageEditor", args); } // features/messages/message-edit.js
 export function mutate(...args) { return run("mutate", args); } // features/conversation/pending.js
 export function receive(...args) { return run("receive", args); } // features/conversation/events.js

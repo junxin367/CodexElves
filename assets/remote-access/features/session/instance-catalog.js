@@ -2,10 +2,9 @@
 
 import { $, element } from "../../ui/dom.js";
 import { notice } from "../../ui/notice.js";
-import { loadSidebar, renderSidebar, updateComposer } from "../../core/actions.js";
+import { loadSidebar, renderSidebar, saveSharedSettings, updateComposer } from "../../core/actions.js";
 import { creating, session } from "../../core/state.js";
 import { api } from "../api.js";
-import { applyAppearance } from "../appearance/apply.js";
 import { appearance } from "../appearance/theme.js";
 import { assignCreationBackend, creationInstanceId, setCreationInstanceId } from "../composer/creation-state.js";
 import { setCreationBackend } from "../composer/new-chat.js";
@@ -17,25 +16,28 @@ import {
 } from "./instances.js";
 import { sessionFilterValue } from "../sidebar/filters.js";
 import { projectVisibleThreadCounts } from "../sidebar/list-state.js";
+import { sharedSettingsState } from "../settings/shared-state.js";
 
 function applySessionCatalog(result) {
   if (!Array.isArray(result.instances) || !Array.isArray(result.types)) return;
   setSessionTypes(result.types.filter(kind => typeof kind.id === "string" && typeof kind.label === "string"));
   setSessionInstances(result.instances.filter(instance => typeof instance.id === "string"
     && typeof instance.label === "string" && sessionTypes.some(kind => kind.id === instance.backend)));
-  let changed = migrateSessionInstances(appearance, sessionInstances);
+  applySessionPreferences();
+  renderSessionInstances();
+  if ($("#composer")) { renderSidebar(); updateComposer(); }
+}
+export function applySessionPreferences() {
+  migrateSessionInstances(appearance, availableSessionInstances());
   const filter = sessionFilterValue();
   if (JSON.stringify(appearance.sessionFilter) !== JSON.stringify(filter)) {
-    appearance.sessionFilter = filter; changed = true;
+    appearance.sessionFilter = filter;
   }
-  if (changed) applyAppearance(true);
   if (!sessionInstanceEnabled(creationInstanceId)) {
     const next = newChatBackendOptions()[0];
     if (next && creating) setCreationBackend(next.value);
     else if (next) { setCreationInstanceId(next.value); assignCreationBackend(next.backend); }
   }
-  renderSessionInstances();
-  if ($("#composer")) { renderSidebar(); updateComposer(); }
 }
 export async function loadSessionInstances(force = false) {
   const scope = privateInputScope(session);
@@ -54,22 +56,19 @@ export async function loadSessionInstances(force = false) {
   setSessionInstanceRequest(request);
   return request;
 }
-export function setInstanceDisplay(id, enabled) {
+export async function setInstanceDisplay(id, enabled) {
   if (typeof enabled !== "boolean" || !availableSessionInstances().some(instance => instance.id === id)) return;
-  // 用户要求“在本设备显示”只管理当前设备入口；复用原有实例切换和筛选流程，不停止原生任务。
+  // 用户要求实例显示设置跨端共享；只改显示入口，不停止任一实例的原生任务。
   migrateSessionInstances(appearance, availableSessionInstances());
-  appearance.sessionInstances = { ...appearance.sessionInstances, [id]: enabled };
+  const next = { ...appearance.sessionInstances, [id]: enabled };
+  const patch = { sessionInstances: sharedSettingsState.settings.sessionInstances === null ? next : { [id]: enabled } };
   const filter = sessionFilterValue();
   if (filter !== "all") {
-    const selected = filter.filter(value => sessionInstanceEnabled(value));
-    appearance.sessionFilter = selected.length ? selected : "all";
+    const selected = filter.filter(value => next[value] === true);
+    patch.sessionFilter = selected.length ? selected : "all";
   }
-  if (!sessionInstanceEnabled(creationInstanceId)) {
-    const next = newChatBackendOptions()[0];
-    if (next && creating) setCreationBackend(next.value);
-    else if (next) { setCreationInstanceId(next.value); assignCreationBackend(next.backend); }
-  }
-  applyAppearance(true); projectVisibleThreadCounts.clear(); renderSidebar(); updateComposer();
+  await saveSharedSettings(patch);
+  applySessionPreferences(); projectVisibleThreadCounts.clear(); renderSidebar(); updateComposer();
   void loadSidebar(null, { fresh: true }).catch(error => notice(error.message, true));
 }
 export function renderSessionInstances() {
@@ -88,10 +87,10 @@ export function renderSessionInstances() {
       if (instance.executable) copy.append(element("small", "muted session-instance-path", instance.executable));
       const control = element("input", "appearance-notification-switch");
       control.type = "checkbox"; control.setAttribute("role", "switch");
-      control.dataset.instanceId = instance.id; control.setAttribute("aria-label", `启用 ${instance.label}`);
+      control.dataset.instanceId = instance.id; control.setAttribute("aria-label", `显示此实例：${instance.label}`);
       control.checked = sessionInstanceEnabled(instance.id);
       control.onchange = () => {
-        setInstanceDisplay(instance.id, control.checked);
+        void setInstanceDisplay(instance.id, control.checked).catch(error => { notice(error.message, true); renderSessionInstances(); });
       };
       row.append(copy, control); group.append(row);
     }

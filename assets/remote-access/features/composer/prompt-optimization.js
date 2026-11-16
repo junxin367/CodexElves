@@ -12,7 +12,7 @@ import { api } from "../api.js";
 import { draftKey, rememberDraft } from "./drafts.js";
 import { tokenCount } from "./metrics.js";
 import { currentModelId } from "./model-choice.js";
-import { setPromptSelection, writePromptContent } from "./prompt-editor.js";
+import { effortLabels, setPromptSelection, writePromptContent } from "./prompt-editor.js";
 import { selectedSkills, setSelectedSkills } from "./skill-catalog.js";
 import { pending } from "../conversation/pending-state.js";
 import { messageCopyText } from "../messages/user-content.js";
@@ -115,7 +115,7 @@ export async function openPromptOptimizationSettings() {
     if (!modelControl.value.trim() || !effortControl.value || empty
         || Object.values(draft.prompts).some(text => Array.from(text).length > 20000)) {
       status.textContent = empty ? "各风格系统提示词不能为空"
-        : !modelControl.value.trim() ? "请选择模型或输入模型名称" : "请检查思考深度及模板长度（最多 20000 字）";
+        : !modelControl.value.trim() ? "请选择模型或输入模型名称" : "请检查思考等级及模板长度（最多 20000 字）";
       status.classList.add("error-text"); return;
     }
     const settings = { ...draft, model: modelControl.value, reasoningEffort: effortControl.value,
@@ -163,8 +163,8 @@ export async function openPromptOptimizationSettings() {
       return value && Array.from(value).length <= 256 && !value.includes("\0")
         ? { value, label: value, description: "使用此模型名称" } : null;
     };
-    effortControl = selectControl("prompt-optimization-effort", "优化思考深度", [], "");
-    const effortLabels = { low: "轻度", medium: "中", high: "高", xhigh: "极高", max: "最高" };
+    effortControl = selectControl("prompt-optimization-effort", "优化思考等级", [], "");
+    // 用户要求同一思考等级只有一个展示名称；与输入区、实例设置及模型切换提示共用同一映射，Max 保留原名。
     const syncEffort = preferred => {
       const configured = available.find(model => model.value === modelControl.value)?.efforts;
       const name = modelControl.value.toLowerCase().split("/").at(-1);
@@ -183,7 +183,7 @@ export async function openPromptOptimizationSettings() {
     contextControl.setAttribute("aria-label", "优化时附带最近一轮上下文");
     const context = element("label", "prompt-optimization-context");
     context.append(element("span", "", "优化时附带"), contextControl);
-    field("模型", modelControl); field("思考深度", effortControl);
+    field("模型", modelControl); field("思考等级", effortControl);
     field("优化风格", styleControl); field("最近一轮上下文", context);
     const promptArea = element("div", "prompt-optimization-settings-prompt");
     const promptHeader = element("div", "prompt-optimization-prompt-heading"), promptTitle = element("span");

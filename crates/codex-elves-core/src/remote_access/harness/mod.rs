@@ -5,6 +5,7 @@ mod commands;
 mod defaults;
 mod deletion;
 mod fast;
+mod naming;
 mod pins;
 mod projection;
 mod projects;

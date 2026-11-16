@@ -10,7 +10,7 @@ import {
   automaticThemeLuxShift, automaticThemeShiftProbe, automaticThemeStableMs,
   beginThemeDiagnosticTransition, clearThemeDiagnosticTimers, currentAutomaticThemeLightLux,
   currentFileReadingFontSize, defaultCodeFont, defaultUiFont, finishThemeDiagnosticTransition,
-  fontStack, mixColor, observeAutomaticThemeShift, observeThemeLight, readAppearance,
+  fontStack, localAppearance, mixColor, observeAutomaticThemeShift, observeThemeLight, readAppearance,
   readRemoteBackground, recordThemeDiagnostic, remoteBackground, remoteBackgroundDataPattern,
   remoteBackgroundOperation, resetAutomaticThemeCompensation, setAmbientLightStatus, setAppearance,
   setAppearanceTransitionTimer, setAutomaticThemeCandidate, setAutomaticThemeLuxShift,
@@ -168,7 +168,7 @@ export function applyAppearance(save = false) {
   $('meta[name="theme-color"]')?.setAttribute("content", background);
   syncRemoteBackground();
   if (save) {
-    try { localStorage.setItem("codex-elves-web-appearance", JSON.stringify(appearance)); }
+    try { localStorage.setItem("codex-elves-web-appearance", JSON.stringify(localAppearance())); }
     catch { notice("外观已应用，但浏览器不允许保存；重新打开页面后将恢复默认。", true); }
   }
   resizeComposerInput();
@@ -219,6 +219,8 @@ export function startAppearance() {
 export function installSidePanelAppearanceSync() {
   window.addEventListener("storage", event => {
     if (!workspaceSidePanel || event.key !== "codex-elves-web-appearance") return;
-    setAppearance(readAppearance()); applyAppearance();
+    const shared = Object.fromEntries(["conversationWidth", "projectThreadLimit", "sessionTypes", "sessionInstances", "sessionFilter"]
+      .map(key => [key, appearance[key]]));
+    setAppearance({ ...readAppearance(), ...shared }); applyAppearance();
   });
 }

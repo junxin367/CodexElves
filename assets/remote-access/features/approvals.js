@@ -142,7 +142,7 @@ export function renderApprovals() {
     const toolApproval = request.method === "mcpServer/elicitation/request" ? mcpToolApprovalPresentation(request.params) : null;
     const nativeDialog = request.params?.nativeDialog;
     if (nativeDialog) {
-      const kind = nativeDialog.kind === "model" ? "模型" : "思考深度";
+      const kind = nativeDialog.kind === "model" ? "模型" : "思考等级";
       const planDialog = nativeDialog.kind === "plan";
       const rewindDialog = nativeDialog.kind === "rewind";
       const title = nativeDialog.kind === "unknown" ? "Claude 正在等待本机确认"

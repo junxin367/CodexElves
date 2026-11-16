@@ -3,8 +3,9 @@
 import { handleRemoteChannelEvent } from "../../channels.js";
 import { receiveDiagnosticRequest } from "../../diagnostics.js";
 import { notice } from "../../ui/notice.js";
+import { receiveConversationNaming } from "../settings/conversation-naming.js";
 import {
-  loadSidebar, renderApprovals, renderGoalStatus, requireAuthentication, resolvePending,
+  loadSidebar, receiveSharedSettings, renderApprovals, renderGoalStatus, requireAuthentication, resolvePending,
   scheduleMessages, selectThread, updateComposer
 } from "../../core/actions.js";
 import {
@@ -127,6 +128,15 @@ function receiveClaudeHistory(params) {
 export function receive(event) {
   if (handleRemoteChannelEvent(event)) return;
   const rawParams = event.params || {};
+  if (event.method === "remote/settingsChanged") { receiveSharedSettings(rawParams); return; }
+  if (event.method === "remote/conversationNaming") {
+    receiveConversationNaming(rawParams);
+    if (rawParams.state === "completed") {
+      scheduleSidebarRefresh();
+      if (rawParams.threadId === selectedId) scheduleReload();
+    }
+    return;
+  }
   const eventThreadId = rawParams.threadId ?? rawParams.conversationId ?? rawParams.thread?.id;
   if (event.method === "claude/history/updated") {
     receiveClaudeHistory(rawParams);

@@ -1,5 +1,5 @@
-// 用户确认的实例设置：设备显示与原生常规配置分开；模型、思考和扩展页面共用实例选择及请求隔离。
-import { $, button, element } from "../../ui/dom.js";
+// 用户确认的实例设置：共享的显示开关与原生常规配置分开；模型、思考和扩展页面共用实例选择及请求隔离。
+import { button, element } from "../../ui/dom.js";
 import { icon } from "../../ui/icons.js";
 import { selectControl, setSelectOptions } from "../../ui/select.js";
 import { connected, session } from "../../core/state.js";
@@ -11,6 +11,8 @@ import { activeInstanceId, availableSessionInstances, sessionInstanceEnabled } f
 import { loadSessionInstances, setInstanceDisplay } from "../session/instance-catalog.js";
 import { invalidateModelSettings, selectedEffort, setSelectedEffort } from "../composer/options-state.js";
 import { effortLabels } from "../composer/prompt-editor.js";
+import { sharedSettingsWritable, subscribeSharedSettings } from "./shared-state.js";
+import { notice } from "../../ui/notice.js";
 
 const sections = {
   general: "会话实例", models: "模型与思考", skills: "Skills", mcp: "MCP", hooks: "钩子"
@@ -25,6 +27,7 @@ export const settingsNavigation = [
   { id: "agents", label: "智能体", items: [
     { id: "types", label: "会话实例", icon: "allSessions" },
     { id: "models", label: "模型与思考", icon: "model" },
+    { id: "naming", label: "会话命名", icon: "edit" },
     { id: "permissions", label: "权限", icon: "shield" },
     { id: "instructions", label: "自定义指令", icon: "edit" }
   ] },
@@ -40,8 +43,8 @@ export const settingsNavigation = [
 ];
 export const instanceSettingPages = [
   { id: "types", label: "会话实例", section: "general", description: "按实例管理常规能力和原生配置。" },
-  { id: "models", label: "模型与思考", section: "models", description: "按实例设置默认选项与思考等级。" },
-  { id: "skills", label: "Skills", section: "skills", description: "查看和管理所选实例的技能。" },
+  { id: "models", label: "模型与思考", section: "models", description: "设置所选实例的默认模型与默认思考等级。" },
+  { id: "skills", label: "Skills", section: "skills", description: "查看和管理所选实例的 Skills。" },
   { id: "mcp", label: "MCP", section: "mcp", description: "查看和管理所选实例的 MCP 服务。" },
   { id: "hooks", label: "钩子", section: "hooks", description: "查看和管理所选实例的原生钩子。" }
 ];
@@ -60,9 +63,9 @@ function fieldCopy(label, description) {
 }
 function switchControl(label, value) {
   const control = element("input", "appearance-notification-switch");
-  // 缺少显式值表示继承原生默认；使用原生混合态及对应无障碍语义，不能读成“关闭”。
+  // 缺少显式值时使用原生默认；使用原生混合态及对应无障碍语义，不能读成“关闭”。
   control.type = "checkbox"; control.setAttribute("role", value == null ? "checkbox" : "switch");
-  control.setAttribute("aria-label", value == null ? `${label}，继承原生默认` : label);
+  control.setAttribute("aria-label", value == null ? `${label}，使用原生默认` : label);
   control.checked = value === true; control.indeterminate = value == null;
   return control;
 }
@@ -75,7 +78,8 @@ function section(parent, label, backend = null) {
   node.append(heading, card); parent.append(node);
   return card;
 }
-const inherit = { value: "", label: "跟随实例默认" };
+// 用户要求默认状态统一口径；实例原生配置的空值称“使用原生默认”，模型能力的默认值单独注明来源。
+const inherit = { value: "", label: "使用原生默认" };
 const booleanOptions = [inherit, { value: "true", label: "开启" }, { value: "false", label: "关闭" }];
 const compactOptions = [inherit, { value: "auto", label: "自动" },
   ...[100000, 200000, 400000, 600000, 800000, 1000000].map(value =>
@@ -87,7 +91,7 @@ export function mountInstanceSettingsPage({ page, section: name, getSelectedInst
   setSelectedInstance = () => {} }) {
   const scope = privateInputScope(session);
   let disposed = false, selected = "", record = null, detecting = false, loading = false, saving = false, needsRead = false;
-  let generation = 0, readController = null, message = "";
+  let generation = 0, readController = null, message = "", externalRefresh = false;
   const alive = () => !disposed && page.isConnected && scope === privateInputScope(session);
   const writable = () => alive() && connected && session && !session.readOnly && !record?.readOnly
     && !detecting && !loading && !saving && !needsRead && !!record
@@ -103,11 +107,11 @@ export function mountInstanceSettingsPage({ page, section: name, getSelectedInst
     name === "general" ? "当前会话实例" : `${sections[name]}的会话实例`, [], "", "",
     option => [option?.icon ? brand(option.icon) : icon("allSessions"),
       element("span", "select-label", option?.label || "请选择会话实例"), icon("chevron")]);
-  targetRow.append(element("span", "", "当前实例"), instances); head.append(targetRow);
-  const display = switchControl("在本设备显示", false);
+  targetRow.append(element("span", "", "会话实例"), instances); head.append(targetRow);
+  const display = switchControl("显示此实例", false);
   if (name === "general") {
     const row = element("label", "appearance-field");
-    row.append(fieldCopy("在本设备显示", "仅影响此设备，不会停止正在执行的任务。"), display);
+    row.append(fieldCopy("显示此实例", "所有客户端共用此开关，不会停止正在执行的任务。"), display);
     head.append(row);
   }
   const detect = button("重新检测实例", "重新检测会话实例", () => void show(true), "text-button");
@@ -125,8 +129,9 @@ export function mountInstanceSettingsPage({ page, section: name, getSelectedInst
     reload.disabled = detect.disabled || loading || !currentInstance() || !!currentInstance().error;
     display.checked = sessionInstanceEnabled(selected);
     display.indeterminate = !currentInstance();
-    // 设备显示是本地偏好，不等待原生配置读取；实例检测或保存期间仍锁定目标。
-    display.disabled = !alive() || detecting || saving || !currentInstance();
+    // 显示开关来自服务端共享偏好，不等待原生配置读取；实例检测或保存期间仍锁定目标。
+    display.disabled = !alive() || detecting || saving || !currentInstance()
+      || !connected || !sharedSettingsWritable(session);
     status.textContent = detecting ? "正在检测会话实例…" : loading ? "正在读取实例设置…" : saving ? "正在保存…" : message;
     for (const control of controls) control.disabled = !writable() || control.settingsUnsupported === true;
   }
@@ -134,7 +139,7 @@ export function mountInstanceSettingsPage({ page, section: name, getSelectedInst
     const row = element("label", "appearance-field");
     const control = switchControl(label, value);
     control.id = `settings-${name}-${key}`; control.settingsUnsupported = unsupported;
-    const suffix = value == null ? " 当前继承原生默认，未设置显式开关值。" : "";
+    const suffix = value == null ? " 当前使用原生默认设置。" : "";
     row.append(fieldCopy(label, `${description || ""}${suffix}`), control);
     control.onchange = () => void save({ [key]: control.checked });
     controls.add(control); card.append(row);
@@ -148,7 +153,7 @@ export function mountInstanceSettingsPage({ page, section: name, getSelectedInst
     control.onchange = () => {
       const settings = { [key]: transform(control.value) };
       if (name === "models" && key === "model" && record.backend === "codex") {
-        // 切换 Codex 全局默认模型时恢复模型默认深度，避免把旧模型的专属等级带给新模型。
+        // 切换 Codex 实例默认模型时恢复模型默认思考等级，避免把旧模型的专属等级带给新模型。
         settings.reasoningEffort = null;
       }
       void save(settings);
@@ -160,7 +165,7 @@ export function mountInstanceSettingsPage({ page, section: name, getSelectedInst
     const card = section(content, `${backend === "claude" ? "Claude" : "Codex"} 常规设置`, backend);
     if (backend === "codex") {
       for (const [key, label, description] of [
-        ["todo", "任务清单（Todo）", "允许 Codex 通过原生计划维护任务进度。"],
+        ["todo", "任务清单（Todo）", "允许 Codex 创建任务清单并更新任务进度。"],
         ["memories", "记忆", "在后续会话中使用实例已有的记忆。"],
         ["multiAgent", "子智能体", "允许 Codex 调用子智能体处理任务。"],
         ["goals", "目标模式", "为持续任务设置目标并跟踪进度。"]
@@ -169,7 +174,7 @@ export function mountInstanceSettingsPage({ page, section: name, getSelectedInst
         "仅修改所选实例的原生配置，新会话或重新加载后生效。"));
     } else {
       addSwitch(card, "awaySummaryEnabled", "离开期间回顾",
-        "离开后返回时自动回顾进展，关闭后已有回顾保留。", values.awaySummaryEnabled);
+        "离开后返回时自动回顾会话进展；关闭后保留已有回顾。", values.awaySummaryEnabled);
       addSelect(card, "promptSuggestionEnabled", "输入建议", "根据会话进展提供后续输入建议。",
         booleanOptions, boolValue(values.promptSuggestionEnabled), apiValue,
         record.capabilities?.promptSuggestions !== true);
@@ -189,10 +194,10 @@ export function mountInstanceSettingsPage({ page, section: name, getSelectedInst
   }
   function renderModels() {
     const values = record.settings;
-    const card = section(content, "新会话默认值");
+    const card = section(content, "实例默认值");
     const models = record.models || [];
-    addSelect(card, "model", "默认模型", record.backend === "codex" ? "切换后思考等级恢复为模型默认。" : "",
-      [{ value: "", label: "跟随实例默认" },
+    addSelect(card, "model", "默认模型", record.backend === "codex" ? "切换默认模型后，默认思考等级恢复为“使用模型默认”。" : "",
+      [inherit,
         ...models.map(model => ({ value: model.model, label: model.displayName || model.model }))],
       values.model || "", value => value === "" ? null : value);
     const modelId = values.model || record.effectiveModel;
@@ -202,14 +207,16 @@ export function mountInstanceSettingsPage({ page, section: name, getSelectedInst
       .filter(effort => effort.reasoningEffort !== "ultra" || values.ultraReasoningEnabled === true);
     if (record.backend === "codex") addSelect(card, "reasoningEffort",
         "默认思考等级", "可用等级由当前模型能力决定。",
-        [{ value: "", label: "跟随模型默认" }, ...efforts.map(effort =>
+        [{ value: "", label: "使用模型默认" }, ...efforts.map(effort =>
           ({ value: effort.reasoningEffort, label: effortLabels[effort.reasoningEffort] || effort.reasoningEffort }))],
         values.reasoningEffort || "", apiValue, !model);
     else content.append(element("p", "appearance-hint",
-      "尚未确认当前 Claude CLI 的全局思考等级配置，继续在会话输入区选择。"));
+      "尚未确认当前 Claude CLI 的默认思考等级配置，请在会话输入区选择。"));
     if (!model) content.append(element("p", "appearance-hint",
-      "当前模型未出现在实例目录中，请选择可用模型或恢复实例默认。"));
-    content.append(element("p", "appearance-hint", "已有会话保留各自的模型与思考设置。"));
+      "当前模型未出现在实例目录中，请选择可用模型或选择“使用原生默认”。"));
+    // 实例默认值与输入区记住的选择是不同来源；明确既有优先级，不能把此处描述为覆盖全部新会话选择。
+    content.append(element("p", "appearance-hint",
+      "新会话优先使用输入区已记住且仍可用的模型与思考等级，没有可用选择时使用实例默认值。已有会话保留各自设置。"));
     if (record.backend === "codex") {
       const reasoning = section(content, "思考等级");
       addSwitch(reasoning, "ultraReasoningEnabled", "开放 Ultra 思考等级",
@@ -220,7 +227,7 @@ export function mountInstanceSettingsPage({ page, section: name, getSelectedInst
     const inventory = record.inventory || {};
     if (name === "hooks") {
       const card = section(content, "钩子设置");
-      addSwitch(card, "enabled", "启用钩子", "按此实例的原生钩子配置执行。", inventory.enabled);
+      addSwitch(card, "enabled", "开启钩子", "按所选实例的原生钩子配置执行。", inventory.enabled);
     }
     if (inventory.message) content.append(element("p", "appearance-hint", inventory.message));
     const rows = Array.isArray(inventory.data) ? inventory.data : [];
@@ -228,12 +235,12 @@ export function mountInstanceSettingsPage({ page, section: name, getSelectedInst
       content.append(element("p", "appearance-hint", inventory.error || `所选实例尚未返回${sections[name]}。`));
       return;
     }
-    const card = section(content, `当前实例的 ${sections[name]}`);
+    const card = section(content, `所选实例的 ${sections[name]}`);
     for (const value of rows) {
       const row = element("div", "appearance-field");
       const inherited = value.enabled == null && (value.canToggle === true || Object.hasOwn(value, "enabled"));
       const description = [value.description || value.transport,
-        inherited && value.canToggle === true ? "继承原生默认；切换后保存显式开关值。" : ""].filter(Boolean).join(" · ");
+        inherited && value.canToggle === true ? "使用原生默认；切换后保存所选状态。" : ""].filter(Boolean).join(" · ");
       row.append(fieldCopy(value.name || value.id || value.path, description));
       if (value.canToggle === true) {
         const control = switchControl(value.name || value.id, value.enabled);
@@ -241,9 +248,9 @@ export function mountInstanceSettingsPage({ page, section: name, getSelectedInst
           { id: value.id, enabled: control.checked } });
         controls.add(control); row.append(control);
       } else if (typeof value.enabled === "boolean") {
-        row.append(element("span", "muted", value.enabled ? "已启用" : "已关闭"));
+        row.append(element("span", "muted", value.enabled ? "已开启" : "已关闭"));
       } else if (inherited) {
-        row.append(element("span", "muted", "继承原生默认"));
+        row.append(element("span", "muted", "使用原生默认"));
       }
       card.append(row);
     }
@@ -315,7 +322,10 @@ export function mountInstanceSettingsPage({ page, section: name, getSelectedInst
     } catch (error) {
       if (alive() && selected === id && generation === version) message = error.message;
     } finally {
-      if (alive() && selected === id && generation === version) { loading = false; render(); }
+      if (alive() && selected === id && generation === version) {
+        loading = false; render();
+        if (externalRefresh) { externalRefresh = false; void read(); }
+      }
     }
   }
   async function save(settings) {
@@ -358,7 +368,10 @@ export function mountInstanceSettingsPage({ page, section: name, getSelectedInst
         message = `${error.message} 未自动重复保存，请重新读取核对。`;
       }
     } finally {
-      if (alive() && selected === id) { saving = false; render(); }
+      if (alive() && selected === id) {
+        saving = false; render();
+        if (externalRefresh) { externalRefresh = false; void read(); }
+      }
     }
   }
   async function show(force = false) {
@@ -399,9 +412,22 @@ export function mountInstanceSettingsPage({ page, section: name, getSelectedInst
     if (!alive() || saving || detecting) { sync(); return; }
     selected = instances.value; setSelectedInstance(selected); void read();
   };
-  display.onchange = () => { if (alive() && !detecting && !saving) setInstanceDisplay(selected, display.checked); sync(); };
+  display.onchange = () => {
+    if (alive() && !detecting && !saving && sharedSettingsWritable(session))
+      void setInstanceDisplay(selected, display.checked).catch(error => { notice(error.message, true); sync(); });
+    sync();
+  };
+  const unsubscribe = subscribeSharedSettings(change => {
+    if (!alive()) return;
+    sync();
+    if (change.instance && (!change.instanceId || change.instanceId === selected)
+        && !page.closest?.(".appearance-settings-page")?.hidden) {
+      if (saving || detecting || loading) externalRefresh = true;
+      else void read();
+    }
+  });
   render();
-  return { show, dispose() { disposed = true; retireRead(); } };
+  return { show, dispose() { disposed = true; retireRead(); unsubscribe(); } };
 }
 
 export function mountShortcuts(page) {

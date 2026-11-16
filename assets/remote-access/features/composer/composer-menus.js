@@ -71,7 +71,7 @@ export function renderModelMenu() {
   const visibleModels = models.filter(model => `${model.displayName || ""} ${model.model}`.toLowerCase().includes(modelQuery.trim().toLowerCase()));
   for (const model of visibleModels) group.append(choice(model.displayName || model.model, matchedModel === model, () => {
     if (currentModel() !== model) {
-      // 用户要求切换模型不丢弃思考深度，Claude 和 Codex 的已有及新建会话共用此规则。
+      // 用户要求切换模型不丢弃思考等级，Claude 和 Codex 的已有及新建会话共用此规则。
       // 必须先读取当前深度再更新模型；仅在目标模型未报告支持原深度时才回退到其可用默认值。
       const previousEffort = currentEffort();
       setSelectedModel(model.model);
@@ -86,7 +86,7 @@ export function renderModelMenu() {
   }
   if (!group.children.length) group.append(element("p", "popover-empty muted", models.length ? "没有匹配的模型，请修改搜索条件" : "暂无可选模型，请稍后重试"));
   menu.append(group);
-  const efforts = element("div", "effort-options"); efforts.setAttribute("role", "group"); efforts.setAttribute("aria-label", "思考深度");
+  const efforts = element("div", "effort-options"); efforts.setAttribute("role", "group"); efforts.setAttribute("aria-label", "思考等级");
   const supportedEfforts = (currentModel()?.supportedReasoningEfforts || []).filter(effort => effort.reasoningEffort !== "minimal");
   for (const effort of supportedEfforts) {
     efforts.append(choice(effortLabels[effort.reasoningEffort] || effort.reasoningEffort,
@@ -97,7 +97,7 @@ export function renderModelMenu() {
         applyModelMenuChoice();
       }, null, `effort:${effort.reasoningEffort}`));
   }
-  if (!efforts.children.length) efforts.append(element("p", "popover-empty muted", "此模型暂无可选思考深度"));
+  if (!efforts.children.length) efforts.append(element("p", "popover-empty muted", "此模型暂无可选思考等级"));
   menu.append(efforts);
   fitComposerMenu(menu);
   group.scrollTop = modelScroll; efforts.scrollTop = effortScroll;

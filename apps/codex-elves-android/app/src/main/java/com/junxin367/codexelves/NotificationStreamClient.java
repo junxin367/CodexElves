@@ -26,6 +26,7 @@ final class NotificationStreamClient implements Runnable {
     private final Set<HttpURLConnection> connections = new HashSet<>();
     private volatile boolean closed;
     private volatile boolean resyncRequested;
+    private long sharedSettingsReadAt;
     private String routeOrigin;
     private volatile String routeToken;
     private volatile String routeServerId;
@@ -47,6 +48,7 @@ final class NotificationStreamClient implements Runnable {
         void stopped();
         void deleteThread(String threadId);
         default void heartbeat() { }
+        default void sharedSettings(JSONObject snapshot) throws IOException, JSONException { }
     }
 
     NotificationStreamClient(
@@ -272,6 +274,9 @@ final class NotificationStreamClient implements Runnable {
                         }
                         public void deleteThread(String threadId) { callback.deleteThread(threadId); }
                         public void heartbeat() { callback.heartbeat(); }
+                        public void sharedSettings(JSONObject snapshot) throws IOException, JSONException {
+                            callback.sharedSettings(snapshot);
+                        }
                     };
                     NotificationStreamClient other = new NotificationStreamClient(identity, events, sink, secondaryCallback, identityLock);
                     other.routeOrigin = candidate;
@@ -320,6 +325,9 @@ final class NotificationStreamClient implements Runnable {
             case "remote/resync":
                 synchronizeSnapshot();
                 break;
+            case "remote/settingsChanged":
+                synchronizeSharedSettings(true);
+                break;
             case "remote/unauthorized":
                 throw new Unauthorized();
             case "remote/disconnected":
@@ -337,6 +345,7 @@ final class NotificationStreamClient implements Runnable {
                 }
                 break;
             case "remote/heartbeat":
+                synchronizeSharedSettings(false);
                 callback.heartbeat();
                 break;
             case "remote/connected":
@@ -348,6 +357,7 @@ final class NotificationStreamClient implements Runnable {
     }
 
     private void synchronizeSnapshot() throws IOException, JSONException {
+        synchronizeSharedSettings(false);
         HttpURLConnection connection = null;
         try {
             ensureActive();
@@ -391,6 +401,36 @@ final class NotificationStreamClient implements Runnable {
         } finally {
             release(connection);
         }
+    }
+
+    private void synchronizeSharedSettings(boolean force) throws IOException, JSONException {
+        long now = System.nanoTime();
+        // 用户要求通知偏好跨端一致；事件即时补读，15 秒只读校准漏事件，不读取或复制系统授权状态。
+        if (!force && sharedSettingsReadAt != 0 && now - sharedSettingsReadAt < 15_000_000_000L) return;
+        HttpURLConnection connection = null;
+        try {
+            ensureActive();
+            connection = open("/api/settings/shared", "GET", "application/json");
+            if (connection.getResponseCode() == 404) { sharedSettingsReadAt = now; return; }
+            checkStatus(connection);
+            byte[] bytes;
+            try (InputStream input = connection.getInputStream();
+                 ByteArrayOutputStream output = new ByteArrayOutputStream()) {
+                byte[] buffer = new byte[4096];
+                int count;
+                while ((count = input.read(buffer)) != -1) {
+                    ensureActive();
+                    if (output.size() + count > MAX_SNAPSHOT_BYTES) throw new IOException("Shared settings too large");
+                    output.write(buffer, 0, count);
+                }
+                bytes = output.toByteArray();
+            }
+            JSONObject response = new JSONObject(new String(bytes, StandardCharsets.UTF_8));
+            if (!response.getBoolean("ok")) throw new JSONException("Invalid shared settings response");
+            ensureActive();
+            callback.sharedSettings(response.getJSONObject("snapshot"));
+            sharedSettingsReadAt = now;
+        } finally { release(connection); }
     }
 
     private HttpURLConnection open(String path, String method, String accept) throws IOException {

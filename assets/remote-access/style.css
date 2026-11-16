@@ -1727,6 +1727,11 @@ body{font-weight:var(--ui-font-weight,400)}
 .instance-settings-content .appearance-notification-switch:indeterminate::after{transform:translateX(6px);opacity:.5}
 .instance-settings-status:empty{display:none}
 .instance-settings-actions{justify-content:flex-end;margin-top:12px}
+/* 用户要求命名实例与模型保持同排，左侧实例、右侧关联模型；长名称省略，不把模型挤到下一行。
+ * PC 的组合宽度最多占当前卡片 65%；760px 及以下说明移至上方，两个选择器共同使用整行宽度。 */
+.conversation-naming-target-selectors{display:flex;flex-wrap:nowrap;gap:8px;flex:0 1 480px;min-width:0;max-width:65%}
+.instance-settings-content .conversation-naming-target-selectors>.select-trigger{flex:1 1 0;max-width:none;min-width:0}
+.conversation-naming-target-selectors .select-label{flex:1;text-align:left}
 .shortcut-setting-row>kbd{border:1px solid var(--line);border-radius:6px;padding:3px 8px;background:var(--side);font:inherit;font-size:.85714rem;white-space:normal;text-align:right}
 @media(max-width:760px){
  /* 手机沿用 104px 导航，说明文字收缩换行，保留 32px 开关和选择器；不能被后面的通用卡片换行规则覆盖。 */
@@ -1734,6 +1739,9 @@ body{font-weight:var(--ui-font-weight,400)}
  .instance-settings-target .select-trigger,.instance-settings-content .select-trigger{max-width:58%;flex-shrink:0}
  .instance-settings-target .appearance-field>.appearance-field-copy,.instance-settings-content .appearance-field>.appearance-field-copy{flex:1 1 0;overflow-wrap:anywhere}
  .instance-settings-target .appearance-notification-switch,.instance-settings-content .appearance-notification-switch{flex-shrink:0}
+ .instance-settings-content .appearance-card .conversation-naming-target-row{flex-direction:column;align-items:stretch;gap:10px}
+ .instance-settings-content .conversation-naming-target-row>.appearance-field-copy{flex:none}
+ .instance-settings-content .appearance-card .conversation-naming-target-row>.conversation-naming-target-selectors{flex:none;width:100%;max-width:100%}
  .shortcut-setting-row{align-items:flex-start}
  .shortcut-setting-row>kbd{max-width:60%}
 }

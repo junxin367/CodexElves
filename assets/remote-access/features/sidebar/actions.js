@@ -1,33 +1,31 @@
 // 侧栏会话操作：行菜单与长按、侧栏视图偏好、重命名、工作区文件菜单与独立窗口；删除会话在 thread-deletion.js，删除记录在 deletion-state.js。
 
 import { isAndroidContainer } from "../../platform.js";
-import { createSidebarPreferenceStore } from "../../recovery-store.js";
 import { normalizeWorkspacePreview, openWorkspacePreviewWindow } from "../../workspace-preview.js";
 import { $, button, element } from "../../ui/dom.js";
 import { icon } from "../../ui/icons.js";
 import { notice } from "../../ui/notice.js";
 import { closePopup, openPopup, togglePopup } from "../../ui/popup.js";
-import { closeComposerMenus, loadSidebar, mutate, renderSidebar } from "../../core/actions.js";
+import { closeComposerMenus, loadSidebar, mutate, renderSidebar, saveSharedSettings } from "../../core/actions.js";
 import { connected, selectedId, session, sidebar, thread } from "../../core/state.js";
 import { recoveryGeneration } from "../composer/drafts.js";
 import { normalizeRelatedView, privateInputScope, validRelatedThreadId } from "../session/capabilities.js";
 import { relatedThreadViews } from "../session/related-state.js";
 import { cacheDisplayData, sidebarSnapshot } from "../session/thread-cache.js";
 import { threadDeleted, threadDeletionLocked } from "./deletion-state.js";
+import { sharedSettingsState, subscribeSharedSettings } from "../settings/shared-state.js";
 
 export let sidebarBusy = false;
 export function setSidebarBusy(value) { return sidebarBusy = value; }
 export let sidebarFilters = { mode: null, chats: null, projects: null, pinned: null, showPinned: false };
-const sidebarPreferenceStore = createSidebarPreferenceStore();
 export let sidebarPreferenceScope = null;
 export function setSidebarPreferenceScope(value) { return sidebarPreferenceScope = value; }
-// 同一浏览器其他页面修改侧栏偏好时，按当前授权范围重新读取并刷新侧栏。
+// 侧栏偏好与其他非外观设置共用服务快照，不再按设备或浏览器存储。
 export function installSidebarPreferenceSync() {
-  window.addEventListener("storage", event => {
-    if (!sidebarPreferenceStore.ownsStorageEvent(privateInputScope(session), event)) return;
+  subscribeSharedSettings(() => {
     sidebarPreferenceScope = null;
     restoreSidebarPreferences();
-    renderSidebar();
+    if ($("#sidebar-content")) renderSidebar();
   });
 }
 export function rowMenu(id, label, options) {
@@ -128,28 +126,25 @@ export function restoreSidebarPreferences() {
   sidebarPreferenceScope = scope;
   sidebarFilters = { mode: null, chats: null, projects: null, pinned: null, showPinned: false };
   if (!scope) return;
-  try { Object.assign(sidebarFilters, sidebarPreferenceStore.read(scope)); }
-  catch { /* 存储不可读时仍显示可用的会话数据，用户修改时说明保存失败。 */ }
+  if (sharedSettingsState.scope === scope && sharedSettingsState.ready)
+    Object.assign(sidebarFilters, sharedSettingsState.settings.sidebar);
 }
 function saveSidebarPreferences(patch) {
   const scope = privateInputScope(session);
   if (!scope || !sidebar) return;
   restoreSidebarPreferences();
-  Object.assign(sidebarFilters, patch);
-  try { Object.assign(sidebarFilters, sidebarPreferenceStore.write(scope, patch)); }
-  catch {
-    notice("侧栏偏好已在本页生效，但浏览器本地保存失败，刷新后可能丢失。", true);
-  }
-  renderSidebar();
+  return saveSharedSettings({ sidebar: patch }).catch(error => {
+    if (scope === privateInputScope(session)) notice(error.message, true);
+  });
 }
 function changeSidebarView(mode) {
   if (!["project", "list"].includes(mode)) return;
-  saveSidebarPreferences({ mode });
+  return saveSidebarPreferences({ mode });
 }
 export function setRecentPinnedVisible(value) {
   if (typeof value !== "boolean") return;
-  // 用户要求“置顶”勾选控制分组显隐；只改设备偏好，只读和离线状态也可切换，不派发会话置顶操作。
-  saveSidebarPreferences({ showPinned: value });
+  // 用户要求非外观设置跨端共享；只改分组显隐，不派发会话置顶操作。
+  return saveSidebarPreferences({ showPinned: value });
 }
 export async function changeSidebar(payload) {
   if (payload.target === "grouping") return changeSidebarView(payload.grouping);

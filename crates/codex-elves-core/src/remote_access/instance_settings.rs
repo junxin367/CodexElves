@@ -577,7 +577,7 @@ fn validate_models(
     if backend == "claude" && changes.get("effortLevel").is_some() {
         return Err(ApiError::new(
             409,
-            "Claude 全局思考等级尚未确认可持久化，请在会话内选择",
+            "尚未确认当前 Claude CLI 的默认思考等级配置，请在会话输入区选择。",
         ));
     }
     let model = changes
@@ -594,7 +594,7 @@ fn validate_models(
     if changes["model"].is_null() && changes.get("model").is_some() && effort.is_some() {
         return Err(ApiError::new(
             400,
-            "跟随原生默认模型时，请同时沿用默认思考等级",
+            "默认模型选择“使用原生默认”时，默认思考等级需选择“使用模型默认”。",
         ));
     }
     let selected = model.and_then(|model| {
@@ -789,6 +789,10 @@ pub(super) async fn settings(
                 .settings_skills(&target.home, Some(&changes["skill"]), &authorization)
                 .await
                 .map_err(super::authorization_error)?;
+            state
+                .controller
+                .shared_settings
+                .instance_changed(&state.controller, instance);
         } else {
             if changes.contains_key("promptSuggestionEnabled")
                 && capabilities["promptSuggestions"] != true
@@ -805,6 +809,14 @@ pub(super) async fn settings(
                 )?;
             }
             save_native(&target, &text, &revision, &payload, &authorization).await?;
+        }
+        if changes.contains_key("ultraReasoningEnabled")
+            || changes.contains_key("autoCompactWindow")
+        {
+            state
+                .controller
+                .shared_settings
+                .instance_changed(&state.controller, instance);
         }
         updated = true;
     }

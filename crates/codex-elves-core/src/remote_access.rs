@@ -36,6 +36,7 @@ mod browser;
 mod channels;
 mod claude;
 mod context_usage;
+mod conversation_naming;
 mod credentials;
 mod diagnostics;
 mod document_preview;
@@ -54,6 +55,7 @@ mod preferences;
 mod primary_route;
 mod prompt_optimization;
 mod session_metrics;
+mod shared_settings;
 
 mod service;
 mod video;
@@ -399,6 +401,8 @@ pub struct RemoteAccessController {
     harness: Arc<harness::Harness>,
     claude: Arc<claude::Claude>,
     permissions: permissions::SessionPermissions,
+    shared_settings: shared_settings::SharedSettings,
+    conversation_naming: Arc<conversation_naming::ConversationNaming>,
     harness_connected: AtomicBool,
     prompt_optimization: Arc<prompt_optimization::RemotePromptOptimization>,
     state_dir: PathBuf,
@@ -468,6 +472,8 @@ impl RemoteAccessController {
             harness: harness.clone(),
             claude: claude.clone(),
             permissions,
+            shared_settings: shared_settings::SharedSettings::new(&state_dir),
+            conversation_naming: conversation_naming::ConversationNaming::new(&state_dir)?,
             harness_connected: AtomicBool::new(false),
             prompt_optimization: Arc::new(prompt_optimization::RemotePromptOptimization::default()),
             state_dir,
@@ -510,6 +516,7 @@ impl RemoteAccessController {
         });
         harness.attach(Arc::downgrade(&controller));
         claude.attach(Arc::downgrade(&controller));
+        controller.conversation_naming.attach(Arc::downgrade(&controller));
         Ok(controller)
     }
 
@@ -1145,6 +1152,16 @@ impl RemoteAccessController {
         mut payload: Value,
         authorization: &RemoteAuthorization,
     ) -> anyhow::Result<Value> {
+        // 手动命名与自动标题写回共用锁；用户开始手动改名即停止该会话的后续自动更新。
+        let _naming_serial = if action == "rename" {
+            let id = payload["threadId"].as_str().unwrap_or("");
+            let lock = self.conversation_naming.rename_lock(id).await;
+            let guard = lock.lock_owned().await;
+            authorization.prepare_dispatch().await?.commit(|| self.conversation_naming.manual(id))?;
+            Some(guard)
+        } else {
+            None
+        };
         if action == "openWorkspace" {
             // 工作区打开使用独立原生实现，但沿用持久回执，浏览器/网关重试不能重复启动应用。
             return open_in::dispatch(payload, authorization)
@@ -1292,7 +1309,12 @@ impl RemoteAccessController {
         let detail_id = (action == "thread")
             .then(|| payload["threadId"].as_str().map(str::to_owned))
             .flatten();
+        let naming_input = matches!(action, "create" | "send")
+            .then(|| json!({"threadId":payload["threadId"],"prompt":payload["prompt"]}));
         let mut value = self.call_backend(action, payload, authorization).await?;
+        if let Some(input) = naming_input {
+            self.conversation_naming.accepted(action, &input, &value, &authorization.device.id);
+        }
         if codex_request && action == "models" {
             instance_settings::filter_models(
                 &mut value,
@@ -2411,6 +2433,11 @@ pub fn web_router(
         )
         .route("/api/settings/permissions", post(permissions::settings))
         .route("/api/settings/instance", post(instance_settings::settings))
+        .route("/api/settings/conversation-naming", get(conversation_naming::status))
+        .route(
+            "/api/settings/shared",
+            get(shared_settings::read).post(shared_settings::write),
+        )
         .route(
             "/api/settings/claude-recap",
             post(permissions::claude_recap_settings),
@@ -3188,7 +3215,9 @@ async fn session(
     let diagnostics_request = state.controller.diagnostics.pending_for(&device.id).await;
     let service_connected = state.controller.harness_connected.load(Ordering::SeqCst);
     let native_write_available = service_connected;
+    let shared_settings = state.controller.shared_settings.snapshot().await?;
     Ok(Json(json!({"ok":true,"device":device.public(),
+        "sharedSettings":shared_settings,
         "serviceConnected":service_connected,
         // 用户要求服务模式自带 rg 并可诊断实际来源；状态仅向已授权会话返回，不修改用户 PATH。
         "toolRuntime":crate::tool_runtime::current().diagnostic_value(),
@@ -3202,7 +3231,7 @@ async fn session(
         "queueSendRecovery":native_write_available,"projectlessCreation":native_write_available,
         "promptOptimization":true,"promptOptimizationSettings":true,"messageEditModelSettings":native_write_available,
         "fastMode":native_write_available,
-        "sessionPermissions":true,"instancePermissions":true,"codexSessionDefaults":true,
+        "sessionPermissions":true,"instancePermissions":true,"codexSessionDefaults":true,"sharedSettings":true,"conversationNaming":true,
         "serviceFastMode":native_write_available,
         "goalComposer":native_write_available,"compactionQueueSend":native_write_available,
         "sendText":native_write_available || service_connected,
@@ -4641,6 +4670,7 @@ fn notification_stream_event(event: &Value) -> Option<Value> {
         | "remote/disconnected"
         | "remote/authorizationChanged"
         | "remote/unauthorized" => Some(json!({"method":method})),
+        "remote/settingsChanged" => Some(json!({"method":method})),
         "thread/deleted" => notification_thread_id(&event["params"]["threadId"])
             .map(|id| json!({"method":method,"params":{"threadId":id}})),
         _ => None,
@@ -6147,7 +6177,7 @@ mod tests {
         (directory, controller.authorization(device, Some("send")))
     }
 
-    async fn harness_fixture() -> (tempfile::TempDir, RemoteAuthorization) {
+    pub(super) async fn harness_fixture() -> (tempfile::TempDir, RemoteAuthorization) {
         harness_fixture_with_store(None).await
     }
 
@@ -6266,7 +6296,7 @@ readline.createInterface({input:process.stdin}).on('line',line=>{
    nativePins.moved=true;fs.writeFileSync(pinPath,JSON.stringify(nativePins));
    event('thread/section/changed',{threadId:p.threadId,sectionId:p.sectionId});break;
  case 'thread/start':{
-   const id=crypto.randomUUID();const thread={id,cwd:p.cwd,name:'隔离会话',ephemeral:false,threadSource:'user',source:'appServer',
+   const id=crypto.randomUUID();const thread={id,cwd:p.cwd,name:fs.existsSync(__dirname+'/naming-fixture')?null:'隔离会话',ephemeral:false,threadSource:'user',source:'appServer',
      projectId:p.projectId,status:{type:'idle'},turns:[],createdAt:1,updatedAt:1,path:__dirname+'/'+id+'.jsonl'};
    modelContexts.set(id,{items:[],developerInstructions:p.developerInstructions||'',model:p.model||'gpt-6.1-sol',
      reasoningEffort:p.config?.model_reasoning_effort||'high',permissions:permissionSnapshot(p)});

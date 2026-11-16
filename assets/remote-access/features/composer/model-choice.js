@@ -1,4 +1,4 @@
-// 当前模型选择：推导当前模型与思考深度，读写会话的 Fast 偏好；目录查询在 model-catalog.js。
+// 当前模型选择：推导当前模型与思考等级，读写会话的 Fast 偏好；目录查询在 model-catalog.js。
 
 import { $ } from "../../ui/dom.js";
 import { composerTooltips } from "../../ui/tooltip.js";
@@ -115,7 +115,7 @@ export function updateRemoteFast() {
   control.disabled = (!state?.supported && !state?.canDisable) || !!writing || !connected || busy || stopping || !!pending
     || threadReadOnly() || threadDeletionLocked()
     || !sessionInstanceEnabled(activeInstanceId());
-  // 用户要求 Fast 保持现有即时切换流程，不得套用模型/思考深度等待任务结束的规则；这里只展示会话开关状态。
+  // 用户要求 Fast 保持现有即时切换流程，不得套用模型/思考等级等待任务结束的规则；这里只展示会话开关状态。
   control.title = writing ? "正在保存本会话的 Fast 设置"
     : !supported && canDisable ? `${state.reason}；点击关闭本会话 Fast`
     : state.reason || (enabled ? "本会话 Fast 已开启，点击关闭"

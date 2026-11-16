@@ -796,7 +796,7 @@ impl Claude {
         Ok(self.discovery.lock().await.entry(key).or_default().clone())
     }
 
-    fn wsl(config: &WslConfig) -> anyhow::Result<Command> {
+    pub(super) fn wsl(config: &WslConfig) -> anyhow::Result<Command> {
         anyhow::ensure!(cfg!(windows), "当前 Claude 接入需要 Windows WSL2");
         config.validate()?;
         let mut command = Command::new("wsl.exe");
@@ -1410,6 +1410,21 @@ impl Claude {
                 threads.push(row);
             }
         }
+    }
+
+    pub async fn naming_context(&self, id: &str, initial: bool) -> anyhow::Result<Value> {
+        anyhow::ensure!(!Self::is_subagent_id(id), "子智能体会话不参与自动命名");
+        let c = self.conversation(id).await?;
+        let turns = if initial { &c.turns[..c.turns.len().min(1)] }
+            else { &c.turns[c.turns.len().saturating_sub(8)..] };
+        let messages = super::conversation_naming::messages(turns);
+        let first = super::conversation_naming::messages(&c.turns[..c.turns.len().min(1)]);
+        let fallback = first.iter().find(|message| message["role"] == "user")
+            .and_then(|message| message["text"].as_str()).unwrap_or("")
+            .split_whitespace().collect::<Vec<_>>().join(" ").chars().take(30).collect::<String>();
+        Ok(json!({"title":c.title,"expectedName":c.title,
+            "eligible":c.native_title.is_empty() && (c.title.is_empty() || c.title == fallback),
+            "messages":messages}))
     }
 
     pub async fn detail(self: &Arc<Self>, id: &str) -> anyhow::Result<Value> {
@@ -2378,6 +2393,11 @@ impl Claude {
                         "markRead" => c.unread = false,
                         "pinThread" => c.pinned = payload["pinned"] == true,
                         "rename" => {
+                            if let Some(expected) = payload["expectedName"].as_str()
+                                && c.title != expected
+                            {
+                                return Err(error(409, "会话名称已变化，已丢弃自动命名结果"));
+                            }
                             let title = payload["title"].as_str().unwrap_or("").trim();
                             if title.is_empty() || title.chars().count() > 200 {
                                 return Err(error(400, "标题需为 1–200 个字符"));

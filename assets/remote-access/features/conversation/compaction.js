@@ -262,10 +262,10 @@ async function recoverCompaction(id) {
   } catch (error) { notice(`重新读取压缩状态失败：${error.message}`, true); }
   updateComposer();
 }
-// 用户要求压缩与发送消息、/goal 一样触发所选模型切换：菜单里选的模型和思考深度只是本地选择，
+// 用户要求压缩与发送消息、/goal 一样触发所选模型切换：菜单里选的模型和思考等级只是本地选择，
 // 不随压缩请求带上就不会切到 CLI，压缩会沿用旧模型而界面仍显示新选择。
 // 仅 Claude 且选择与会话当前设置不同才带上（同值切换是空操作，不应因模型目录暂不可用而阻断压缩）；
-// 切换了模型时思考深度一并带上，避免服务端按“换模型即清空深度”处理而与界面显示不一致。
+// 切换了模型时思考等级一并带上，避免服务端按“换模型即清空深度”处理而与界面显示不一致。
 // 服务端在发 /compact 之前先应用，应用失败则不压缩并返回错误；对应 claude_controls.rs 的 native_command_action
 // 与 composer.js 的发送载荷。
 export function compactionModelChoice() {

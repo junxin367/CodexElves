@@ -1,4 +1,4 @@
-// 输入区选项状态：模型目录与模型菜单搜索词、所选模型与思考深度、Fast 状态，以及按实例缓存的权限目录与选择。
+// 输入区选项状态：模型目录与模型菜单搜索词、所选模型与思考等级、Fast 状态，以及按实例缓存的权限目录与选择。
 
 import { permissionModeKnown } from "../../permissions.js";
 import { session, thread } from "../../core/state.js";

@@ -5,7 +5,7 @@ import { mountInstancePermissions } from "../../permissions.js";
 import {
   getAndroidAppInfo, getAndroidNotificationSettings, isAndroidContainer,
   openAndroidNotificationSystemSettings, postPlatformMessage, requestAndroidNotificationPermission,
-  setAndroidNotificationSettings, subscribeAndroidNotificationSettings
+  subscribeAndroidNotificationSettings
 } from "../../platform.js";
 import { getPwaCacheState, retryPwaCache } from "../../pwa.js";
 import { confirmAction } from "../../ui/dialog.js";
@@ -14,7 +14,7 @@ import { icon } from "../../ui/icons.js";
 import { notice } from "../../ui/notice.js";
 import { activePopup, closePopup, fitPopup, setActivePopup } from "../../ui/popup.js";
 import { selectControl, setSelectOptions, setSelectValue } from "../../ui/select.js";
-import { closeComposerMenus, loadSidebar, renderSidebar, updateComposer } from "../../core/actions.js";
+import { closeComposerMenus, loadSidebar, renderSidebar, saveSharedSettings, updateComposer } from "../../core/actions.js";
 import { connected, creating, session } from "../../core/state.js";
 import { api } from "../api.js";
 import {
@@ -29,17 +29,18 @@ import {
   setRemoteBackgroundOperation, setSyncAppearanceThemeControls, syncAppearanceThemeControls,
   validFontFamily, writeRemoteBackground
 } from "./theme.js";
-import { setCreationBackend } from "../composer/new-chat.js";
 import { rememberInstancePermissionCatalog } from "../composer/options-state.js";
 import { privateInputScope } from "../session/capabilities.js";
 import { loadSessionInstances, renderSessionInstances } from "../session/instance-catalog.js";
 import { availableSessionInstances } from "../session/instances.js";
 import { mountRemoteSettings } from "../settings/remote-settings.js";
+import { mountConversationNaming } from "../settings/conversation-naming.js";
 import {
   instanceSettingPages, mountInstanceSettingsPage, mountShortcuts, settingsNavigation
 } from "../settings/instance-settings.js";
 import { sessionMenu } from "../shell-state.js";
 import { projectVisibleThreadCounts } from "../sidebar/list-state.js";
+import { sharedSettingsState, sharedSettingsWritable, subscribeSharedSettings } from "../settings/shared-state.js";
 
 function renderPwaCacheState() {
   const root = $("#appearance-cache-state");
@@ -253,19 +254,25 @@ export function openAppearance() {
     <section id="appearance-general-page" class="appearance-body appearance-settings-page">
     <!-- 用户确认“个人 → 会话”改为“常规”；Claude 专属选项移入所选实例，不再混在设备显示偏好中。 -->
     <h3 class="appearance-panel-title">常规</h3>
-    <p class="appearance-hint">当前设备的会话显示与使用偏好。</p>
+    <p class="appearance-hint">同一远程服务的各客户端共用以下设置。</p>
+    <p id="appearance-shared-settings-status" class="appearance-hint" role="status" aria-live="polite"></p>
     <section class="appearance-section"><h4>会话显示</h4><div class="appearance-card">
     <label class="appearance-field appearance-width-field"><span class="appearance-field-copy"><span>会话正文宽度上限</span><small>默认 950px，仅在右侧可用空间不足时自动收窄。</small></span><span class="appearance-number"><input id="appearance-conversation-width" type="number" min="${conversationWidthMin}" max="${conversationWidthMax}" step="10" value="${appearance.conversationWidth}" aria-label="会话正文宽度上限"><span>px</span></span></label>
     <div class="appearance-field appearance-thread-limit-field"><span>每个项目显示会话数</span><div id="appearance-project-thread-limit-slot"></div></div>
     <div id="appearance-cache-state" class="appearance-field" role="status"></div>
     </div></section>
-    <p class="appearance-hint">这些设置仅影响当前设备。</p>
+    <p class="appearance-hint">外观页面的主题、字体、配色与背景图片由各客户端独立保存。</p>
     </section>
     ${instanceSettingPages.map(page => `<section id="appearance-${page.id}-page" class="appearance-body appearance-settings-page" hidden>
     <h3 class="appearance-panel-title">${page.label}</h3>
     <p class="appearance-hint">${page.description}</p>
     <div id="appearance-${page.id}-settings"></div>
     </section>`).join("")}
+    <section id="appearance-naming-page" class="appearance-body appearance-settings-page" hidden>
+    <h3 class="appearance-panel-title">会话命名</h3>
+    <p class="appearance-hint">同一远程服务的所有 Codex、Claude 实例的主会话共用命名实例与模型。</p>
+    <div id="appearance-naming-settings"></div>
+    </section>
     <section id="appearance-shortcuts-page" class="appearance-body appearance-settings-page" hidden>
     <h3 class="appearance-panel-title">快捷键</h3>
     <div id="appearance-shortcuts-settings"></div>
@@ -286,6 +293,7 @@ export function openAppearance() {
     </div></section>
     <section id="appearance-customization-page" class="appearance-body appearance-settings-page" hidden>
     <h3 class="appearance-panel-title">外观</h3>
+    <p class="appearance-hint">外观设置仅保存在当前客户端。</p>
     <!-- 用户要求单层设置页使用分组卡片，不再添加主题/字体/背景的内部导航。 -->
     <section class="appearance-section"><h4>视觉风格</h4>
     <div class="appearance-card appearance-mode-card">
@@ -297,7 +305,7 @@ export function openAppearance() {
       <div id="appearance-colors"></div>
       <!-- 用户要求增加独立对比度；每套主题/明暗模式分别保存，复用现有数字输入样式，不改动颜色选择器。 -->
       <label class="appearance-field"><span>对比度</span><span class="appearance-number"><input id="appearance-contrast" type="number" inputmode="numeric" min="0" max="100" step="1" aria-label="外观对比度"><span>%</span></span></label>
-      <div class="appearance-field"><span>字体</span><div id="appearance-ui-font-slot"></div></div>
+      <div class="appearance-field"><span>界面字体</span><div id="appearance-ui-font-slot"></div></div>
     </div></section>
     <section class="appearance-section"><h4>背景图片</h4><div class="appearance-card">
     <div class="appearance-field appearance-background-field"><span>图片</span><div class="appearance-background-actions"><input id="appearance-background-input" type="file" accept="image/png,image/jpeg,image/webp,image/gif" hidden><button type="button" id="appearance-background-action"></button></div></div>
@@ -308,9 +316,9 @@ export function openAppearance() {
     </div></section>
     <details class="appearance-advanced"><summary>高级<span aria-hidden="true">›</span></summary>
     <section class="appearance-section"><h4>字体与排版</h4><div class="appearance-card">
-    <!-- 用户要求字号均改为数值输入；程序 10～20、代码 8～24、阅读 6～14 的原有范围与校验同步保留。 -->
-    <label class="appearance-field"><span>程序字号</span><span class="appearance-number"><input id="appearance-font" type="number" inputmode="numeric" min="10" max="20" step="1" aria-label="程序字号"><span>px</span></span></label>
-    <div class="appearance-field"><span>程序字重</span><div id="appearance-ui-font-weight-slot"></div></div>
+    <!-- 用户要求字号均改为数值输入；界面 10～20、代码 8～24、阅读 6～14 的原有范围与校验同步保留。 -->
+    <label class="appearance-field"><span>界面字号</span><span class="appearance-number"><input id="appearance-font" type="number" inputmode="numeric" min="10" max="20" step="1" aria-label="界面字号"><span>px</span></span></label>
+    <div class="appearance-field"><span>界面字重</span><div id="appearance-ui-font-weight-slot"></div></div>
     <p class="appearance-font-preview">CodexElves · 你好，开始新的会话 Aa 012345</p>
     <div class="appearance-field"><span>代码字体</span><div id="appearance-code-font-slot"></div></div>
     <label class="appearance-field"><span>代码字号</span><span class="appearance-number"><input id="appearance-code-font-size" type="number" inputmode="numeric" min="8" max="24" step="1" aria-label="代码字号"><span>px</span></span></label>
@@ -318,7 +326,7 @@ export function openAppearance() {
     <pre class="appearance-code-preview">const greeting = "Hello, 你好";\n0123456789  () [] {} =&gt;</pre>
     <label class="appearance-field"><span>文件阅读字号</span><span class="appearance-number"><input id="appearance-file-reading-font" type="number" inputmode="numeric" min="${fileReadingFontMin}" max="${fileReadingFontMax}" step="1" aria-label="文件阅读字号" aria-describedby="appearance-file-reading-font-hint"><span>px</span></span></label>
     <div id="appearance-file-reading-font-hint" class="appearance-reading-font-hint"><span>用于变更预览与文件查看。</span><button type="button" id="appearance-file-reading-font-reset" class="text-button" title="恢复为 ${fileReadingFontDefault}px">恢复默认</button></div>
-    </div><p class="appearance-hint">选择“系统”使用当前设备默认字体；程序和代码默认均为 14px。</p></section>
+    </div><p class="appearance-hint">选择“系统”使用当前设备默认字体；界面和代码默认字号均为 14px。</p></section>
     </details>
     </section>
     <section id="appearance-diagnostics-page" class="appearance-body appearance-settings-page" hidden>
@@ -327,7 +335,7 @@ export function openAppearance() {
     <p id="appearance-diagnostics-status" class="appearance-notification-status" role="status" hidden></p>
     </section>
     </div></div>
-    <div class="appearance-actions"><button type="button" class="appearance-version" id="appearance-app-version" hidden disabled></button><div class="appearance-action-buttons"><button type="button" id="appearance-reset">恢复默认</button><button id="instruction-reload" type="button" hidden>重新读取</button><button id="instruction-save" type="button" class="primary" hidden disabled>保存指令</button><button type="button" class="primary" id="appearance-close">完成</button></div></div>`;
+    <div class="appearance-actions"><button type="button" class="appearance-version" id="appearance-app-version" hidden disabled></button><div class="appearance-action-buttons"><button type="button" id="appearance-reset">恢复默认外观</button><button id="instruction-reload" type="button" hidden>重新读取</button><button id="instruction-save" type="button" class="primary" hidden disabled>保存指令</button><button type="button" class="primary" id="appearance-close">完成</button></div></div>`;
   document.body.append(dialog);
   const wrapSettingsPage = page => {
     if (page.querySelector(":scope > .appearance-page-content")) return;
@@ -346,9 +354,9 @@ export function openAppearance() {
   // 用户要求设置复用主题 Select：指令实例与两种字重也使用统一组件。
   for (const [id, label, options, value] of [
     ["instruction-instance", "会话实例", [], ""],
-    ...[["ui", "程序字体", appearance.uiFont], ["code", "代码字体", appearance.codeFont]]
+    ...[["ui", "界面字体", appearance.uiFont], ["code", "代码字体", appearance.codeFont]]
       .map(([kind, label, family]) => [`appearance-${kind}-font`, label, appearanceFontOptions(family), family]),
-    ...[["ui", "程序字重", appearance.uiFontWeight], ["code", "代码字重", appearance.codeFontWeight]]
+    ...[["ui", "界面字重", appearance.uiFontWeight], ["code", "代码字重", appearance.codeFontWeight]]
       .map(([kind, label, weight]) => [`appearance-${kind}-font-weight`, label,
         [{ value: "400", label: "常规" }, { value: "500", label: "中等" }, { value: "600", label: "半粗" }], String(weight)])
   ]) $(`#${id}-slot`, dialog).append(selectControl(id, label, options, value,
@@ -459,7 +467,7 @@ export function openAppearance() {
     for (const id of ["instruction-reload", "instruction-save"])
       $(`#${id}`, dialog).hidden = !instructions;
     $("#appearance-close", dialog).hidden = instructions;
-    resetButton.hidden = page !== primaryBody && page !== customizationPage;
+    resetButton.hidden = page !== customizationPage;
     setSettingsNav(entry);
     page.scrollTop = 0;
     if (focus) entry?.focus({ preventScroll: true });
@@ -518,6 +526,10 @@ export function openAppearance() {
   }
   $("#appearance-shortcuts-entry", dialog).onclick = () => showAppearancePage(
     $("#appearance-shortcuts-page", dialog), "快捷键", $("#appearance-shortcuts-entry", dialog));
+  $("#appearance-naming-entry", dialog).onclick = () => {
+    showAppearancePage($("#appearance-naming-page", dialog), "会话命名", $("#appearance-naming-entry", dialog));
+    void namingSettings.show();
+  };
   $("#appearance-permissions-entry", dialog).onclick = async () => {
     showAppearancePage($("#appearance-permissions-page", dialog), "权限", $("#appearance-permissions-entry", dialog));
     try {
@@ -575,7 +587,7 @@ export function openAppearance() {
     addSwitch("enabled", "接收通知", rows);
     const categories = element("div", "appearance-notification-categories");
     for (const [key, label] of [
-      ["approval", "需要授权"],
+      ["approval", "需要批准"],
       ["question", "需要回答"],
       ["completed", "执行完成"]
     ]) addSwitch(key, label, categories);
@@ -599,17 +611,22 @@ export function openAppearance() {
       }
     }, "appearance-notification-action");
     systemSettingsButton.hidden = true;
-    page.append(status, rows, systemSettingsButton);
+    // 用户要求设置口径一致：共享的通知偏好与当前设备的系统通知权限、通知连接状态须分别说明。
+    page.append(element("p", "appearance-hint",
+      "接收通知和事件类型由同一远程服务的各客户端共用；系统通知权限与通知连接状态以当前设备为准。"),
+    status, rows, systemSettingsButton);
     panelHost.append(page);
     showAppearancePage(page, "通知事件", notificationEntry);
     let state = null;
     const setBusy = busy => {
       for (const [key, control] of controls)
-        control.disabled = busy || !state || key !== "enabled" && !state.settings.enabled;
+        control.disabled = busy || !state || !sharedSettingsState.notificationsReady || !sharedSettingsWritable(session) || !connected
+          || key !== "enabled" && !state.settings.enabled;
       categories.setAttribute("aria-disabled", String(!state?.settings.enabled));
       systemSettingsButton.disabled = busy || !state;
     };
-    const pageApi = { setBusy, systemSettingsButton };
+    const pageApi = { setBusy, systemSettingsButton,
+      syncShared() { if (state) renderStatus(state); } };
     activeNotificationPage = pageApi;
     let changedVersion = 0;
     let queuedChangedStatus = null;
@@ -623,30 +640,30 @@ export function openAppearance() {
         status.textContent = "当前 Android App 版本暂不支持通知设置，请更新 App。";
         return;
       }
-      state = value;
+      state = sharedSettingsState.ready ? { ...value, settings: sharedSettingsState.settings.notifications } : value;
       rows.hidden = false;
       rows.removeAttribute("aria-busy");
       for (const [key, control] of controls) {
-        control.checked = value.settings[key];
+        control.checked = state.settings[key];
       }
       setBusy(notificationOperations > 0);
       const permissionText = {
-        prompt: "系统通知尚未授权",
-        granted: "系统通知权限已允许",
-        denied: "系统通知未开启"
+        prompt: "尚未申请系统通知权限",
+        granted: "系统通知权限已开启",
+        denied: "系统通知权限未开启"
       }[value.permission];
       const deliveryText = {
-        disabled: value.settings.enabled ? "等待启动" : "已关闭",
-        "permission-required": "需要系统通知权限",
-        connecting: "正在连接",
-        connected: "连接已建立",
-        disconnected: "连接中断",
-        unsupported: "当前版本不支持",
-        "auth-required": "需要重新授权"
+        disabled: state.settings.enabled ? "通知连接等待启动" : "通知连接已关闭",
+        "permission-required": "通知连接等待系统通知权限",
+        connecting: "通知连接正在建立",
+        connected: "通知连接已建立",
+        disconnected: "通知连接已断开",
+        unsupported: "当前客户端不支持通知连接",
+        "auth-required": "通知连接需要重新授权"
       }[value.delivery];
-      let summary = `通知${value.settings.enabled ? "已开启" : "已关闭"}；${permissionText}；${deliveryText}。`;
+      let summary = `接收通知${state.settings.enabled ? "已开启" : "已关闭"}；${permissionText}；${deliveryText}。`;
       if (value.permission === "denied")
-        summary = `系统通知尚未获准或已关闭，当前不会接收通知。`;
+        summary += "当前设备暂不接收通知，请开启系统通知权限。";
       if (value.message) summary += ` ${value.message}`;
       status.textContent = summary;
       systemSettingsButton.hidden = false;
@@ -690,11 +707,10 @@ export function openAppearance() {
       if (!isCurrent() || !state || notificationOperations) return;
       const oldValue = state.settings[key];
       controls.get(key).checked = oldValue;
-      const nextSettings = { ...state.settings, [key]: enabled };
       beginNotificationOperation();
       let saveCompleted = false;
       try {
-        await setAndroidNotificationSettings(nextSettings);
+        await saveSharedSettings({ notifications: { [key]: enabled } });
         saveCompleted = true;
         const saved = await getAndroidNotificationSettings();
         if (!isCurrent()) return;
@@ -716,7 +732,7 @@ export function openAppearance() {
           }
         }
       } catch (error) {
-        if (saveCompleted) {
+        if (saveCompleted || error.sharedSaved) {
           if (isCurrent()) status.textContent = `通知设置已保存，但无法确认当前状态；页面保留上次读取的设置。${notificationErrorMessage(error)}`;
         } else {
           queuedChangedStatus = null;
@@ -833,6 +849,10 @@ export function openAppearance() {
     for (const [mode, control] of modeButtons) control.setAttribute("aria-pressed", String(mode === selectedMode));
     syncAutomaticLightSetting();
     setSelectValue($("#appearance-project-thread-limit"), String(appearance.projectThreadLimit));
+    $("#appearance-project-thread-limit").disabled = !connected || !sharedSettingsWritable(session);
+    $("#appearance-conversation-width").disabled = !connected || !sharedSettingsWritable(session);
+    $("#appearance-shared-settings-status", dialog).textContent = sharedSettingsState.saving ? "正在同步到所有客户端…"
+      : sharedSettingsState.error || (!sharedSettingsState.ready ? "正在读取服务端共享设置…" : session?.readOnly ? "共享设置为只读。" : "");
     const hasBackground = !!remoteBackground.dataUrl;
     backgroundAction.disabled = remoteBackgroundBusy;
     backgroundAction.replaceChildren(icon(hasBackground ? "trash" : "image"),
@@ -890,6 +910,7 @@ export function openAppearance() {
     mountInstanceSettingsPage({ page: $(`#appearance-${page.id}-settings`, dialog), section: page.section,
       getSelectedInstance: () => settingsInstance, setSelectedInstance: value => { settingsInstance = value; } })]));
   mountShortcuts($("#appearance-shortcuts-settings", dialog));
+  const namingSettings = mountConversationNaming($("#appearance-naming-settings", dialog));
   sync();
   bindAppearanceNumberValue($("#appearance-contrast", dialog), 0, 100,
     () => appearance.colors[appearance.theme].contrast,
@@ -898,9 +919,9 @@ export function openAppearance() {
     const value = Number(event.target.value);
     if (!Number.isInteger(value) || value < conversationWidthMin || value > conversationWidthMax) {
       event.target.value = appearance.conversationWidth;
-      notice(`正文宽度请填写 ${conversationWidthMin}～${conversationWidthMax}px。`, true); return;
+      notice(`会话正文宽度上限请填写 ${conversationWidthMin}～${conversationWidthMax}px。`, true); return;
     }
-    appearance.conversationWidth = value; applyAppearance(true);
+    void saveSharedSettings({ conversationWidth: value }).catch(error => { sync(); notice(error.message, true); });
   };
   $("#appearance-preset", dialog).onchange = event => {
     appearance.themePreset = event.target.value;
@@ -922,11 +943,8 @@ export function openAppearance() {
     appearance[key] = value; applyAppearance(true);
   };
   $("#appearance-project-thread-limit").onchange = event => {
-    appearance.projectThreadLimit = Number(event.target.value);
-    applyAppearance(true);
-    projectVisibleThreadCounts.clear();
-    renderSidebar();
-    sync();
+    void saveSharedSettings({ projectThreadLimit: Number(event.target.value) })
+      .catch(error => { sync(); notice(error.message, true); });
   };
   $("#appearance-background-input").onchange = async event => {
     const file = event.target.files?.[0]; event.target.value = "";
@@ -990,10 +1008,10 @@ export function openAppearance() {
   $("#appearance-reset").onclick = async () => {
     if (remoteBackgroundBusy || !dialog.isConnected || !dialog.open) return;
     const scope = privateInputScope(session);
-    // 用户要求外观“恢复默认”先二次确认；取消、关闭设置或更换授权均不得删除背景或改写当前设置。
-    if (!await confirmAction("恢复默认设置",
-      "将恢复默认配色、字体、字号、会话宽度、项目会话数、会话筛选和实例开关，并移除背景图片。是否继续？",
-      "恢复默认", true) || remoteBackgroundBusy || !dialog.isConnected || !dialog.open
+    // 用户要求外观恢复先二次确认；名称明确为“恢复默认外观”，只恢复当前客户端外观，不重置共享设置。
+    if (!await confirmAction("恢复默认外观",
+      "将恢复当前客户端的默认配色、字体和字号，并移除背景图片。是否继续？",
+      "恢复默认外观", true) || remoteBackgroundBusy || !dialog.isConnected || !dialog.open
         || scope !== privateInputScope(session)) return;
     const operation = setRemoteBackgroundOperation(remoteBackgroundOperation + 1);
     setRemoteBackgroundBusy(true); setRemoteBackgroundError(""); sync();
@@ -1001,15 +1019,16 @@ export function openAppearance() {
       await deleteRemoteBackground();
       if (operation !== remoteBackgroundOperation) return;
       setRemoteBackground({ dataUrl: "", name: "" });
-      setAppearance(defaultAppearance(appearance.theme));
-      if (creating) setCreationBackend("codex");
+      const shared = Object.fromEntries(["conversationWidth", "projectThreadLimit", "sessionTypes", "sessionInstances", "sessionFilter"]
+        .map(key => [key, appearance[key]]));
+      setAppearance({ ...defaultAppearance(appearance.theme), ...shared });
       applyAppearance(true);
       projectVisibleThreadCounts.clear();
       renderSidebar();
       updateComposer(); sessionMenu?.close();
       void loadSidebar(null, { fresh: true }).catch(error => notice(error.message, true));
     } catch (error) {
-      if (operation === remoteBackgroundOperation) setRemoteBackgroundError(error.message || "恢复默认设置失败。");
+      if (operation === remoteBackgroundOperation) setRemoteBackgroundError(error.message || "恢复默认外观失败。");
     } finally {
       if (operation === remoteBackgroundOperation) {
         setRemoteBackgroundBusy(false);
@@ -1042,9 +1061,11 @@ export function openAppearance() {
     else closeAppearance();
   };
   dialog.onclose = () => {
+    unsubscribeShared();
     settingsResize?.disconnect();
     window.removeEventListener("resize", syncSettingsOffset);
     remoteSettings.dispose();
+    namingSettings.dispose();
     instancePermissions.dispose();
     for (const page of instancePages.values()) page.dispose();
     if (syncAppearanceThemeControls === sync) setSyncAppearanceThemeControls(null);
@@ -1065,6 +1086,17 @@ export function openAppearance() {
     document.body.classList.toggle("modal-open", !!document.querySelector("dialog[open]"));
     if (trigger?.isConnected && document.activeElement === document.body) trigger.focus();
   };
+  const unsubscribeShared = subscribeSharedSettings(change => {
+    if (!dialog.isConnected || !dialog.open) return;
+    sync();
+    // 原生通知服务可能先收到相同设置；页面须直接使用共享快照，不能等待本机再次发出变更事件。
+    activeNotificationPage?.syncShared();
+    activeNotificationPage?.setBusy(notificationOperations > 0);
+    if (change.instance) {
+      if (!$("#appearance-permissions-page", dialog).hidden) void instancePermissions.show();
+      if (!$("#appearance-instructions-page", dialog).hidden) remoteSettings.refreshInstance(change.instanceId);
+    }
+  });
   document.body.classList.add("modal-open");
   dialog.showModal();
   syncSettingsOffset();

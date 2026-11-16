@@ -10,9 +10,9 @@ import { modelContext, modelContextKey, rememberRemoteFastPreference } from "./m
 import { currentModelId, remoteFastContext, remoteFastKey } from "./model-choice.js";
 import {
   modelCatalogCacheVersion, modelDefaults, modelSettingsVersion, models, modelsLoadedAt, modelsPromise, modelsRetryAt,
-  remoteFastState, remoteFastWrites, remoteFastWriting, selectedDraftFast, setModelDefaults,
+  remoteFastState, remoteFastWrites, remoteFastWriting, selectedDraftFast, selectedEffort, setModelDefaults,
   setModelLoadError, setModels, setModelsLoadedAt, setModelsPromise, setModelsRetryAt,
-  setRemoteFastWriting, setSelectedDraftFast
+  setRemoteFastWriting, setSelectedDraftFast, setSelectedEffort
 } from "./options-state.js";
 import { catalogFallbackMs, catalogNeedsRefresh, catalogRetryMs, catalogUsable } from "./skill-catalog.js";
 import { scheduleCatalogRefresh } from "./skills.js";
@@ -62,6 +62,9 @@ export async function loadModels(force = false, { includeAvailable = false } = {
       supportedReasoningEfforts: (model.supportedReasoningEfforts || [])
         .filter(effort => result.ultraReasoningEnabled !== false || effort.reasoningEffort !== "ultra")
     }));
+    // 其他客户端关闭 Ultra 后也清理未提交选择；历史会话中的原生等级仍按原快照展示。
+    if (context.backend !== "claude" && result.ultraReasoningEnabled === false && selectedEffort === "ultra")
+      setSelectedEffort("");
     setModels(nextModels);
     setModelDefaults({ model: result.defaultModel || "", reasoningEffort: result.defaultReasoningEffort || "",
       nativeCapabilities: result.nativeCapabilities,

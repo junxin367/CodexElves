@@ -2,7 +2,7 @@
 
 import { observeChannelConfiguration, remoteChannelRoutes } from "../../channels.js";
 import {
-  reconnectChangedAuthorization, renderApprovals, scheduleMessages, updateComposer
+  reconnectChangedAuthorization, renderApprovals, scheduleMessages, syncSharedSettings, updateComposer
 } from "../../core/actions.js";
 import {
   connected, nativeConnectionVersion, pageLeaving, session, setConnected, setSession, thread
@@ -111,6 +111,7 @@ export async function syncConnectionState(source = stream, { recoveryProbe = fal
     return false;
   }
   setSession(latest);
+  syncSharedSettings(latest);
   setConnection(backendAvailable(latest) && source?.readyState === EventSource.OPEN);
   renderApprovals();
   return true;

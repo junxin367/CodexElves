@@ -44,7 +44,7 @@ export function activityPresentation(turn, running, now = Date.now()) {
     const dialog = currentThreadDisplay()?.nativeDialog;
     const waiting = dialog?.state === "submitted" ? "正在确认操作结果"
       : dialog?.kind === "model" ? "等待确认模型切换"
-      : dialog?.kind === "effort" ? "等待确认思考深度切换"
+      : dialog?.kind === "effort" ? "等待确认思考等级切换"
       : dialog ? "等待 Claude 本机确认" : "等待 Claude 开始";
     return { text: `已接收，${waiting}`, ticking: false, live: false };
   }
