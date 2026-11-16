@@ -173,6 +173,8 @@ export function fitPopup() {
   const scroller = trigger.closest(".sidebar-content")?.getBoundingClientRect();
   if (box.bottom <= top || box.top >= top + height || box.right <= left || box.left >= left + width
       || (scroller && (box.bottom <= scroller.top || box.top >= scroller.bottom))) { closePopup(); return; }
+  // 用户要求 Open in 固定向左：业务菜单注册定位函数后，所有重绘及滚动/缩放重定位均回调它，不能被通用方向规则覆盖。
+  if (typeof trigger.popupFit === "function") { trigger.popupFit(); return; }
   const originTop = position?.y ?? box.top;
   const originBottom = position?.y ?? box.bottom + gap;
   const originLeft = position?.x ?? box.left;

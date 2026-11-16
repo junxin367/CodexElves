@@ -870,6 +870,48 @@ impl Claude {
         )
     }
 
+    pub(super) async fn open_in_session(
+        &self,
+        id: &str,
+    ) -> anyhow::Result<Option<super::open_in::WslSession>> {
+        if Self::is_subagent_id(id) {
+            return Ok(None);
+        }
+        let c = self.conversation(id).await?;
+        c.config.validate()?;
+        if !c.linux_cwd.starts_with('/')
+            || c.linux_cwd.contains('\0')
+            || uuid::Uuid::parse_str(&c.native_id).is_err()
+        {
+            return Ok(None);
+        }
+        let title: String = c
+            .title
+            .chars()
+            .filter(|value| !value.is_control())
+            .take(80)
+            .collect();
+        // 同一目录可能同时存在多个对话，终端标题绑定原生会话身份，不能激活另一实例/对话的窗口。
+        let window_title = format!("WSL · {} [{}]", title, &c.native_id[..8]);
+        // 用户要求终端直接进入同一个对话：已有原生任务时 attach，空闲历史才 resume；不能另起会话或重复继续执行。
+        let arguments = if c.shared && !c.native_job_id.is_empty() {
+            vec!["attach".into(), c.native_job_id]
+        } else if c.active() {
+            return Ok(None);
+        } else {
+            vec!["--resume".into(), c.native_id]
+        };
+        Ok(Some(super::open_in::WslSession {
+            instance_id: c.config.instance_id(),
+            distribution: c.config.distribution,
+            user: c.config.user,
+            linux_cwd: c.linux_cwd,
+            executable: c.config.executable,
+            arguments,
+            window_title,
+        }))
+    }
+
     async fn native_reader(self: &Arc<Self>, config: &WslConfig) -> anyhow::Result<Arc<Process>> {
         // 配置仅来自服务端检测或已保存会话；按实例缓存读取器，不能复用另一发行版的进程。
         let state = self.discovery_state(config).await?;
@@ -4735,6 +4777,56 @@ mod tests {
             ],
         };
         (directory, service, c)
+    }
+
+    #[tokio::test]
+    async fn open_in_wsl_session_attaches_current_job_or_resumes_exact_idle_history() {
+        let (_directory, service, mut c) = fixture();
+        c.shared = true;
+        c.native_job_id = "native-job-fixture".into();
+        c.native_status = json!({"tempo":"active"});
+        service
+            .saved
+            .lock()
+            .await
+            .conversations
+            .insert(c.id.clone(), c.clone());
+        let session = service.open_in_session(&c.id).await.unwrap().unwrap();
+        assert_eq!(session.instance_id, c.config.instance_id());
+        assert_eq!(session.distribution, c.config.distribution);
+        assert_eq!(session.user, c.config.user);
+        assert_eq!(session.executable, c.config.executable);
+        assert_eq!(session.linux_cwd, c.linux_cwd);
+        assert_eq!(session.arguments, ["attach", "native-job-fixture"]);
+        assert!(session.window_title.contains(&c.native_id[..8]));
+
+        c.native_job_id.clear();
+        service
+            .saved
+            .lock()
+            .await
+            .conversations
+            .insert(c.id.clone(), c.clone());
+        assert!(
+            service.open_in_session(&c.id).await.unwrap().is_none(),
+            "仍在执行却没有原生任务身份时不得另起对话"
+        );
+        c.native_status = json!({"tempo":"idle"});
+        for turn in &mut c.turns {
+            turn["status"] = json!("completed");
+        }
+        service
+            .saved
+            .lock()
+            .await
+            .conversations
+            .insert(c.id.clone(), c.clone());
+        let session = service.open_in_session(&c.id).await.unwrap().unwrap();
+        assert_eq!(session.arguments, ["--resume", c.native_id.as_str()]);
+        assert!(
+            service.processes.lock().await.is_empty(),
+            "准备打开入口不能启动模型或创建对话进程"
+        );
     }
 
     async fn discovery_fixture(

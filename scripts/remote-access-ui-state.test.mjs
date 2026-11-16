@@ -80,6 +80,8 @@ const eventsClient = await readFile(new URL("../assets/remote-access/events-clie
 const sessionTools = await readFile(new URL("../assets/remote-access/session-tools.js", import.meta.url), "utf8");
 const sessionFiles = await readFile(new URL("../assets/remote-access/session-files.js", import.meta.url), "utf8");
 const sessionMenuSource = await readFile(new URL("../assets/remote-access/session-menu.js", import.meta.url), "utf8");
+const workspaceOpenInSource = await readFile(new URL("../assets/remote-access/features/session/open-in.js", import.meta.url), "utf8");
+const popupSource = await readFile(new URL("../assets/remote-access/ui/popup.js", import.meta.url), "utf8");
 const markdownRendererSource = await readFile(new URL("../assets/remote-access/markdown-renderer.js", import.meta.url), "utf8");
 const devServerSource = await readFile(new URL("./dev-remote-access.mjs", import.meta.url), "utf8");
 
@@ -2726,6 +2728,150 @@ test("手机点击普通页面隐藏会话菜单，侧边会话页面及菜单�
           JSON.stringify({ desktop, sideThreadView, target }));
       }
     }
+  }
+});
+
+test("Open in 前端接受独立服务的全部目标，IDEA、WSL 和 PowerShell 不被二次过滤", async () => {
+  const server = await readFile(new URL("../crates/codex-elves-core/src/remote_access/open_in.rs", import.meta.url), "utf8");
+  const table = server.slice(server.indexOf("const TARGETS:"), server.indexOf("\n];", server.indexOf("const TARGETS:")));
+  const targets = [...table.matchAll(/\("([^"]+)", "([^"]+)"\)/g)]
+    .map(([, target, label]) => ({ target, label, available: true }));
+  assert.ok(targets.length >= 11);
+  const context = rawVm.createContext({ input: { ok: true, root: "E:\\项目", targets } });
+  rawVm.runInContext(
+    workspaceOpenInSource.slice(workspaceOpenInSource.indexOf("const applicationIds ="),
+      workspaceOpenInSource.indexOf("const applicationPaths ="))
+      + workspaceOpenInSource.slice(workspaceOpenInSource.indexOf("function normalizeTargets("),
+        workspaceOpenInSource.indexOf("function preferenceKey(")), context);
+  const accepted = Array.from(context.normalizeTargets(context.input, { wslInstance: true }).targets, target => target.target);
+  assert.deepEqual(accepted, targets.map(target => target.target));
+  for (const target of ["intellij", "wsl", "powershell"]) assert.ok(accepted.includes(target));
+  assert.equal(context.normalizeTargets(context.input, { wslInstance: false }).targets
+    .some(target => target.target === "wsl"), false, "本机实例不能被旧后台的 WSL 项误启用");
+});
+
+test("Open in 按执行实例显示 WSL，Windows 挂载目录保留 WSL 身份且更换用户使旧请求失效", () => {
+  const context = rawVm.createContext({
+    window: { __TAURI__: { core: { invoke() {} } } }, pageLeaving: false, creating: false,
+    selectedId: "main", nativeConnectionVersion: 1, session: { capabilities: { workspaceOpenIn: true } },
+    thread: { id: "main", instanceId: "claude:wsl:fixture", wslDistribution: "claude-test",
+      wslUser: "junes", cwd: "E:\\code" },
+    threadReadOnly: () => false, relatedSessionView: null, workspaceSidePanel: false,
+    privateInputScope: () => "scope",
+  });
+  rawVm.runInContext(workspaceOpenInSource.slice(workspaceOpenInSource.indexOf("export function clientOpenInContext("),
+    workspaceOpenInSource.indexOf("function applicationIcon(")).replace(/^export /, ""), context);
+  const first = context.clientOpenInContext();
+  assert.equal(first.wslInstance, true);
+  context.thread.wslUser = "other";
+  assert.notEqual(context.clientOpenInContext().key, first.key);
+  context.thread.instanceId = "codex:local";
+  context.thread.cwd = "\\\\wsl.localhost\\claude-test\\home\\junes";
+  assert.equal(context.clientOpenInContext().wslInstance, false, "WSL 目录不能让本机实例获得入口");
+});
+
+test("Open in 前台未确认时只提示，保留成功回执与首选应用且不重复启动", async () => {
+  for (const warning of ["已打开，但未能确认窗口已切到前台", ""]) {
+    const requests = [], notices = [], selected = [];
+    const disk = storage(), preferences = storage();
+    disk.removeItem = key => disk.records.delete(key);
+    const current = { key: "current", scope: "scope", threadId: "main" };
+    const context = rawVm.createContext({
+      current: () => current, owns: value => value.key === current.key,
+      opening: false, disposed: false, close() {}, syncDisabled() {},
+      readTargets: async () => ({ root: "E:\\项目", targets: [{ target: "powershell", label: "PowerShell" }] }),
+      api: async (...args) => { requests.push(args); return { state: "completed",
+        result: { target: "powershell", root: "E:\\项目", foreground: !warning, warning } }; },
+      validateRemoteReceipt: value => value,
+      setPrimary: value => selected.push(value.target), notice: message => notices.push(message),
+      sessionStorage: disk, localStorage: preferences, randomId: () => "request-one",
+      AbortController, setTimeout: () => 1, clearTimeout() {},
+    });
+    rawVm.runInContext(
+      workspaceOpenInSource.slice(workspaceOpenInSource.indexOf("function preferenceKey("),
+        workspaceOpenInSource.indexOf("export function mountWorkspaceOpenIn("))
+        + workspaceOpenInSource.slice(workspaceOpenInSource.indexOf("  async function activate("),
+          workspaceOpenInSource.indexOf("  function updateContext(")), context);
+    await context.activate();
+    assert.equal(requests.length, 1);
+    assert.deepEqual(selected, ["powershell"]);
+    assert.equal(disk.records.size, 0, "已完成的请求不能保留成待重试");
+    assert.deepEqual([...preferences.records.values()], ["powershell"]);
+    assert.deepEqual(notices, warning ? [warning] : []);
+    assert.equal(context.opening, false);
+  }
+});
+
+function workspaceOpenInPositionHarness() {
+  let anchor = { left: 577, top: 20, width: 46, height: 28 };
+  const rectangle = box => ({ ...box, right: box.left + box.width, bottom: box.top + box.height });
+  const control = className => ({ isConnected: true, hidden: false, disabled: false,
+    setAttribute() {}, append() {}, closest: () => null,
+    getBoundingClientRect: () => rectangle(className === "workspace-open-in-arrow"
+      ? { left: anchor.left + 31, top: anchor.top + 1, width: 14, height: 26 } : anchor),
+  });
+  const context = rawVm.createContext({
+    element: (_tag, className) => control(className),
+    button: (_text, _label, _action, className) => control(className), icon: () => ({}),
+    window: { innerWidth: 1200, innerHeight: 800 }, menuHorizontalLeft,
+    current: () => ({}), close() { context.activePopup = null; },
+    closePopup() { context.activePopup = null; },
+  });
+  const mountStart = workspaceOpenInSource.indexOf("export function mountWorkspaceOpenIn(");
+  const mountEnd = workspaceOpenInSource.indexOf("\n  let contextKey", mountStart);
+  rawVm.runInContext(
+    workspaceOpenInSource.slice(mountStart, mountEnd).replace(/^export /, "")
+      + "\n  return { group, arrow };\n}\n"
+      + workspaceOpenInSource.slice(workspaceOpenInSource.indexOf("  function fitMenu("),
+        workspaceOpenInSource.indexOf("  function decorateMenu("))
+      + popupSource.slice(popupSource.indexOf("export function fitPopup(")).replace(/^export /, ""), context);
+  const controls = context.mountWorkspaceOpenIn({ anchor: { before() {} } });
+  context.group = controls.group; context.group.hidden = false;
+  context.ownsPopup = () => context.activePopup?.trigger === controls.arrow;
+  const popup = { style: {}, dataset: {},
+    getBoundingClientRect() { return { width: parseFloat(this.style.width) || 178, height: 100 }; } };
+  context.activePopup = { trigger: controls.arrow, node: popup };
+  return { context, popup, controls, control, move(box) { anchor = { ...anchor, ...box }; } };
+}
+
+test("Open in 固定向左，首次打开、列表刷新与全局重定位沿用同一按钮组锚点", () => {
+  const h = workspaceOpenInPositionHarness(), { context, popup } = h;
+  for (const [left, expectedLeft] of [[577, 445], [756, 624], [757, 625], [758, 626],
+    [1000, 868], [20, 8], [1150, 1014]]) {
+    h.move({ left });
+    context.fitMenu();
+    assert.equal(popup.style.left, `${expectedLeft}px`);
+    context.fitPopup(); context.fitPopup();
+    assert.equal(popup.style.left, `${expectedLeft}px`, "通用重定位不得改回 65% 分界或改用箭头边缘");
+    assert.equal(popup.style.width, "178px");
+    assert.equal(popup.style.top, "54px", "保持按钮组下方 6px 间隔");
+  }
+});
+
+test("Open in 保留偏移视口的 8px 边缘留白、上下避让和失效入口清理", () => {
+  const h = workspaceOpenInPositionHarness(), { context, popup } = h;
+  context.window.visualViewport = { offsetLeft: 100, offsetTop: 40, width: 700, height: 400 };
+  for (const [left, top, expectedLeft, expectedTop] of [
+    [531, 50, 399, 84], [532, 50, 400, 84], [104, 50, 108, 84],
+    [740, 50, 608, 84], [531, 400, 399, 294],
+  ]) {
+    h.move({ left, top }); context.fitPopup();
+    assert.equal(popup.style.left, `${expectedLeft}px`);
+    assert.equal(popup.style.top, `${expectedTop}px`);
+    assert.equal(popup.style.width, "178px");
+  }
+  h.controls.arrow.disabled = true; context.fitPopup();
+  assert.equal(context.activePopup, null, "入口失效时仍清理菜单");
+});
+
+test("未注册专用定位的普通菜单继续使用 65% 分界和原有垂直间隔", () => {
+  const h = workspaceOpenInPositionHarness(), { context, popup } = h;
+  context.activePopup.trigger = h.control("ordinary");
+  context.activePopup.trigger.popupWidth = 178;
+  for (const [left, expectedLeft] of [[577, 577], [756, 756], [757, 625], [758, 626]]) {
+    h.move({ left }); context.fitPopup();
+    assert.equal(popup.style.left, `${expectedLeft}px`);
+    assert.equal(popup.style.top, "52px", "普通菜单继续保持 4px 垂直间隔");
   }
 });
 

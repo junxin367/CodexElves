@@ -15,12 +15,16 @@ mod windows;
 const TARGETS: &[(&str, &str)] = &[
     ("vscode", "VS Code"),
     ("visualStudio", "Visual Studio"),
+    // 用户要求补齐本机 Codex 菜单中的 IDEA、WSL 和 PowerShell；前端应用 ID 列表须同步维护。
+    ("intellij", "IntelliJ IDEA"),
     ("sublimeText", "Sublime Text"),
     ("githubDesktop", "GitHub Desktop"),
     ("fileManager", "File Explorer"),
     ("gitBash", "Git Bash"),
     ("cmder", "Cmder"),
     ("rider", "Rider"),
+    ("powershell", "PowerShell"),
+    ("wsl", "WSL"),
 ];
 
 #[derive(Debug)]
@@ -28,6 +32,23 @@ struct Application {
     target: &'static str,
     label: &'static str,
     executable: PathBuf,
+    wsl_session: Option<WslSession>,
+}
+
+#[derive(Debug, Clone)]
+pub(super) struct WslSession {
+    pub instance_id: String,
+    pub distribution: String,
+    pub user: String,
+    pub linux_cwd: String,
+    pub executable: String,
+    pub arguments: Vec<String>,
+    pub window_title: String,
+}
+
+struct LaunchOutcome {
+    foreground: bool,
+    warning: Option<String>,
 }
 
 fn identity(payload: &Value, opening: bool) -> Result<Value, ApiError> {
@@ -50,22 +71,60 @@ fn response(value: Value) -> Response {
 }
 
 #[cfg(not(windows))]
-fn applications(_: &Path) -> Vec<Application> {
+fn applications(_: &Path, _: Option<&WslSession>) -> Vec<Application> {
     Vec::new()
 }
 
 #[cfg(windows)]
-fn applications(root: &Path) -> Vec<Application> {
+fn applications(root: &Path, wsl_session: Option<&WslSession>) -> Vec<Application> {
     TARGETS
         .iter()
         .filter_map(|&(target, label)| {
+            // 用户要求 WSL 菜单只属于实际由 WSL 实例执行且可恢复的当前对话，不能靠项目目录或本机装有 wsl.exe 判定。
+            if target == "wsl" && wsl_session.is_none() {
+                return None;
+            }
             windows::find_application(target, root).map(|executable| Application {
                 target,
                 label,
                 executable,
+                wsl_session: (target == "wsl").then(|| wsl_session.cloned()).flatten(),
             })
         })
         .collect()
+}
+
+async fn wsl_session(
+    state: &WebState,
+    identity: &Value,
+    metadata: &Value,
+) -> Result<Option<WslSession>, ApiError> {
+    let Some(thread_id) = identity["threadId"].as_str() else {
+        return Ok(None);
+    };
+    // 当前只有 Claude 的 WSL 执行适配器已就绪；Codex 本机实例或仅存放在 WSL 目录的项目不得展示此入口。
+    if metadata["backend"] != "claude"
+        || !metadata["instanceId"]
+            .as_str()
+            .is_some_and(|id| id.starts_with("claude:wsl:"))
+    {
+        return Ok(None);
+    }
+    let session = state
+        .controller
+        .claude
+        .open_in_session(thread_id)
+        .await
+        .map_err(|error| ApiError::new(409, &format!("无法确认 WSL 会话：{error}")))?;
+    if let Some(session) = &session
+        && (metadata["instanceId"] != session.instance_id
+            || metadata["wslDistribution"] != session.distribution
+            || metadata["wslUser"] != session.user
+            || metadata["linuxCwd"] != session.linux_cwd)
+    {
+        return Err(ApiError::new(409, "WSL 会话实例已变化，请重新打开菜单"));
+    }
+    Ok(session)
 }
 
 pub(super) async fn targets(
@@ -80,9 +139,10 @@ pub(super) async fn targets(
         .await
         .map_err(super::authorization_error)?;
     let identity = identity(&payload, false)?;
-    let root = super::workspace_context(&state, &identity, &authorization).await?;
+    let (root, metadata) = super::workspace_file_context(&state, &identity, &authorization).await?;
+    let wsl_session = wsl_session(&state, &identity, &metadata).await?;
     let result = tokio::task::spawn_blocking(move || {
-        let targets: Vec<_> = applications(&root)
+        let targets: Vec<_> = applications(&root, wsl_session.as_ref())
             .into_iter()
             .map(|app| json!({"target": app.target, "label": app.label, "available": true}))
             .collect();
@@ -155,9 +215,10 @@ pub(super) async fn dispatch(
         .filter(|target| TARGETS.iter().any(|(id, _)| id == target))
         .ok_or_else(|| ApiError::new(400, "请选择可用的工作区应用"))?
         .to_owned();
-    let root = super::workspace_context(&state, &identity, authorization).await?;
+    let (root, metadata) = super::workspace_file_context(&state, &identity, authorization).await?;
+    let wsl_session = wsl_session(&state, &identity, &metadata).await?;
     let (root, application) = tokio::task::spawn_blocking(move || {
-        let application = applications(&root)
+        let application = applications(&root, wsl_session.as_ref())
             .into_iter()
             .find(|app| app.target == target)
             .ok_or_else(|| ApiError::new(409, "该应用已不可用，请重新选择打开方式"))?;
@@ -165,18 +226,23 @@ pub(super) async fn dispatch(
     })
     .await
     .map_err(|_| ApiError::new(503, "无法确认工作区应用"))??;
-    let result = json!({"ok": true, "root": display_path(&root), "target": application.target});
+    let mut result = json!({"ok": true, "root": display_path(&root), "target": application.target});
     let permit = authorization
         .prepare_dispatch()
         .await
         .map_err(super::authorization_error)?;
     // 与原注入功能一致，启动前重新检测应用、复核授权；只在服务所在电脑启动一次，不复用 Codex App。
-    tokio::task::spawn_blocking(move || {
+    let outcome = tokio::task::spawn_blocking(move || {
         permit.commit(|| launch(&application, &root).map_err(anyhow::Error::from))
     })
     .await
     .map_err(|_| ApiError::new(503, "无法启动工作区应用"))?
     .map_err(super::authorization_error)?;
+    // 用户要求打开后显示在前台；启动成功与窗口激活分别回执，激活失败不能触发重复启动。
+    result["foreground"] = json!(outcome.foreground);
+    if let Some(warning) = outcome.warning {
+        result["warning"] = json!(warning);
+    }
     Ok(result)
 }
 
@@ -190,11 +256,11 @@ fn display_path(path: &Path) -> String {
 }
 
 #[cfg(windows)]
-fn launch(application: &Application, root: &Path) -> Result<(), ApiError> {
+fn launch(application: &Application, root: &Path) -> Result<LaunchOutcome, ApiError> {
     windows::launch(application, root)
 }
 
 #[cfg(not(windows))]
-fn launch(_: &Application, _: &Path) -> Result<(), ApiError> {
+fn launch(_: &Application, _: &Path) -> Result<LaunchOutcome, ApiError> {
     Err(ApiError::new(422, "当前服务系统不支持打开工作区应用"))
 }

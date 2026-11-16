@@ -2,7 +2,6 @@
 import { button, element } from "../../ui/dom.js";
 import { icon } from "../../ui/icons.js";
 import { notice } from "../../ui/notice.js";
-import { menuHorizontalLeft } from "../../ui/position.js";
 import { activePopup, closePopup, openPopup, renderPopup } from "../../ui/popup.js";
 import { creating, nativeConnectionVersion, pageLeaving, selectedId, session, thread } from "../../core/state.js";
 import { randomId } from "../../core/util.js";
@@ -12,8 +11,9 @@ import { privateInputScope, threadReadOnly } from "./capabilities.js";
 import { relatedSessionView } from "./related-state.js";
 import { workspaceSidePanel } from "./side-panel.js";
 
+// 用户要求补齐 IDEA、WSL 和 PowerShell；ID 须与独立服务 open_in.rs 的 TARGETS 同步，不能在前端再次过滤掉已支持应用。
 const applicationIds = new Set(["vscode", "visualStudio", "sublimeText", "githubDesktop",
-  "fileManager", "gitBash", "cmder", "rider"]);
+  "fileManager", "gitBash", "cmder", "rider", "intellij", "powershell", "wsl"]);
 const applicationPaths = {
   vscode: '<path d="M17.25 2.8 7.57 11.6 3.4 8.43 1.5 9.5v5l1.9 1.08 4.17-3.18 9.68 8.8L22.5 19V5l-5.25-2.2Zm-.2 5.08v8.24L11.75 12l5.3-4.12Z"/>',
   visualStudio: '<path d="m17.34 2.5-8.8 6.7-4.42-3.42L1.5 7.1v9.8l2.62 1.32 4.42-3.42 8.8 6.7 5.16-2.06V4.56L17.34 2.5ZM4.65 9.35 7.7 12l-3.05 2.65v-5.3Zm12.5-1.82v8.94L11.28 12l5.87-4.47Z"/>',
@@ -28,8 +28,13 @@ export function clientOpenInContext() {
       || relatedSessionView || workspaceSidePanel) return null;
   const scope = privateInputScope(session);
   if (!scope) return null;
+  // 用户要求 WSL 只显示于实际执行的 WSL 会话实例；Windows 挂载目录仍可能是 WSL 会话，不能按 cwd 的路径格式推断。
+  const wslInstance = typeof thread.instanceId === "string" && thread.instanceId.includes(":wsl:")
+    && typeof thread.wslDistribution === "string" && !!thread.wslDistribution;
   return { scope, threadId: selectedId,
-    key: JSON.stringify([scope, selectedId, nativeConnectionVersion, thread.cwd || ""]) };
+    wslInstance,
+    key: JSON.stringify([scope, selectedId, nativeConnectionVersion, thread.cwd || "",
+      thread.instanceId || "", thread.wslDistribution || "", thread.wslUser || ""]) };
 }
 
 function applicationIcon(target) {
@@ -38,17 +43,18 @@ function applicationIcon(target) {
   if (applicationPaths[target])
     node.innerHTML = `<svg viewBox="0 0 24 24" fill="currentColor">${applicationPaths[target]}</svg>`;
   else if (target === "sublimeText") node.textContent = "S";
-  else if (target === "rider") node.append(element("span", "", "RD"));
-  else node.append(icon(["gitBash", "cmder"].includes(target) ? "terminal" : "window"));
+  else if (["rider", "intellij"].includes(target)) node.append(element("span", "", target === "intellij" ? "IJ" : "RD"));
+  else node.append(icon(["gitBash", "cmder", "powershell", "wsl"].includes(target) ? "terminal" : "window"));
   return node;
 }
 
-function normalizeTargets(result) {
+function normalizeTargets(result, context) {
   if (result?.ok !== true || typeof result.root !== "string" || !result.root
       || result.root.length > 32768 || !Array.isArray(result.targets))
     throw new Error("工作区应用列表无效，请重新打开会话。");
   const seen = new Set();
   const targets = result.targets.filter(target => target && applicationIds.has(target.target)
+      && (target.target !== "wsl" || context?.wslInstance === true)
       && target.available === true && typeof target.label === "string" && target.label.length <= 80
       && target.label.trim() && !seen.has(target.target) && seen.add(target.target))
     .map(({ target, label }) => ({ target, label }));
@@ -74,6 +80,8 @@ export function mountWorkspaceOpenIn({ anchor, beforeOpen = () => {} }) {
   arrow.setAttribute("aria-haspopup", "menu"); arrow.setAttribute("aria-expanded", "false");
   arrow.append(icon("chevron"));
   arrow.popupClassName = "workspace-open-in-menu"; arrow.popupWidth = 178;
+  // 用户要求 Open in 固定向左；首次打开、列表刷新和全局重定位均使用自身定位，保留 178px 宽度及 6px 垂直间隔。
+  arrow.popupFit = fitMenu;
   group.append(primary, arrow); anchor.before(group);
 
   let contextKey = null, loaded = null, pending = null, opening = false, disposed = false;
@@ -105,7 +113,7 @@ export function mountWorkspaceOpenIn({ anchor, beforeOpen = () => {} }) {
     pending = request;
     request.promise = api("/api/workspace/open-in-targets", { threadId: context.threadId },
       undefined, request.controller.signal).then(value => {
-      const result = normalizeTargets(value);
+      const result = normalizeTargets(value, context);
       if (owns(context) && pending === request) {
         loaded = { ...result, key: context.key, at: Date.now() };
         setPrimary(preferredTarget(context, result)); syncDisabled();
@@ -126,8 +134,9 @@ export function mountWorkspaceOpenIn({ anchor, beforeOpen = () => {} }) {
     popup.style.maxHeight = `${Math.min(360, Math.max(below, above))}px`;
     const menuHeight = popup.getBoundingClientRect().height;
     const upward = menuHeight > below && above > below;
-    // 用户要求与 Select 共用 65% / 35% 分界：入口中心位于最右 35% 时才右对齐、向左展开。
-    popup.style.left = `${menuHorizontalLeft(box, popup.getBoundingClientRect().width, { left, width }, 8)}px`;
+    // 用户要求远程 Open in 固定向左展开，右边缘对齐整个按钮组；两侧保留 8px 留白，空间不足时只平移、不反向展开。
+    const menuWidth = popup.getBoundingClientRect().width;
+    popup.style.left = `${Math.max(left + 8, Math.min(box.right - menuWidth, left + width - menuWidth - 8))}px`;
     popup.style.top = `${upward ? Math.max(top + 8, box.top - menuHeight - 6) : box.bottom + 6}px`;
   }
   function decorateMenu() {
@@ -205,6 +214,8 @@ export function mountWorkspaceOpenIn({ anchor, beforeOpen = () => {} }) {
       setPrimary(chosen);
       try { localStorage.setItem(preferenceKey(context, opened.root), chosen.target); }
       catch { notice("应用启动请求已提交，但首选打开方式未能保存。", true); }
+      // 用户要求打开后显示前台；后台已启动但未能确认前台时明确提示，保留成功回执和首选应用，不重发请求。
+      if (typeof opened.warning === "string" && opened.warning.trim()) notice(opened.warning);
     } catch (error) {
       if (!owns(context)) return;
       if (!dispatching && error.name === "AbortError") return;
