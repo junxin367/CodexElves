@@ -87,7 +87,7 @@ Claude 的 `AskUserQuestion` 在原生结果带有结构化回答时，会在提
 
 原生带 `interruptedMessageId` 的中断控制记录显示为原回复下方的「请求已中断」，悬停可查看原生标记，不单独形成用户消息。仅隐藏明确非 API 错误的原生合成占位回复 `No response requested.`；真实模型正文、用户引用和错误信息保留。HTTP 分页与实时同步均核对有效轮次 ID，清理旧误分类缓存并重算游标，不改写原生 JSONL。详见[Claude 消息渲染排查](validation/claude-message-rendering-20261112.md)。
 
-Claude 终端预览与正式历史分开保存。预览绑定当前连接、原生用户消息和已读取的正文摘要；仅工具状态或用量变化时保留已显示内容，正式正文到达后一次性接替。迟到、缩短、无法确认归属的终端片段不覆盖正式消息；终端工具状态行不作为回复展示，Markdown 与终端纯文本的重复只用于过滤预览，不改写正式正文。临时预览不进入服务端持久化历史，升级后清理旧版残留的预览记录；HTTP 读取和实时通知使用同一接替规则。
+Claude 终端预览与正式历史分开保存。预览绑定当前连接、原生用户消息和已读取的正文摘要；仅工具状态或用量变化时保留已显示内容，正式正文到达后一次性接替。迟到、缩短、无法确认归属的终端片段不覆盖正式消息；终端工具状态行不作为回复展示：连续工具被 CLI 折叠成的分组行（如 `Calling playwright 3 times…`、`Searching for 1 pattern, reading 2 files…`，带或不带 `(ctrl+o to expand)`）按进度行过滤，记录里存在尚未返回结果的 `tool_use` 时整段暂停终端预览；实时进度由正式的进行中工具条目在活动区显示，结果返回后恢复预览。过去式句式取自 CLI 源码，尚未在真实画面观察，CLI 升级后若出现新的分组句式，需用真实画面补充 `scripts/claude-shared-history.test.py` 的样例，Markdown 与终端纯文本的重复只用于过滤预览，不改写正式正文。临时预览不进入服务端持久化历史，升级后清理旧版残留的预览记录；HTTP 读取和实时通知使用同一接替规则。
 
 默认配置使用独立实例 `codex-elves-claude-test`、用户 `elves-test` 和 `/home/elves-test/.local/bin/claude`。可在本机状态目录的 `remote-claude-wsl.json` 显式设置 `distribution`、`user`、`executable`，也可在页面选择其他已检测且接入就绪的实例；已有会话保留创建时绑定的环境。所有发行版使用相同的名称、用户和路径校验，不按发行版名称增设功能限制。API 地址及密钥由各实例自己的 Claude 配置管理，不写入本文件或仓库。
 

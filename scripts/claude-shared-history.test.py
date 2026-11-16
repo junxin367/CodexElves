@@ -1052,6 +1052,61 @@ class SharedQueueHistoryTests(unittest.TestCase):
         frames = self.preview_frames(native, "❯ fixture prompt\n● Actual reply\n  Reading 2 fi")
         self.assertEqual(frames[-1]["text"], "Actual reply")
 
+    # 真实 CLI 2.1.325（本地模拟 API + 并行 MCP / 读取 / 搜索）的工具分组行；末尾展开提示可有可无。
+    # 过去式来自 CLI 源码，尚未在真实画面观察到。
+    TOOL_GROUP_LINES = (
+        "Calling playwright 3 times…",
+        "Calling fake 3 times… (ctrl+o to expand)",
+        "Reading 2 files… (ctrl+o to expand)",
+        "Searching for 1 pattern, reading 2 files, calling fake, other 3 times… (ctrl+o to expand)",
+        "Called fake 3 times (ctrl+o to expand)",
+        "Searched for 1 pattern, read 2 files, called fake, other 3 times",
+        "Listing 2 directories…",
+    )
+
+    def test_cli_tool_group_lines_are_never_shown_as_reply_text(self):
+        for line in self.TOOL_GROUP_LINES:
+            with self.subTest(line=line):
+                self.assertTrue(namespace["terminal_progress_line"](line))
+                native = self.native_active()
+                native.messages[0]["message"]["content"] = "fixture prompt"
+                self.assertEqual(self.preview_frames(native, f"❯ fixture prompt\n● {line}\n"), [])
+                self.assertEqual(native.preview, "")
+                # 分组行行首圆点随进行中闪烁，会以两格缩进接在上一段正文后面；正文照常预览，分组行被截掉。
+                frames = self.preview_frames(native, f"❯ fixture prompt\n● 先检查一下显示效果。\n\n  {line}\n")
+                self.assertEqual(frames[-1]["text"], "先检查一下显示效果。")
+
+    def test_split_tool_group_fragments_wait_and_normal_sentences_with_the_same_verbs_show(self):
+        for line in self.TOOL_GROUP_LINES[:4]:
+            native = self.native_active()
+            native.messages[0]["message"]["content"] = "fixture prompt"
+            for length in range(1, len(line) + 1):
+                with self.subTest(fragment=line[:length]):
+                    self.assertEqual(self.preview_frames(native, f"❯ fixture prompt\n● {line[:length]}"), [])
+        for sentence in ("Calling the API requires a token.", "Searching for answers takes time.",
+                         "Read the file first, then run it.", "Calling playwright 3 times is slow, so batch them."):
+            with self.subTest(sentence=sentence):
+                native = self.native_active()
+                native.messages[0]["message"]["content"] = "fixture prompt"
+                frames = self.preview_frames(native, f"❯ fixture prompt\n● {sentence}")
+                self.assertEqual(frames[-1]["text"], sentence)
+        self.assertFalse(namespace["terminal_progress_line"]("Calling" + " a," * 2000 + "!", partial=True))
+
+    def test_pending_native_tool_use_blocks_terminal_preview_until_its_result_returns(self):
+        # 工具调用已写入记录而结果未返回时，模型在等工具，终端上的 “●” 只能是工具进度；
+        # 进度由正式 tool_use 条目（inProgress）在活动区显示，不进入回复正文。
+        native = self.native_active()
+        native.messages[0]["message"]["content"] = "fixture prompt"
+        native.messages.append({"type": "assistant", "uuid": "tool-row", "message": {
+            "id": "tool-message", "content": [{"type": "tool_use", "id": "toolu_1", "name": "mcp__fake__ping",
+                                               "input": {}}]}})
+        self.assertEqual(self.preview_frames(native, "❯ fixture prompt\n● 一行未收录的工具状态\n"), [])
+        native.messages.append({"type": "user", "uuid": "result-row", "message": {
+            "content": [{"type": "tool_result", "tool_use_id": "toolu_1", "content": "pong"}]}})
+        frames = self.preview_frames(native, "❯ fixture prompt\n● 工具返回后的真实回复\n")
+        self.assertEqual(frames[-1]["text"], "工具返回后的真实回复")
+        self.assertEqual(namespace["native_pending_tool_uses"](native.messages), set())
+
     def test_native_skill_wrapper_confirms_the_original_slash_input_once(self):
         text = ("<command-message>simplify</command-message>\n"
                 "<command-name>/simplify</command-name>\n<command-args>probe</command-args>")

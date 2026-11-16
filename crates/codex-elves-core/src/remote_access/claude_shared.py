@@ -958,9 +958,53 @@ _PROGRESS_ACTION = "(?:" + "|".join(_PROGRESS_ACTIONS) + ")"
 _PROGRESS_TARGET = "(?:" + "|".join(sorted(_PROGRESS_TARGETS, key=len, reverse=True)) + ")"
 _PROGRESS_CLAUSE = rf"{_PROGRESS_ACTION}\s+\d+\s+{_PROGRESS_TARGET}"
 _PROGRESS_SEPARATOR = r"(?:\s*,\s*|\s+and\s+)"
+# 用户要求实时预览不能把 CLI 的工具分组行当成回复正文。2.1.325 真实画面（并行 MCP、读取、搜索）会把连续工具
+# 折叠成一行，例如：
+#   Calling playwright 3 times… (ctrl+o to expand)
+#   Searching for 1 pattern, reading 2 files, calling fake, other 3 times… (ctrl+o to expand)
+# 末尾展开提示只在 CLI 尚未多次显示时出现，所以可有可无。
+# 已完成的过去式（Searched for / Read / Listed / Called）取自 CLI 源码，尚未在真实画面观察到，按同一语法处理。
+_GROUP_LABEL = r"[\w.:@/-]+"
+
+
+def _literal_prefix(text):
+    # 固定文字展开成“任意前缀”的嵌套可选写法，用于被分包截断的最后一行。
+    pattern = ""
+    for char in reversed(text):
+        pattern = f"(?:{re.escape(char)}{pattern})?"
+    return pattern
+
+
+def _group_word(*words):
+    return "(?:" + "|".join(words) + ")", "(?:" + "|".join(_literal_prefix(word) for word in words) + ")"
+
+
+_GROUP_COUNT = (r"\d+", r"\d+")
+_GROUP_LABELS = (rf"{_GROUP_LABEL}(?:\s*,\s*{_GROUP_LABEL})*", rf"{_GROUP_LABEL}(?:\s*,\s*(?:{_GROUP_LABEL})?)*")
+# 每个模板是一个从句；“reading N files”等已由 _PROGRESS_CLAUSE 覆盖，这里只补句式不同的从句和过去式。
+_GROUP_TEMPLATES = (
+    (_group_word("searching", "searched"), _group_word("for"), _GROUP_COUNT, _group_word("pattern", "patterns")),
+    (_group_word("read"), _GROUP_COUNT, _group_word("file", "files")),
+    (_group_word("listing", "listed"), _GROUP_COUNT, _group_word("directory", "directories")),
+    (_group_word("calling", "called"), _GROUP_LABELS, _GROUP_COUNT, _group_word("time", "times")),
+)
+
+
+def _group_sequence_prefix(tokens):
+    full, prefix = tokens[0]
+    if len(tokens) == 1:
+        return prefix
+    return rf"(?:{full}(?:\s+(?:{_group_sequence_prefix(tokens[1:])})?)?|{prefix})"
+
+
+_GROUP_CLAUSE = "(?:" + "|".join(r"\s+".join(full for full, _ in tokens) for tokens in _GROUP_TEMPLATES) + ")"
+_GROUP_CLAUSE_PREFIX = "(?:" + "|".join(_group_sequence_prefix(tokens) for tokens in _GROUP_TEMPLATES) + ")"
+_PROGRESS_ANY = rf"(?:{_PROGRESS_CLAUSE}|{_GROUP_CLAUSE})"
+_PROGRESS_HINT = r"\(ctrl\+o to expand\)"
+_PROGRESS_HINT_PREFIX = _literal_prefix("(ctrl+o to expand)")
 _PROGRESS_LINE = re.compile(
-    rf"\s*{_PROGRESS_CLAUSE}(?:{_PROGRESS_SEPARATOR}{_PROGRESS_CLAUSE})*"
-    r"(?:\s*[·•]\s*(?:\d+(?:\.\d+)?(?:ms|[hms])\s*)+)?(?:\.{3}|…)?\s*", re.IGNORECASE)
+    rf"\s*{_PROGRESS_ANY}(?:{_PROGRESS_SEPARATOR}{_PROGRESS_ANY})*"
+    rf"(?:\s*[·•]\s*(?:\d+(?:\.\d+)?(?:ms|[hms])\s*)+)?(?:\.{{3}}|…)?(?:\s*{_PROGRESS_HINT})?\s*", re.IGNORECASE)
 # 只在尚未结束的最后一行延迟不完整的进度前缀，避免 Reading… 分包时先污染正文；
 # 一旦后续文字表明它是普通句子就正常展示，不能全局隐藏以这些单词开头的回复。
 _PROGRESS_ACTION_PREFIX = "(?:" + "|".join(sorted(
@@ -969,9 +1013,11 @@ _PROGRESS_TARGET_PREFIX = "(?:" + "|".join(sorted(
     {word[:end] for word in _PROGRESS_TARGETS for end in range(1, len(word) + 1)}, key=len, reverse=True)) + ")"
 _PROGRESS_PARTIAL_CLAUSE = rf"(?:{_PROGRESS_ACTION_PREFIX}|{_PROGRESS_ACTION}\s+\d*|{_PROGRESS_ACTION}\s+\d+\s+{_PROGRESS_TARGET_PREFIX}?)?"
 _PROGRESS_PARTIAL = re.compile(
-    rf"\s*(?:{_PROGRESS_CLAUSE}{_PROGRESS_SEPARATOR})*{_PROGRESS_PARTIAL_CLAUSE}\s*|"
-    rf"\s*{_PROGRESS_CLAUSE}(?:{_PROGRESS_SEPARATOR}{_PROGRESS_CLAUSE})*"
-    r"(?:\s+a(?:n(?:d\s*)?)?|\s*,\s*|\s*[·•]\s*[\d.hms\s…]*|\.{1,3}|…)\s*", re.IGNORECASE)
+    rf"\s*(?:{_PROGRESS_ANY}{_PROGRESS_SEPARATOR})*(?:{_PROGRESS_PARTIAL_CLAUSE}|{_GROUP_CLAUSE_PREFIX})\s*|"
+    rf"\s*{_PROGRESS_ANY}(?:{_PROGRESS_SEPARATOR}{_PROGRESS_ANY})*"
+    r"(?:\s+a(?:n(?:d\s*)?)?|\s*,\s*|\s*[·•]\s*[\d.hms\s…]*|\.{1,3}|…)\s*|"
+    rf"\s*{_PROGRESS_ANY}(?:{_PROGRESS_SEPARATOR}{_PROGRESS_ANY})*(?:\.{{3}}|…)?\s*{_PROGRESS_HINT_PREFIX}\s*",
+    re.IGNORECASE)
 
 
 def terminal_progress_line(line, partial=False):
@@ -1005,6 +1051,23 @@ def terminal_reply_region(lines, prompt, occurrences):
     if marker is None:
         return []
     return [lines[marker][2:]] + [line[2:] if line.startswith("  ") else line for line in lines[marker + 1:end]]
+
+
+def native_pending_tool_uses(rows):
+    # 用户要求实时预览不能把工具进度当回复正文：记录里已有 tool_use 而结果未返回时模型在等工具，不可能在流式输出文字，
+    # 此时终端上的 “●” 一定是工具分组行。工具进度改由正式 tool_use 条目（inProgress）在活动区显示。
+    pending = set()
+    for row in rows:
+        message = row.get("message")
+        content = message.get("content") if isinstance(message, dict) else None
+        for part in content if isinstance(content, list) else []:
+            if not isinstance(part, dict):
+                continue
+            if part.get("type") == "tool_use" and part.get("id"):
+                pending.add(part["id"])
+            elif part.get("type") == "tool_result":
+                pending.discard(part.get("tool_use_id"))
+    return pending
 
 
 class NativeSubagents:
@@ -3761,7 +3824,8 @@ class NativeSession:
                     known.extend(preview_text_key(text) for text in texts)
             basis = hashlib.sha256(json.dumps([user["uuid"], records], ensure_ascii=False,
                                                separators=(",", ":")).encode("utf-8")).hexdigest()
-            result = (user, basis, known, prompt, self.preview_prompt_cache[1])
+            result = (user, basis, known, prompt, self.preview_prompt_cache[1],
+                      bool(native_pending_tool_uses(self.messages[start + 1:])))
         self.preview_context_cache = (key, result)
         return result
 
@@ -3777,12 +3841,12 @@ class NativeSession:
         if context is None:
             return
         self.preview_dirty = False
-        user, basis, known, prompt, occurrences = context
+        user, basis, known, prompt, occurrences, tools_pending = context
         if self.preview_user != user["uuid"] or self.preview_basis != basis:
             self.preview_user = user["uuid"]
             self.preview_basis = basis
             self.preview = self.preview_emitted = ""
-        if native_turn_finished(self.messages):
+        if native_turn_finished(self.messages) or tools_pending:
             return
         lines = self.screen.text()
         region = terminal_reply_region(lines, prompt, occurrences)
