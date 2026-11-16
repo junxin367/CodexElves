@@ -81,6 +81,9 @@ export function confirmSendDisplay(payload, result, { steering = false } = {}) {
     remotePendingInput: true, remoteConfirmedInput: true, remoteDirectSend: true,
     content: [
       ...(payload.prompt ? [{ type: "text", text: payload.prompt }] : []),
+      // 用户要求可只发送本机文件/文件夹；成功回执到原生正文补齐前也应显示附件名称，不能生成空白消息。
+      ...(payload.files?.length ? [{ type: "text",
+        text: `附件：${payload.files.map(file => `${file.name}${file.kind === "folder" ? "（文件夹）" : ""}`).join("、")}` }] : []),
       ...(payload.images || []).map(image => ({ type: "image", url: image.dataUrl ?? image.url ?? image.src })),
       ...(payload.skills || []).map(skill => ({ type: "skill", name: skill.name, path: skill.path }))
     ]

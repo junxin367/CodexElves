@@ -1,9 +1,9 @@
 // 输入区状态与发送：发送按钮/禁用状态更新、失败输入恢复提示、发送与停止生成、输入区滚动挂载与统计同步；发送中标记与反馈计时在 send-state.js。
 
 import {
-  chooseComposerImages, composerAttachmentSnapshot, composerAttachmentsLoading,
-  composerAttachmentsPayload, composerCanAddImages, composerHasAttachments,
-  setComposerAttachmentsDisabled
+  chooseComposerImages, chooseComposerLocalInputs, composerAttachmentSnapshot, composerAttachmentsLoading,
+  composerAttachmentsPayload, composerCanAddImages, composerCanAddLocalInputs, composerHasAttachments,
+  composerLocalInputsPayload, composerLocalInputsSupported, setComposerAttachmentsDisabled
 } from "../../attachments.js";
 import { recordDiagnostic } from "../../diagnostics.js";
 import { recoveryStorageMessage } from "../../recovery-store.js";
@@ -187,7 +187,9 @@ export function updateComposer() {
   const editing = !!editingMessage || !!editingQueuedMessage;
   const compactionSendReason = compacting && !goalMode && !editing ? compactionQueueSendReason() : "";
   const queueOnly = !isClaude() && compacting && !goalMode && !editing && !compactionSendReason;
-  const unsupportedImages = !editing && hasAttachments && !backendCapability("imageInput")
+  const unsupportedFiles = composerLocalInputsPayload().length > 0
+    && (session?.capabilities?.localFileInput !== true || !composerLocalInputsSupported());
+  const unsupportedImages = !editing && composerAttachmentsPayload().length > 0 && !backendCapability("imageInput")
     || !!editingQueuedMessage?.imageEditing && composerAttachmentsPayload().length > 0
       && !queueCapability("queuedImageEditing");
   const queueImageNote = editingQueuedMessage?.state === "editing"
@@ -205,25 +207,36 @@ export function updateComposer() {
     $("#composer-attachments").after(attachmentNote);
   }
   if (attachmentNote) {
-    attachmentNote.textContent = unsupportedImages
+    attachmentNote.textContent = unsupportedFiles
+      ? "文件和文件夹仅可在支持此功能的独立远程客户端发送，请更新客户端及远程服务；附件已保留。"
+      : unsupportedImages
       ? editingQueuedMessage
         ? "当前运行的服务尚不支持编辑队列图片，修改已保留，请更新程序后再发送。"
         : "当前运行的服务尚不支持图片发送，请更新程序后再发送。"
       : queueImageNote;
-    attachmentNote.hidden = !unsupportedImages && !queueImageNote;
+    attachmentNote.hidden = !unsupportedFiles && !unsupportedImages && !queueImageNote;
   }
   setComposerAttachmentsDisabled(threadReadOnly() || deleting || compacting && editing || busy || stopping
     || !!editingMessage || editing && !!pending || editingQueuedMessage?.state === "starting" || (!creating && !selectedId));
   const add = $("#composer-add");
   const usage = contextUsage(currentThreadDisplay()?.tokenUsage);
+  // 用户指定顺序：文件和文件夹、图片、目标、压缩；本机文件入口只出现在已安装原生能力的独立客户端。
   add.menuOptions = [
-    { value: "compact", label: "压缩", icon: "compactContext",
-      description: compactUsageDescription(usage),
-      disabled: !compactCommandAvailable(), action: compactContext },
+    ...(composerLocalInputsSupported() ? [{
+      value: "files", label: "文件和文件夹", icon: "folderClosed",
+      disabled: deleting || !composerCanAddLocalInputs() || session?.capabilities?.localFileInput !== true,
+      submenu: [
+        { label: "选择文件", icon: "document", action: () => chooseComposerLocalInputs(false) },
+        { label: "选择文件夹", icon: "folderClosed", action: () => chooseComposerLocalInputs(true) }
+      ]
+    }] : []),
+    { value: "images", label: "图片", icon: "image", disabled: deleting || !composerCanAddImages(), action: chooseComposerImages },
     { value: "goal", label: "目标", icon: "target",
       description: goalComposerReason() || "设置要持续追求的目标",
       disabled: !!goalComposerReason(), action: () => selectGoalCommand(null) },
-    { label: "添加图片", icon: "image", disabled: deleting || !composerCanAddImages(), action: chooseComposerImages }
+    { value: "compact", label: "压缩", icon: "compactContext",
+      description: compactUsageDescription(usage),
+      disabled: !compactCommandAvailable(), action: compactContext }
   ].filter(option => !isClaude() || !["compact", "goal"].includes(option.value)
     || claudeCommandSupported(option.value));
   add.disabled = add.menuOptions.every(option => option.disabled);
@@ -251,6 +264,7 @@ export function updateComposer() {
   send.setAttribute("aria-label", sendingLabel || (goalMode ? "创建目标" : action === "stop" ? stopLabel : queueOnly ? "发送到原生消息队列" : "发送消息"));
   send.title = sendingLabel || (editingQueuedMessage ? "发送消息" : editingMessage ? "请先完成消息编辑" : goalMode ? goalReason || "创建目标" : action === "stop" ? stopLabel : queueOnly ? "加入原生消息队列，压缩完成后执行" : compactionSendReason || (active ? "发送补充消息" : "发送消息"));
   if (unsupportedImages) send.title = "当前服务版本尚不支持图片发送，请先更新程序";
+  if (unsupportedFiles) send.title = "请在新版独立远程客户端及远程服务中发送文件和文件夹";
   if (unsupportedProjectless) send.title = "当前服务版本尚不支持无项目会话，请先更新程序或选择已有项目";
   send.setAttribute("aria-busy", String(busy || stopping));
   const blockedBy = !sessionTypeEnabled && action !== "stop" ? "backend-disabled"
@@ -265,7 +279,7 @@ export function updateComposer() {
     : !connected ? "offline" : isClaude() && !claudeNativeQueue() && active && action !== "stop" ? "claude-running"
     // 历史会话已保存当前模型时可直接续发；没有完整目录也不能强制用户先打开模型选择器。
     : isClaude() && !modelsLoadedAt && !currentThreadDisplay()?.model && action !== "stop" ? "claude-models" : threadReadOnly() ? "read-only" : unsupportedImages ? "images-unsupported"
-    : unsupportedProjectless ? "project-required" : goalReason ? "goal" : composerAttachmentsLoading() ? "images-loading"
+    : unsupportedFiles ? "files-unsupported" : unsupportedProjectless ? "project-required" : goalReason ? "goal" : composerAttachmentsLoading() ? "images-loading"
     : action !== "stop" && pending ? "pending-receipt" : action !== "stop" && !prompt && !hasAttachments ? "empty"
     : !creating && (!selectedId || thread?.id !== selectedId) ? "thread-not-loaded" : "ready";
   send.disabled = blockedBy !== "ready";
@@ -407,7 +421,7 @@ export async function sendMessage() {
   if (busy || stopping || pending || threadReadOnly() || !connected) return;
   if (remoteFastWriting?.key === remoteFastKey()) { notice("正在保存 Fast 设置，请稍后发送"); return; }
   if ($("#permission-button")?.dataset?.saving === "true") { notice("正在保存权限，请稍后发送"); return; }
-  if (composerAttachmentsLoading()) { notice("图片正在读取，请稍后发送"); return; }
+  if (composerAttachmentsLoading()) { notice("附件正在读取，请稍后发送"); return; }
   const nativeCodexDefaults = creating && !isClaude() && session.capabilities?.codexSessionDefaults === true;
   if (nativeCodexDefaults) {
     const key = codexCreationDefaultsKey();
@@ -458,11 +472,16 @@ export async function sendMessage() {
   }
   const prompt = composerPrompt(draft.text, draft.skills, goalMode);
   const images = composerAttachmentsPayload();
+  const files = composerLocalInputsPayload();
+  if (files.length && (session.capabilities?.localFileInput !== true || !composerLocalInputsSupported())) {
+    notice("请更新独立远程客户端及远程服务后发送文件和文件夹，附件已保留。", true);
+    return;
+  }
   if (images.length && !backendCapability("imageInput")) {
     notice("当前服务版本尚不支持图片发送，附件已保留，请先更新程序。", true);
     return;
   }
-  if (!prompt && !images.length) { notice(goalMode ? "请描述目标或添加图片" : "请输入消息或添加图片"); return; }
+  if (!prompt && !images.length && !files.length) { notice(goalMode ? "请描述目标或添加附件" : "请输入消息或添加附件"); return; }
   if (!creating && (!selectedId || thread?.id !== selectedId)) return;
   const queueOnly = !isClaude() && !creating && !goalMode && compactionLocked();
   if (queueOnly) {
@@ -500,7 +519,8 @@ export async function sendMessage() {
     } : {}),
     ...(modelChoiceApplies && reasoningEffort ? { reasoningEffort } : {}),
     ...(draft.skills.length ? { skills: draft.skills.map(({ name, path }) => ({ name, path })) } : {}),
-    ...(images.length ? { images } : {})
+    ...(images.length ? { images } : {}),
+    ...(files.length ? { files } : {})
   };
   if (creating && !payload.projectId && !backendCapability("projectlessCreation")) {
     notice("当前服务版本尚不支持无项目会话，草稿已保留，请先更新程序或选择已有项目。", true);

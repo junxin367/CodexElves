@@ -1045,6 +1045,12 @@ input:focus,textarea:focus,.prompt-editor:focus,button:focus-visible{outline:1px
 .composer-attachment-preview:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
 .composer-attachment-image{display:block;width:40px;height:40px;object-fit:cover;border:1px solid var(--line);border-radius:8px}
 .composer-attachment>figcaption{display:none}
+/* 用户要求文件/文件夹图标框沿用图片的 40×40，名称置于框下方；只增加名称行，不放大缩略图。
+ * 同步核对上方 .composer-attachment-image/.composer-attachment-preview，删除按钮继续贴图标框右上角。 */
+.composer-attachment.composer-local-attachment{height:auto;min-height:60px}
+.composer-local-attachment-icon{display:grid;place-items:center;cursor:default;background:color-mix(in srgb,var(--text) 7%,var(--composer-bg,var(--side)));border:1px solid var(--line);color:var(--muted)}
+.composer-local-attachment-icon>.ui-icon{width:22px;height:22px}
+.composer-local-attachment>figcaption{display:block;width:40px;margin-top:4px;font-size:.71429rem;line-height:16px;text-align:center;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .composer-attachment-remove{position:absolute;top:-5px;right:-5px;display:grid;place-items:center;width:18px;height:18px;padding:0;border-radius:50%;background:var(--composer-bg,var(--side));font-size:14px;line-height:1}
 .composer-attachment-remove>svg{display:block;width:12px;height:12px}
 @media(hover:hover) and (pointer:fine){.composer-attachment-remove:hover:not(:disabled){background:var(--hover)}}

@@ -150,7 +150,8 @@ export async function recoverFailedInput(record) {
   const scope = recoveryScope || privateInputScope(session), generation = recoveryGeneration;
   const key = record.payload.threadId || newDraftKey(record.payload.projectId, record.payload.backend, record.payload.instanceId);
   const draft = record.draft || { text: record.payload.prompt || "", skills: record.payload.skills || [],
-    attachments: (record.payload.images || []).map(image => ({ ...image, kind: "inline" })), goalMode: null };
+    attachments: [...(record.payload.images || []).map(image => ({ ...image, kind: "inline" })),
+      ...(record.payload.files || [])], goalMode: null };
   const recovery = { ...record, draft, recoveryScope: scope };
   try { await recoveryStore.put(scope, [{ kind: "failed", id: record.id, value: recovery }]); }
   catch (error) {

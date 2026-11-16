@@ -71,6 +71,11 @@ export async function loadRemoteAppSource(root = defaultRoot) {
     return module.text;
   }
   function wire(code, context, runInContext) {
+    // 旧的局部函数用例默认没有独立客户端本机附件；专门验证该能力的用例必须注入真实附件状态。
+    for (const [name, value] of Object.entries({
+      composerLocalInputsPayload: () => [], composerLocalInputsSupported: () => false,
+      composerCanAddLocalInputs: () => false, handleComposerLocalPasteShortcut: () => {}, unsupportedFiles: false,
+    })) if (!Object.hasOwn(context, name)) context[name] = value;
     const missing = name => !Object.hasOwn(context, name) && new RegExp(`\\b${name}\\(`).test(code);
     const definitions = [];
     for (const [setter, name] of setters) if (missing(setter)) definitions.push(`function ${setter}(value) { return ${name} = value; }`);

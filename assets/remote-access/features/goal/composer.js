@@ -32,7 +32,7 @@ export function validGoalComposerDraft(value) {
 export function goalComposerStorageRecord(record) {
   if (record?.recoveryRef) {
     const { draft, ...metadata } = record;
-    const { images, ...payload } = record.payload || {};
+    const { images, files, ...payload } = record.payload || {};
     return { ...metadata, payload };
   }
   if (!goalComposerAction(record?.action, record?.payload) || !validGoalComposerDraft(record.draft)) return record;

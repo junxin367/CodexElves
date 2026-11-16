@@ -44,6 +44,7 @@ mod frp_recovery;
 mod frp_tunnel;
 mod harness;
 mod image_preview;
+mod input_files;
 mod instances;
 mod ngrok_tunnel;
 mod open_in;
@@ -85,7 +86,8 @@ const MAX_REMOTE_IMAGE_PIXELS: u64 = 100_000_000;
 const MAX_INPUT_IMAGE_COUNT: usize = 8;
 const MAX_INPUT_IMAGE_BYTES: usize = 5 * 1024 * 1024;
 const MAX_INPUT_IMAGES_TOTAL_BYTES: usize = 12 * 1024 * 1024;
-const MAX_ACTION_BODY_BYTES: usize = 18 * 1024 * 1024;
+// 原有图片最多 12 MiB，新增本地文件/目录另限 12 MiB；base64 为 4/3，再为目录清单和消息保留 4 MiB。
+const MAX_ACTION_BODY_BYTES: usize = 36 * 1024 * 1024;
 static CONTROLLER: OnceLock<Arc<RemoteAccessController>> = OnceLock::new();
 static STARTUP_ERROR: OnceLock<std::sync::Mutex<Option<String>>> = OnceLock::new();
 static WEB_ASSETS: OnceLock<HashMap<&'static str, StaticWebAsset>> = OnceLock::new();
@@ -1357,9 +1359,11 @@ impl RemoteAccessController {
             }
             payload["backend"] = json!(backend);
         }
-        let thread_id = payload["threadId"].as_str();
+        let thread_id_owned = payload["threadId"].as_str().map(str::to_owned);
+        let thread_id = thread_id_owned.as_deref();
         let claude_thread = thread_id.is_some_and(claude::Claude::owns_id);
-        let requested = payload["backend"].as_str();
+        let requested_owned = payload["backend"].as_str().map(str::to_owned);
+        let requested = requested_owned.as_deref();
         if requested.is_some_and(|backend| !instances::TYPES.iter().any(|kind| kind.id == backend))
         {
             return Err(ApiError::new(400, "会话后端无效").into());
@@ -1391,6 +1395,25 @@ impl RemoteAccessController {
             if requested == Some("codex") && id != "codex:local" {
                 return Err(ApiError::new(409, "该 Codex 实例的执行接入尚未支持").into());
             }
+        }
+        if payload.get("files").is_some() {
+            if !matches!(action, "send" | "create" | "setGoal" | "editQueued") {
+                return Err(ApiError::new(400, "当前操作不接受文件和文件夹附件").into());
+            }
+            let paths = input_files::stage(self.state_dir.clone(), &payload, authorization).await?;
+            let paths = if claude_thread || requested == Some("claude") {
+                let config = if !claude_thread {
+                    match &instance_id {
+                        Some(id) => Some(self.claude_instance_config(id).await?),
+                        None => None,
+                    }
+                } else { None };
+                self.claude.local_input_paths(thread_id, config, paths).await
+                    .map_err(|error| ApiError::new(409, format!("附件无法映射到目标 WSL，消息尚未发送：{error}")))?
+            } else {
+                paths.into_iter().map(|path| path.to_string_lossy().into_owned()).collect()
+            };
+            input_files::append_paths(&mut payload, paths);
         }
         if action == "sessionMetrics" {
             let id = thread_id.ok_or_else(|| ApiError::new(400, "缺少会话 ID"))?;
@@ -3153,7 +3176,7 @@ async fn session(
         "claudeWslDistribution":state.controller.claude.wsl_distribution(),
         "claudeInstanceId":state.controller.claude.config().ok().map(|config| config.instance_id()),
         "diagnosticsRequest":diagnostics_request,
-        "capabilities":{"imageInput":native_write_available,"queuedImageRemoval":native_write_available,
+        "capabilities":{"imageInput":native_write_available,"localFileInput":true,"queuedImageRemoval":native_write_available,
         "queuedImageEditing":native_write_available,"queueEditRecovery":native_write_available,
         "queueSendRecovery":native_write_available,"projectlessCreation":native_write_available,
         "promptOptimization":true,"promptOptimizationSettings":true,"messageEditModelSettings":native_write_available,
@@ -3785,6 +3808,7 @@ fn validate_goal_composer_payload(action: &str, payload: &Value) -> Result<(), A
             "goalMode",
             "skills",
             "images",
+            "files",
             "model",
             "reasoningEffort",
             "backend",
@@ -3823,10 +3847,12 @@ fn validate_goal_composer_payload(action: &str, payload: &Value) -> Result<(), A
         return Err(ApiError::new(400, "项目 ID 无效"));
     }
     validate_input_images(payload)?;
+    input_files::validate(payload)?;
     let has_images = object
         .get("images")
         .and_then(Value::as_array)
-        .is_some_and(|images| !images.is_empty());
+        .is_some_and(|images| !images.is_empty())
+        || object.get("files").and_then(Value::as_array).is_some_and(|files| !files.is_empty());
     if object
         .get("prompt")
         .and_then(Value::as_str)
@@ -4065,6 +4091,7 @@ fn validate_queued_action_payload(action: &str, payload: &Value) -> Result<(), A
             "prompt",
             "retainedImageSources",
             "images",
+            "files",
         ]
     } else if editing {
         &[
@@ -4213,7 +4240,8 @@ fn validate_queued_action_payload(action: &str, payload: &Value) -> Result<(), A
                     format!("每条消息最多保留或新增 {MAX_INPUT_IMAGE_COUNT} 张图片"),
                 ));
             }
-            if prompt.trim().is_empty() && retained_count + added_count == 0 {
+            if prompt.trim().is_empty() && retained_count + added_count == 0
+                && !payload["files"].as_array().is_some_and(|files| !files.is_empty()) {
                 return Err(ApiError::new(400, "消息不能为空或超过 128 KiB"));
             }
         } else if prompt.trim().is_empty() {
@@ -4297,9 +4325,10 @@ async fn action(
         validate_queued_action_payload(&action, &payload)?;
     }
     let has_input_images = matches!(action.as_str(), "send" | "create")
-        && payload["images"]
+        && (payload["images"]
             .as_array()
-            .is_some_and(|images| !images.is_empty());
+            .is_some_and(|images| !images.is_empty())
+            || payload["files"].as_array().is_some_and(|files| !files.is_empty()));
     if matches!(action.as_str(), "send" | "create" | "editMessage")
         && payload["prompt"].as_str().is_none_or(|text| {
             text.len() > 128 * 1024 || text.trim().is_empty() && !has_input_images
@@ -4327,6 +4356,11 @@ async fn action(
     }
     if matches!(action.as_str(), "send" | "create") && payload["goalMode"] != true {
         validate_input_images(&payload)?;
+    }
+    if matches!(action.as_str(), "send" | "create" | "setGoal" | "editQueued") {
+        input_files::validate(&payload)?;
+    } else if payload.get("files").is_some() {
+        return Err(ApiError::new(400, "当前操作不接受文件和文件夹附件"));
     }
     let id = headers
         .get("idempotency-key")

@@ -4,6 +4,7 @@ import {
   attachmentsFromQueuedMessage, composerAttachmentsLoading, composerAttachmentsPayload,
   composerHasAttachments, composerRemoteAttachmentSources, setComposerAttachments
 } from "../../attachments.js";
+import { composerLocalInputsPayload, composerLocalInputsSupported } from "../../attachments.js";
 import { $ } from "../../ui/dom.js";
 import { notice } from "../../ui/notice.js";
 import { closePopup } from "../../ui/popup.js";
@@ -173,9 +174,14 @@ export async function submitQueuedMessageEdit() {
   if (!edit || edit.state !== "editing" || busy || stopping || pending || threadReadOnly(edit.threadId) || !connected
       || edit.threadId !== selectedId || thread?.id !== selectedId || compactionLocked()) return;
   const prompt = $("#prompt").value.trim();
-  if (composerAttachmentsLoading()) { notice("图片正在读取，请稍后发送"); return; }
+  if (composerAttachmentsLoading()) { notice("附件正在读取，请稍后发送"); return; }
   if (!prompt && !composerHasAttachments()) { notice("请输入消息或保留至少一张图片", true); return; }
   const images = edit.imageEditing ? composerAttachmentsPayload() : [];
+  const files = composerLocalInputsPayload();
+  if (files.length && (!composerLocalInputsSupported() || session.capabilities?.localFileInput !== true)) {
+    notice("请更新独立远程客户端及远程服务后发送文件和文件夹，附件已保留。", true);
+    return;
+  }
   if (images.length && !queueCapability("queuedImageEditing")) {
     notice("当前运行的服务尚不支持编辑队列图片，修改已保留，请更新程序后再发送。", true);
     return;
@@ -192,7 +198,8 @@ export async function submitQueuedMessageEdit() {
     editId: edit.editId,
     prompt,
     ...(edit.imageRemoval ? { retainedImageSources: composerRemoteAttachmentSources() } : {}),
-    ...(images.length ? { images } : {})
+    ...(images.length ? { images } : {}),
+    ...(files.length ? { files } : {})
   };
   try {
     // 继续使用取回时的 editId，让服务端按原队列位置提交，不能作为一条新消息追加。

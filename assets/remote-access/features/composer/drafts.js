@@ -126,7 +126,9 @@ export function rememberDraft() {
     || draft.skills.some((skill, index) => (skill._offset ?? 0) !== (previous.skills[index]?._offset ?? 0))
     || draft.attachments.length !== previous.attachments.length
     || draft.attachments.some((image, index) => ["kind", "name", "mime", "size", "dataUrl", "source", "url"]
-      .some(name => image[name] !== previous.attachments[index]?.[name]))
+      .some(name => image[name] !== previous.attachments[index]?.[name])
+      || JSON.stringify(image.files || []) !== JSON.stringify(previous.attachments[index]?.files || [])
+      || JSON.stringify(image.directories || []) !== JSON.stringify(previous.attachments[index]?.directories || []))
     || (draft.goalMode || null) !== (previous.goalMode || null)
     || (draft.permissionMode || null) !== (previous.permissionMode || null);
   // 切换或卸载时，未编辑的本页旧稿不能覆盖其他页面已经保存的新稿。
@@ -196,5 +198,8 @@ export function matchingDraft(draft, payload) {
     && sameSkills(draft.skills, payload.skills || [])
     && JSON.stringify((draft.attachments || []).filter(entry => entry.kind === "inline")
       .map(({ name, mime, dataUrl, size }) => ({ name, mime, dataUrl, size })))
-      === JSON.stringify(payload.images || []);
+      === JSON.stringify(payload.images || [])
+    // 文件/文件夹随草稿保存；旧发送回执不能清除后来选择的同名但内容不同的本机附件。
+    && JSON.stringify((draft.attachments || []).filter(entry => ["file", "folder"].includes(entry.kind)))
+      === JSON.stringify(payload.files || []);
 }

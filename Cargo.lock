@@ -801,6 +801,7 @@ name = "codex-elves-remote"
 version = "0.7.0"
 dependencies = [
  "anyhow",
+ "base64 0.22.1",
  "directories",
  "flate2",
  "reqwest 0.12.28",

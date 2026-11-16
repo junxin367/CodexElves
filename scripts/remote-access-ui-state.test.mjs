@@ -8,6 +8,7 @@ import { createSelectComponent } from "../assets/remote-access/ui/select.js";
 import { mountInstancePermissions, permissionLabel, permissionModeKnown, permissionOptions } from "../assets/remote-access/permissions.js";
 import { menuHorizontalLeft } from "../assets/remote-access/ui/position.js";
 import { localFileReference } from "../assets/remote-access/file-reference.js";
+import { copyLocalInput, isLocalInput, localInputBridge, validateLocalInputs } from "../assets/remote-access/local-inputs.js";
 import { marked, Renderer } from "../assets/remote-access/vendor/marked.esm.js";
 
 function storage() {
@@ -555,6 +556,146 @@ test("单会话重同步只补对应正文与列表，不重复刷新整个连�
   assert.equal(connections, 1);
 });
 
+function localInputFixtures() {
+  return [
+    { kind: "file", name: "需求说明.txt", size: 3, files: [{ path: "需求说明.txt", data: "YWJj" }], directories: [] },
+    { kind: "folder", name: "素材", size: 2, files: [{ path: "子目录/a.txt", data: "aGk=" }],
+      directories: ["子目录", "空目录"] },
+    { kind: "folder", name: "空文件夹", size: 0, files: [], directories: [] }
+  ];
+}
+
+test("本地附件验证保留文件、嵌套目录和空目录，拒绝越界、同名冲突及错误大小", () => {
+  const inputs = localInputFixtures(), copied = validateLocalInputs(inputs);
+  assert.deepEqual(copied, inputs);
+  copied[1].directories.push("另一个目录");
+  assert.equal(inputs[1].directories.length, 2);
+  for (const change of [
+    input => { input.name = "../escape"; },
+    input => { input.files[0].path = "C:/escape"; },
+    input => { input.files[0].path = "../escape"; },
+    input => { input.files[0].data = "bad"; },
+    input => { input.size += 1; },
+    input => { input.directories.push("子目录/A.TXT"); },
+    input => { input.files.push({ path: "子目录/a.txt/child", data: "" }); },
+  ]) {
+    const candidate = structuredClone(inputs[1]); change(candidate);
+    assert.throws(() => validateLocalInputs([candidate]), /无效|大小|越界|冲突/);
+  }
+  assert.throws(() => validateLocalInputs(Array.from({ length: 17 }, () => inputs[0])), /16/);
+  const large = { kind: "folder", name: "too-large", size: 12 * 1024 * 1024 + 1,
+    files: [{ path: "one", data: Buffer.alloc(6 * 1024 * 1024).toString("base64") },
+      { path: "two", data: Buffer.alloc(6 * 1024 * 1024 + 1).toString("base64") }], directories: [] };
+  assert.throws(() => validateLocalInputs([large]), /12 MiB/);
+});
+
+test("普通浏览器没有本机文件入口，同源客户端侧边页可复用原生入口", () => {
+  const previous = globalThis.window;
+  try {
+    globalThis.window = { __TAURI__: { core: { invoke() {} } } };
+    assert.equal(localInputBridge(), null);
+    const bridge = { pick() {}, paste() {} };
+    globalThis.window = { parent: { __CODEX_ELVES_LOCAL_INPUTS__: bridge } };
+    assert.equal(localInputBridge(), bridge);
+  } finally {
+    if (previous === undefined) delete globalThis.window;
+    else globalThis.window = previous;
+  }
+});
+
+async function localAttachmentHarness() {
+  const source = await readFile(new URL("../assets/remote-access/attachments.js", import.meta.url), "utf8");
+  const h = { notices: [], changes: 0, pasted: 0, picked: [], next: localInputFixtures(), timers: [] };
+  const context = vm.createContext({
+    nativeConnectionVersion: 1, Blob, Uint8Array, TextEncoder, atob,
+    isLocalInput, copyLocalInput, validateLocalInputs,
+    setTimeout: callback => h.timers.push(callback), icon: () => ({}),
+    localInputBridge: () => ({
+      pick: async folders => { h.picked.push(folders); return h.next; },
+      paste: async () => { ++h.pasted; return h.next; },
+    }),
+  });
+  vm.runInContext(source.replace(/^import .*;\r?\n/gm, "").replace(/^export /gm, ""), context);
+  context.report = message => h.notices.push(message);
+  context.changed = () => { ++h.changes; };
+  vm.runInContext("showNotice = report; changeListener = changed", context);
+  h.context = context;
+  return h;
+}
+
+test("本机文件及文件夹预览显示两种图标和下方名称，移除后同步草稿", async () => {
+  const h = await localAttachmentHarness(), c = h.context;
+  const create = tag => {
+    const node = { tag, children: [], attributes: {}, classes: new Set(),
+      append(...children) { this.children.push(...children); },
+      replaceChildren(...children) { this.children = children; },
+      setAttribute(name, value) { this.attributes[name] = value; } };
+    node.classList = { add: name => node.classes.add(name), toggle: (name, value) =>
+      value ? node.classes.add(name) : node.classes.delete(name) };
+    return node;
+  };
+  c.document = { createElement: create };
+  c.icon = name => ({ icon: name });
+  c.root = create("div");
+  c.entries = localInputFixtures();
+  vm.runInContext("attachmentRoot = root; setComposerAttachments(entries)", c);
+  assert.equal(c.root.children.length, 3);
+  const [file, folder] = c.root.children;
+  assert.equal(file.children[0].children[0].icon, "document");
+  assert.equal(folder.children[0].children[0].icon, "folderClosed");
+  assert.equal(file.children[1].tag, "figcaption");
+  assert.equal(file.children[1].textContent, "需求说明.txt");
+  assert.equal(file.children[1].title, "需求说明.txt");
+  const changes = h.changes;
+  file.children[2].onclick();
+  assert.equal(c.root.children.length, 2);
+  assert.equal(h.changes, changes + 1);
+  const css = await readFile(new URL("../assets/remote-access/style.css", import.meta.url), "utf8");
+  assert.match(css, /\.composer-attachment-preview\{[^}]*width:40px;height:40px/);
+  assert.match(css, /\.composer-local-attachment>figcaption\{[^}]*display:block[^}]*text-overflow:ellipsis/);
+});
+
+test("本机文件选取及恢复保留全部内容，纯附件草稿可移除且迟到结果不串会话", async () => {
+  const h = await localAttachmentHarness(), c = h.context;
+  await vm.runInContext("chooseComposerLocalInputs(true)", c);
+  assert.deepEqual(h.picked, [true]);
+  assert.deepEqual(JSON.parse(JSON.stringify(vm.runInContext("composerLocalInputsPayload()", c))), h.next);
+  vm.runInContext("setComposerAttachments(composerAttachmentSnapshot())", c);
+  assert.equal(vm.runInContext("composerHasAttachments()", c), true);
+  assert.equal(vm.runInContext("composerAttachmentsPayload().length", c), 0);
+  let finish;
+  c.delayed = () => new Promise(resolve => { finish = resolve; });
+  const reading = vm.runInContext("addLocalInputs(delayed)", c);
+  assert.equal(vm.runInContext("composerAttachmentsLoading()", c), true);
+  vm.runInContext("setComposerAttachments([])", c);
+  finish(h.next); await reading;
+  assert.equal(vm.runInContext("composerHasAttachments()", c), false);
+  assert.deepEqual(h.notices, []);
+});
+
+test("Ctrl+V 粘贴本机文件及目录只添加一次，纯文字和图片继续走原有粘贴", async () => {
+  const h = await localAttachmentHarness(), c = h.context;
+  c.event = { key: "v", ctrlKey: true };
+  vm.runInContext("handleComposerLocalPasteShortcut(event)", c);
+  c.paste = { clipboardData: { files: [], getData: () => "" }, preventDefault() {} };
+  assert.equal(vm.runInContext("handleComposerLocalPaste(paste)", c), true);
+  await new Promise(resolve => setImmediate(resolve));
+  h.timers.forEach(callback => callback());
+  assert.equal(h.pasted, 1);
+  assert.equal(vm.runInContext("composerLocalInputsPayload().length", c), 3);
+  for (const clipboardData of [
+    { files: [], getData: () => "C:\\普通文字路径.txt" },
+    { files: [{ type: "image/png" }], getData: () => "" },
+  ]) {
+    c.paste = { clipboardData, preventDefault() { assert.fail("普通文字和原有图片不由本机文件粘贴拦截"); } };
+    assert.equal(vm.runInContext("handleComposerLocalPaste(paste)", c), false);
+  }
+  vm.runInContext("setComposerAttachments([]); handleComposerLocalPasteShortcut(event)", c);
+  h.timers.at(-1)();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(h.pasted, 2, "仅目录剪贴板没有 DOM paste 时仍应从原生 CF_HDROP 恢复");
+});
+
 test("Codex/Claude 图片添加和草稿/队列恢复完整保留八张，第九张拒绝且不丢原图", async () => {
   const source = await readFile(new URL("../assets/remote-access/attachments.js", import.meta.url), "utf8");
   const notices = [];
@@ -568,7 +709,7 @@ test("Codex/Claude 图片添加和草稿/队列恢复完整保留八张，第九
   }
   const context = vm.createContext({ nativeConnectionVersion: 1, Blob, FileReader: Reader, Uint8Array,
     createImageBitmap: async () => ({ width: 1, height: 1, close() {} }),
-    atob, sha256Hex: async () => "test-hash" });
+    atob, sha256Hex: async () => "test-hash", isLocalInput, copyLocalInput, validateLocalInputs });
   vm.runInContext(source.replace(/^import .*;\r?\n/gm, "").replace(/^export /gm, ""), context);
   context.report = message => notices.push(message);
   vm.runInContext("showNotice = report", context);
@@ -5981,7 +6122,7 @@ test("Codex 活动期间发送不把新模型冻结进队列，停止或完成�
       currentModelId: () => "gpt-new", activeInstanceId: () => "codex:local",
       prompt: "后续消息", id: "thread", goalMode: false, queueOnly: false,
       session: { capabilities: { queueSendRecovery: true } }, randomId: () => "same-message",
-      draft: { skills: [] }, images: []
+      draft: { skills: [] }, images: [], files: []
     });
     nodeVm.runInContext(code, context);
     assert.equal(context.actualPayload.model, active ? undefined : "gpt-new");
@@ -7376,6 +7517,26 @@ function independentPromptOptimizationHarness(backend = "claude") {
   return h;
 }
 
+test("输入区菜单严格按文件和文件夹、图片、目标、压缩排序，旧客户端和浏览器隐藏本机入口", async () => {
+  const h = independentPromptOptimizationHarness("codex"), c = h.context, selected = [];
+  c.session.capabilities.localFileInput = true;
+  c.composerLocalInputsSupported = () => true;
+  c.composerCanAddLocalInputs = () => true;
+  c.chooseComposerLocalInputs = folders => selected.push(folders);
+  c.updateComposer();
+  assert.deepEqual(Array.from(h.add.menuOptions, option => option.label), ["文件和文件夹", "图片", "目标", "压缩"]);
+  assert.equal(h.add.menuOptions[0].disabled, false);
+  h.add.menuOptions[0].submenu[0].action();
+  h.add.menuOptions[0].submenu[1].action();
+  assert.deepEqual(selected, [false, true]);
+  c.session.capabilities.localFileInput = false;
+  c.updateComposer();
+  assert.equal(h.add.menuOptions[0].disabled, true, "旧服务不能把附件静默丢弃");
+  c.composerLocalInputsSupported = () => false;
+  c.updateComposer();
+  assert.deepEqual(Array.from(h.add.menuOptions, option => option.label), ["图片", "目标", "压缩"]);
+});
+
 test("Claude 与 Codex 均显示独立提示词优化，不依赖原生连接并保留恢复、附件和写入限制", async () => {
   for (const backend of ["claude", "codex"]) {
     const h = independentPromptOptimizationHarness(backend), { context, control, prompt } = h;
@@ -7383,7 +7544,7 @@ test("Claude 与 Codex 均显示独立提示词优化，不依赖原生连接并
     assert.equal(control.hidden, false);
     assert.equal(control.disabled, false, "未连接原生服务也可以使用独立优化");
     assert.deepEqual(Array.from(h.add.menuOptions, option => option.value || option.label),
-      backend === "claude" ? ["添加图片"] : ["compact", "goal", "添加图片"]);
+      backend === "claude" ? ["images"] : ["images", "goal", "compact"]);
     await context.activatePromptOptimization();
     assert.equal(prompt.value, "优化后的需求");
     assert.equal(control.dataset.state, "optimized");
@@ -9416,6 +9577,37 @@ function idleSendDisplayHarness(mode = "native") {
 
 const displayedUserMessages = context => context.withSentMessageDisplays().flatMap(turn => turn.items)
   .filter(item => item.type === "userMessage");
+
+test("纯文件和文件夹输入经过原可靠发送，成功前不显示正文且旧服务保留附件", async () => {
+  const h = idleSendDisplayHarness(), c = h.context, files = localInputFixtures();
+  h.prompt.value = "";
+  c.session.capabilities.localFileInput = true;
+  c.composerLocalInputsSupported = () => true;
+  c.composerLocalInputsPayload = () => files;
+  c.snapshotDraft = () => ({ text: "", skills: [], attachments: structuredClone(files), goalMode: null });
+  const sending = c.sendMessage();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(h.actions.length, 1);
+  assert.equal(h.actions[0].payload.prompt, "");
+  assert.deepEqual(h.actions[0].payload.files, files);
+  assert.equal(displayedUserMessages(c).length, 0);
+  const action = h.actions[0];
+  action.resolve({ requestId: action.requestId, state: "completed", result: {
+    ok: true, threadId: "main", clientUserMessageId: action.payload.clientUserMessageId, deliveryState: "accepted"
+  } });
+  await sending;
+  const confirmed = displayedUserMessages(c);
+  assert.equal(confirmed.length, 1);
+  assert.match(confirmed[0].content[0].text, /需求说明\.txt.*素材（文件夹）/);
+  assert.equal(h.notices.length, 0);
+  const old = sendRecoveryHarness();
+  old.prompt.value = "";
+  old.context.composerLocalInputsSupported = () => true;
+  old.context.composerLocalInputsPayload = () => files;
+  await old.context.sendMessage();
+  assert.equal(old.actions.length, 0);
+  assert.match(old.notices[0], /附件已保留/);
+});
 
 test("仅确认入队的消息留在队列，运行状态变化不能提前展示正文", async () => {
   for (const mode of ["native", "service"]) {

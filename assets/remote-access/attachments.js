@@ -1,5 +1,7 @@
 import { remoteMediaCandidates, remoteMediaUrl } from "./channels.js";
 import { sha256Hex } from "./sha256.js";
+import { copyLocalInput, isLocalInput, localInputBridge, validateLocalInputs } from "./local-inputs.js";
+import { icon } from "./ui/icons.js";
 
 // 用户要求 Codex/Claude 单条固定最多 8 张；添加、粘贴、拖拽与草稿/队列恢复共用此值，并与 Rust MAX_INPUT_IMAGE_COUNT 同步。
 const MAX_IMAGE_COUNT = 8;
@@ -505,6 +507,7 @@ let locked = false;
 let remoteRemovalAllowed = false;
 let readingFiles = false;
 let attachmentVersion = 0;
+let localPasteShortcut = 0;
 
 function attachmentName(value, fallback = "图片") {
   const name = String(value || "").replace(/[\u0000-\u001f\u007f]/gu, "").trim();
@@ -512,6 +515,7 @@ function attachmentName(value, fallback = "图片") {
 }
 
 function copyAttachment(entry) {
+  if (isLocalInput(entry)) return copyLocalInput(entry);
   return entry.kind === "inline"
     ? {
         kind: "inline",
@@ -667,30 +671,44 @@ function renderComposerAttachments() {
   for (const [index, entry] of attachments.entries()) {
     const item = document.createElement("figure");
     item.className = "composer-attachment";
-    const image = document.createElement("img");
-    image.className = "composer-attachment-image";
-    loadAttachmentThumbnail(image, entry.kind === "inline" ? entry.dataUrl : entry.url, entry.mime);
-    image.alt = entry.name;
-    image.title = entry.name;
-    image.decoding = "async";
-    const preview = document.createElement("button");
-    preview.type = "button";
-    preview.className = "composer-attachment-preview";
-    preview.setAttribute("aria-label", `查看图片 ${entry.name}`);
-    preview.setAttribute("aria-haspopup", "dialog");
-    preview.title = `查看图片 ${entry.name}`;
-    preview.onclick = () => previewImage(preview, image);
-    preview.append(image);
-    const caption = document.createElement("figcaption");
-    caption.textContent = entry.name;
-    item.append(preview, caption);
+    if (isLocalInput(entry)) {
+      // 用户要求文件/文件夹与现有图片同为 40×40；中间分别放两种图标，名称显示在下方。
+      item.classList.add("composer-local-attachment");
+      const preview = document.createElement("span");
+      preview.className = "composer-attachment-preview composer-local-attachment-icon";
+      preview.title = `${entry.kind === "folder" ? "文件夹" : "文件"}：${entry.name}`;
+      preview.setAttribute("aria-label", preview.title);
+      preview.append(icon(entry.kind === "folder" ? "folderClosed" : "document"));
+      const caption = document.createElement("figcaption");
+      caption.textContent = entry.name; caption.title = entry.name;
+      item.append(preview, caption);
+    } else {
+      const image = document.createElement("img");
+      image.className = "composer-attachment-image";
+      loadAttachmentThumbnail(image, entry.kind === "inline" ? entry.dataUrl : entry.url, entry.mime);
+      image.alt = entry.name;
+      image.title = entry.name;
+      image.decoding = "async";
+      const preview = document.createElement("button");
+      preview.type = "button";
+      preview.className = "composer-attachment-preview";
+      preview.setAttribute("aria-label", `查看图片 ${entry.name}`);
+      preview.setAttribute("aria-haspopup", "dialog");
+      preview.title = `查看图片 ${entry.name}`;
+      preview.onclick = () => previewImage(preview, image);
+      preview.append(image);
+      const caption = document.createElement("figcaption");
+      caption.textContent = entry.name;
+      item.append(preview, caption);
+    }
     const canRemove = !locked || remoteRemovalAllowed && entry.kind === "remote";
     if (canRemove) {
       const remove = document.createElement("button");
       remove.type = "button";
       remove.className = "composer-attachment-remove";
-      remove.setAttribute("aria-label", `移除图片 ${entry.name}`);
-      remove.title = "移除图片";
+      const label = isLocalInput(entry) ? entry.kind === "folder" ? "文件夹" : "文件" : "图片";
+      remove.setAttribute("aria-label", `移除${label} ${entry.name}`);
+      remove.title = `移除${label}`;
       remove.innerHTML = '<svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="m6 6 12 12M18 6 6 18"/></svg>';
       remove.disabled = disabled || readingFiles;
       remove.onclick = () => {
@@ -717,7 +735,7 @@ async function addFiles(files) {
       : "当前不能添加图片", true);
     return true;
   }
-  if (attachments.length + candidates.length > MAX_IMAGE_COUNT) {
+  if (attachments.filter(entry => !isLocalInput(entry)).length + candidates.length > MAX_IMAGE_COUNT) {
     showNotice(`每条消息最多添加 ${MAX_IMAGE_COUNT} 张图片`, true);
     return true;
   }
@@ -765,7 +783,7 @@ export function mountComposerAttachments({ form, prompt, onChange, notice, onPre
   attachmentRoot = document.createElement("div");
   attachmentRoot.id = "composer-attachments";
   attachmentRoot.className = "composer-attachments";
-  attachmentRoot.setAttribute("aria-label", "待发送图片");
+  attachmentRoot.setAttribute("aria-label", "待发送附件");
   attachmentRoot.hidden = true;
   prompt.before(attachmentRoot);
 
@@ -806,6 +824,66 @@ export function handleComposerImagePaste(event) {
   return true;
 }
 
+export function composerLocalInputsSupported() { return !!localInputBridge(); }
+export function composerCanAddLocalInputs() {
+  return composerLocalInputsSupported() && !disabled && !locked && !readingFiles;
+}
+
+async function addLocalInputs(read, fallback = null) {
+  if (!composerCanAddLocalInputs()) { showNotice("当前不能添加文件和文件夹", true); return; }
+  const version = attachmentVersion;
+  readingFiles = true; renderComposerAttachments(); changeListener();
+  try {
+    const next = await read();
+    if (version !== attachmentVersion) return;
+    if (next.length) {
+      validateLocalInputs([...attachments.filter(isLocalInput), ...next]);
+      attachments.push(...validateLocalInputs(next));
+    } else if (fallback) {
+      // 截图/浏览器图片没有 CF_HDROP，继续使用现有图片粘贴；纯文字不转成路径或附件。
+      readingFiles = false;
+      await fallback();
+    }
+  } catch (error) {
+    if (version === attachmentVersion) showNotice(error?.message || String(error) || "无法添加附件", true);
+  } finally {
+    if (version === attachmentVersion) {
+      readingFiles = false; renderComposerAttachments(); changeListener();
+      composerPrompt?.focus({ preventScroll: true });
+    }
+  }
+}
+
+export function chooseComposerLocalInputs(folders = false) {
+  if (composerCanAddLocalInputs()) return addLocalInputs(() => localInputBridge().pick(folders));
+}
+
+export function handleComposerLocalPaste(event) {
+  ++localPasteShortcut;
+  if (!composerLocalInputsSupported()) return false;
+  const files = [...event.clipboardData?.files || []];
+  const text = event.clipboardData?.getData("text/plain") || "";
+  // 文字及原有图片粘贴保持同步；只有文件型剪贴板（含目录）或无文本的原生文件剪贴板走客户端读取。
+  if (text && !files.length || files.length && files.every(file => supportedMimes.has(file.type.toLowerCase()))) return false;
+  event.preventDefault();
+  void addLocalInputs(() => localInputBridge().paste(), files.length ? () => addFiles(files) : null);
+  return true;
+}
+
+export function handleComposerLocalPasteShortcut(event) {
+  if (!composerLocalInputsSupported() || !event.ctrlKey || event.altKey || event.shiftKey
+      || event.key.toLowerCase() !== "v" || event.repeat) return;
+  const version = attachmentVersion, shortcut = ++localPasteShortcut;
+  // Windows 只复制目录时，WebView2 可能不产生 DOM paste；等原生默认粘贴完成再补读 CF_HDROP。
+  // 文字、截图或文件已经产生 paste 时由上方处理，不能重复添加，也不截断浏览器的原有快捷键。
+  setTimeout(() => {
+    if (version === attachmentVersion && shortcut === localPasteShortcut)
+      void addLocalInputs(() => localInputBridge().paste());
+  }, 0);
+}
+
+export function composerLocalInputsPayload() { return attachments.filter(isLocalInput).map(copyLocalInput); }
+
 export function composerHasAttachments() {
   return attachments.length > 0;
 }
@@ -840,14 +918,19 @@ export function composerRemoteAttachmentSources() {
 export function setComposerAttachments(value = [], { readOnly = false, removableRemote = false } = {}) {
   attachmentVersion += 1;
   readingFiles = false;
+  let imageCount = 0;
   attachments = Array.isArray(value) ? value.flatMap(entry => {
+    if (isLocalInput(entry)) {
+      try { return validateLocalInputs([entry]); } catch { return []; }
+    }
     if (entry?.kind === "inline" && supportedMimes.has(entry.mime)
-        && typeof entry.dataUrl === "string" && Number.isFinite(entry.size))
+        && typeof entry.dataUrl === "string" && Number.isFinite(entry.size) && imageCount++ < MAX_IMAGE_COUNT)
       return [copyAttachment(entry)];
-    if (entry?.kind === "remote" && (remoteImagePattern.test(entry.url) || safeInlineImageSource(entry.url)))
+    if (entry?.kind === "remote" && (remoteImagePattern.test(entry.url) || safeInlineImageSource(entry.url))
+        && imageCount++ < MAX_IMAGE_COUNT)
       return [copyAttachment(entry)];
     return [];
-  }).slice(0, MAX_IMAGE_COUNT) : [];
+  }) : [];
   locked = readOnly;
   remoteRemovalAllowed = readOnly && removableRemote;
   renderComposerAttachments();

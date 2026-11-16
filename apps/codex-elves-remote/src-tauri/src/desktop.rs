@@ -240,6 +240,76 @@ async fn remote_cache_activity(
     Ok(())
 }
 
+// 用户要求文件/文件夹仅在独立客户端输入区开放；只允许当前会话页选择或粘贴，
+// 不接受网页提供路径，也不向预览页、连接页及后台窗口开放剪贴板文件读取。
+fn trusted_input_page(webview: &tauri::Webview, state: &ClientState) -> Result<(), String> {
+    let url = trusted_service_page(webview, state)?;
+    if settings::is_connection_page(&url)
+        || !allows_service_url(state, webview.window().label(), &url)
+        || !matches!(url.path(), "/" | "/side-thread")
+        || !matches!(url.scheme(), "http" | "https")
+        || !webview.window().is_focused().unwrap_or(false)
+    {
+        return Err("请在当前独立客户端的会话输入区添加文件和文件夹。".into());
+    }
+    Ok(())
+}
+
+#[tauri::command]
+async fn remote_choose_inputs(
+    webview: tauri::Webview,
+    state: tauri::State<'_, ClientState>,
+    folders: bool,
+) -> Result<Vec<crate::local_inputs::LocalInput>, String> {
+    trusted_input_page(&webview, &state)?;
+    let source = webview.url().map_err(|error| error.to_string())?;
+    let parent = webview
+        .window()
+        .hwnd()
+        .map_err(|error| error.to_string())?
+        .0 as isize;
+    let (sender, receiver) = tokio::sync::oneshot::channel();
+    webview
+        .app_handle()
+        .run_on_main_thread(move || {
+            let _ = sender.send(crate::local_inputs::choose(parent, folders));
+        })
+        .map_err(|error| error.to_string())?;
+    let paths = receiver.await.map_err(|_| "文件选择已中断。")??;
+    // 文件选择器关闭后再次核对来源；读取在工作线程执行，不能阻塞 WebView 和原生顶栏。
+    if webview.url().ok().as_ref() != Some(&source) {
+        return Err("会话页面已变化，请重新选择附件。".into());
+    }
+    let inputs = tokio::task::spawn_blocking(move || crate::local_inputs::read(paths))
+        .await
+        .map_err(|_| "读取附件任务已中断。")??;
+    trusted_input_page(&webview, &state)?;
+    if webview.url().ok().as_ref() != Some(&source) {
+        return Err("会话页面已变化，请重新选择附件。".into());
+    }
+    Ok(inputs)
+}
+
+#[tauri::command]
+async fn remote_paste_inputs(
+    webview: tauri::Webview,
+    state: tauri::State<'_, ClientState>,
+) -> Result<Vec<crate::local_inputs::LocalInput>, String> {
+    trusted_input_page(&webview, &state)?;
+    let source = webview.url().map_err(|error| error.to_string())?;
+    let inputs =
+        tokio::task::spawn_blocking(
+            || crate::local_inputs::read(crate::local_inputs::clipboard()?),
+        )
+        .await
+        .map_err(|_| "读取剪贴板附件任务已中断。")??;
+    trusted_input_page(&webview, &state)?;
+    if webview.url().ok().as_ref() != Some(&source) {
+        return Err("会话页面已变化，请重新粘贴附件。".into());
+    }
+    Ok(inputs)
+}
+
 #[tauri::command]
 async fn remote_open_session_window(
     webview: tauri::Webview,
@@ -902,6 +972,7 @@ fn create_client_window(
     // 用户要求新程序窗口沿用同一登录状态；内容共用用户目录，窗口、原生应用顶栏与资源快照分别管理。
     .data_directory(directory.join("webview"))
     .initialization_script(include_str!("../../web/theme-bridge.js"))
+    .initialization_script(include_str!("../../web/local-inputs-bridge.js"))
     .disable_drag_drop_handler()
     .on_navigation(move |url| {
         if url.as_str() == "about:blank" || main && settings::is_connection_page(url) {
@@ -1015,7 +1086,9 @@ pub fn run() -> anyhow::Result<()> {
             remote_cache_status,
             remote_cache_refresh,
             remote_cache_activity,
-            remote_open_session_window
+            remote_open_session_window,
+            remote_choose_inputs,
+            remote_paste_inputs
         ])
         .on_menu_event(handle_menu_event)
         .setup(|app| {

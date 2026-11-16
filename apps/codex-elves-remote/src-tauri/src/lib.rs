@@ -1,6 +1,7 @@
 pub mod appearance;
 pub mod connection;
 pub mod discovery;
+mod local_inputs;
 pub mod resource_cache;
 pub mod settings;
 

@@ -846,6 +846,26 @@ impl Claude {
         Ok(path)
     }
 
+    pub(super) async fn local_input_paths(
+        &self,
+        thread_id: Option<&str>,
+        selected: Option<WslConfig>,
+        paths: Vec<PathBuf>,
+    ) -> anyhow::Result<Vec<String>> {
+        if paths.is_empty() { return Ok(Vec::new()); }
+        // 用户要求上传本机文件后原生 CLI 可读取；路径按目标会话的发行版、用户映射，不能借用默认 WSL。
+        let config = if let Some(id) = thread_id {
+            self.conversation(id).await?.config
+        } else {
+            match selected { Some(config) => config, None => self.config()? }
+        };
+        let mut result = Vec::new();
+        for path in paths {
+            result.push(Self::linux_cwd(&config, path.to_str().context("附件路径编码无效")?).await?);
+        }
+        Ok(result)
+    }
+
     async fn lock(&self, id: &str) -> Arc<Mutex<()>> {
         self.locks
             .lock()

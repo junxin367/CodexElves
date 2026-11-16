@@ -19,6 +19,8 @@ export function icon(name) {
     more: '<circle cx="5" cy="12" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/>',
     menu: '<path d="M4 6h16M4 12h16M4 18h16"/>',
     folderClosed: '<path d="M20 20H4a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2Z"/><path d="M2 10h20"/>',
+    // 用户要求本地文件与文件夹使用两种简洁图标，预览中心与选择菜单共用。
+    document: '<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8Z"/><path d="M14 2v6h6"/>',
     pin: '<path d="m16 3 5 5-4 1-3 5-4-4 5-3Z"/><path d="m10 14-7 7"/>',
     plus: '<path d="M12 5v14M5 12h14"/>', check: '<path d="m5 12 4 4L19 6"/>',
     image: '<rect x="3" y="3" width="18" height="18" rx="3"/><circle cx="8" cy="8" r="1.5"/><path d="m21 15-6-6L3 21"/>',

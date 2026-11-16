@@ -1,6 +1,9 @@
 // 主界面骨架：生成工作区布局、绑定侧栏/输入区/会话菜单等控件并挂载会话工具；创建的共享引用写入 shell-state.js 供其他模块读取。
 
-import { handleComposerImagePaste, mountComposerAttachments, openVideoPreview } from "../attachments.js";
+import {
+  handleComposerImagePaste, handleComposerLocalPaste, handleComposerLocalPasteShortcut,
+  mountComposerAttachments, openVideoPreview
+} from "../attachments.js";
 import { prepareRemoteTunnelAccess, remoteChannelRoutes, requestRemote } from "../channels.js";
 import { permissionOptions } from "../permissions.js";
 import { openAndroidBrowser, postPlatformMessage } from "../platform.js";
@@ -154,6 +157,7 @@ export function shell() {
   announceAppReady();
   const add = $("#composer-add");
   add.append(icon("plus"));
+  add.setAttribute("aria-label", "添加附件或会话操作");
   // 用户要求权限紧邻“+”；小屏只展示图标，空白由此入口后的自动外边距吸收。
   const permissions = selectControl("permission-button", "选择会话权限", permissionOptions("codex"), "configured",
     "permission-button", selected => [icon(selected?.icon || "shield"),
@@ -474,6 +478,7 @@ export function shell() {
   $("#prompt").onkeydown = event => {
     if (threadReadOnly()) { event.preventDefault(); return; }
     if (event.isComposing) return;
+    handleComposerLocalPasteShortcut(event);
     if ((event.ctrlKey || event.metaKey) && !event.altKey && !$("#prompt").editHistory?.composing
         && ["z", "y"].includes(event.key.toLowerCase())) {
       event.preventDefault();
@@ -542,6 +547,8 @@ export function shell() {
   };
   $("#prompt").onpaste = event => {
     if (threadReadOnly()) { event.preventDefault(); return; }
+    // 用户要求独立客户端 Ctrl+V 添加本机文件/文件夹；纯文字与截图继续走原有输入和图片处理。
+    if (handleComposerLocalPaste(event)) return;
     if (handleComposerImagePaste(event)) return;
     event.preventDefault();
     const text = (event.clipboardData?.getData("text/plain") || "").replace(/\r\n?/g, "\n");
