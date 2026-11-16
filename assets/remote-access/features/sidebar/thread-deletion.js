@@ -121,7 +121,8 @@ export async function deleteSidebarThread(item) {
     const claude = claudeThreadId(item.id);
     const confirmed = await confirmAction(claude ? "移除 Claude 会话" : "删除会话",
       claude ? `将从远程列表移除“${record.title}”。Claude 原生会话历史仍保留，项目文件不受影响。`
-        : `将永久删除“${record.title}”、其会话记录及原生子智能体会话，项目文件不受影响。此操作不可恢复。执行中的任务需先停止，其他客户端占用的会话需在对应客户端处理。确定删除吗？`,
+        // 用户要求全部侧边空闲才允许删除；确认文案同时说明自动关闭侧边及执行中限制。
+        : `将永久删除“${record.title}”、其会话记录及原生子智能体会话，并关闭所属临时侧边会话，项目文件不受影响。此操作不可恢复。主会话或任一侧边会话执行中的任务需先停止，其他客户端占用的会话需在对应客户端处理。确定删除吗？`,
       claude ? "移除会话" : "删除会话", true);
     if (!confirmed || session?.device.id !== deviceId || session.readOnly || !connected) return;
     if (threadDeletions.get(key) !== record || threadDeletionConflict(item.id)) return;

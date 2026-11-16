@@ -5,6 +5,21 @@ use super::store::{Data, Deletion};
 use super::{ApiError, Harness, error};
 use crate::remote_access::{Receipt, RemoteAuthorization};
 
+fn side_executing(projection: &super::projection::Projection, parent: &str, id: &str) -> bool {
+    let Some(side) = projection.sides.threads.get(id) else {
+        return false;
+    };
+    if side.parent != parent || side.closed || side.expired {
+        return false;
+    }
+    let status = &side.metadata["status"];
+    projection.active.contains_key(id)
+        || matches!(
+            status.as_str().or_else(|| status["type"].as_str()),
+            Some("active" | "inProgress" | "running" | "waiting")
+        )
+}
+
 impl Harness {
     pub(in crate::remote_access) async fn protected_delete_receipts(
         &self,
@@ -41,6 +56,47 @@ impl Harness {
                     "此会话有尚未确认的删除，请核对原删除回执；当前操作未执行，不会重复删除。"
                 },
             ));
+        }
+        Ok(())
+    }
+
+    async fn close_sides_for_deletion(
+        &self,
+        parent: &str,
+        authorization: &RemoteAuthorization,
+    ) -> anyhow::Result<()> {
+        let mut ids: Vec<String> = self
+            .projection
+            .lock()
+            .await
+            .sides
+            .threads
+            .iter()
+            .filter(|(_, side)| side.parent == parent && !side.closed)
+            .map(|(id, _)| id.clone())
+            .collect();
+        ids.sort();
+        for id in ids {
+            // 主会话锁只阻止新建侧边；逐个取得侧边锁，避免关闭与发送、出队或手动关闭并发。
+            let lock = self.thread_lock(&id).await;
+            let _serial = lock.lock().await;
+            // 预检后仍可能有新发送；取得侧边锁后必须再次核对，执行中不能由删除流程自动停止。
+            if side_executing(&*self.projection.lock().await, parent, &id) {
+                return Err(error(409, "侧边会话执行中，无法删除"));
+            }
+            self.side_command(
+                "closeSideThread",
+                &json!({"threadId":id,"parentThreadId":parent}),
+                authorization,
+            )
+            .await
+            .map_err(|failure| {
+                let code = failure
+                    .downcast_ref::<ApiError>()
+                    .map_or(503, |failure| failure.code);
+                // 此处尚未派发主会话删除，因此即使侧边关闭结果未知，也能确定主会话未删除。
+                error(code, &format!("关闭侧边会话失败，主会话未删除：{failure}"))
+            })?;
         }
         Ok(())
     }
@@ -108,20 +164,18 @@ impl Harness {
                     "会话仍有执行、压缩或待处理交互，本次未删除。请先处理并确认结束。",
                 ));
             }
+            // 用户要求所有关联侧边均不在执行中才允许删除；任一活动侧边都使用指定提示。
             if projection
                 .sides
                 .threads
-                .values()
-                .any(|side| side.parent == id && !side.closed && !side.expired)
+                .keys()
+                .any(|side_id| side_executing(&projection, id, side_id))
             {
-                return Err(error(
-                    409,
-                    "会话仍有打开的侧边会话，本次未删除。请先关闭侧边会话。",
-                ));
+                return Err(error(409, "侧边会话执行中，无法删除"));
             }
         }
         {
-            let mut store = self.store.lock().await;
+            let store = self.store.lock().await;
             if let Some(deletion) = store.data.deletions.get(id) {
                 if deletion.state == "deleted" {
                     return Ok(deletion_result(id, deletion.cleanup_pending));
@@ -146,6 +200,10 @@ impl Harness {
                     "会话仍有待核对的发送或编辑，本次未删除。请先核对原操作。",
                 ));
             }
+            drop(store);
+            // 仅关闭已经确认空闲的侧边，避免主会话删除后留下孤立正文；执行中侧边已在预检和锁内复查拦截。
+            self.close_sides_for_deletion(id, authorization).await?;
+            let mut store = self.store.lock().await;
             // 必须先落盘再发出唯一一次原生删除；磁盘失败属于确定未删除，不能降级成无保护派发。
             store
                 .commit(|data| {

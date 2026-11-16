@@ -8257,6 +8257,19 @@ function sidebarDeletionHarness() {
   return { context, reply, calls, notices, target, control, failReply, persisted, assertControlRetained };
 }
 
+test("删除主会话的确认文案明确包含侧边关闭和执行中限制", async () => {
+  const h = sidebarDeletionHarness();
+  let confirmation = "";
+  h.context.confirmAction = async (_title, message) => { confirmation = message; return true; };
+  h.context.loadSidebar = async () => {};
+  const deletion = h.context.deleteSidebarThread(h.target);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.match(confirmation, /并关闭所属临时侧边会话/);
+  assert.match(confirmation, /主会话或任一侧边会话执行中的任务需先停止/);
+  h.reply.resolve({ ok: true, threadId: h.target.id, deleted: true, status: "local_deleted" });
+  await deletion;
+});
+
 test("删除成功回执后迟到详情409只保留成功提示，不恢复会话或重发删除", async () => {
   const h = sidebarDeletionHarness(), { context } = h;
   const read = deferred(), timers = [], sidebarReads = [], locations = [];
