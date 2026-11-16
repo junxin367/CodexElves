@@ -521,7 +521,10 @@ export function mountSessionMenu({
     const anchorGap = 10;
     const top = Math.max(view.top + padding, Math.min(box.bottom + anchorGap, view.top + view.height - padding));
     menu.style.width = `${width}px`;
-    menu.style.left = `${menuHorizontalLeft(box, width, view, padding)}px`;
+    // 用户要求会话主菜单在 PC 和手机上固定向左展开，右边缘对齐图标右边缘，不参与通用 65% / 35% 方向判定。
+    // 左坐标为图标右边缘减菜单宽度；空间不足时只平移以保留两侧 8px 留白，不切换展开方向。
+    menu.style.left = `${Math.max(view.left + padding,
+      Math.min(box.right - width, view.left + view.width - width - padding))}px`;
     menu.style.top = `${top}px`;
     menu.style.maxHeight = `${Math.max(0, Math.min(480, view.height * .8, view.top + view.height - top - padding))}px`;
     if (!actionMenu.hidden) {
