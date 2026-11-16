@@ -376,7 +376,7 @@ const vm = {
       syncWorkspaceSidePanelState() {},
       workspaceSidePanel: false,
       appearance: { sessionTypes: { codex: true, claude: false }, sessionFilter: "all" },
-      transcriptEvents: new Map(), claudeHistoryOrder: null,
+      transcriptEvents: new Map(), claudeHistoryOrder: null, sessionPlan: null, turnFieldVersions: new Map(),
     })) if (!Object.hasOwn(context, key)) context[key] = value;
     context.appearance.sessionTypes ??= { codex: true, claude: false };
     context.appearance.sessionFilter ??= "all";
@@ -1050,16 +1050,19 @@ test("Claude 完整历史同步移除旧摘要轮次，迟到的历史响应不�
   const oldRead = context.readHistoryPage(false, 1);
   vm.runInContext(sourceSection("function receiveClaudeHistory(", "function receive(event)"), context);
   context.params = { threadId: id, thread: { id, queuedMessages: [] }, turnIds: ["real"],
+    sessionPlan: [],
     turns: [{ id: "real", _nativeUserId: "native-real", _nativeDone: true, items: [{ id: "reply", type: "agentMessage", text: "完成" }] }] };
   vm.runInContext("receiveClaudeHistory(params)", context);
   assert.equal(turns.has("compact"), false);
   assert.equal(turns.has("pending"), true);
   assert.equal(turns.get("real")._nativeDone, true);
   assert.equal(context.turnVersions.get("compact"), 1, "删除版本保留，防止较早的历史请求复活摘要");
-  respond({ data: [summary, { id: "real", items: [] }], nextCursor: null });
+  respond({ data: [summary, { id: "real", items: [] }], nextCursor: null,
+    sessionPlan: [{ step: "回退前的旧任务", status: "pending" }] });
   await oldRead;
   assert.equal(context.turns.has("compact"), false, "已删除摘要不能被通知之前发起的旧读取复活");
   assert.equal(context.recentHistoryPage.turns.some(turn => turn.id === "compact"), false);
+  assert.deepEqual(Array.from(context.sessionPlan), [], "迟到历史不能复活正式快照已经清空的任务");
 });
 
 function claudeUsageHarness() {
@@ -11757,7 +11760,7 @@ function claudeExecutionFeedbackHarness(turn) {
   const context = nodeVm.createContext({ nativeConnectionVersion: 1,
     selectedId: "claude-fixture", thread: { id: "claude-fixture", status: { type: "idle" } },
     turns: new Map(initialTurns.map(value => [value.id, value])), renderedItems: new Map(), renderedTurns: new Map(), renderedActivities: new Map(),
-    messageFrame: null, followMessages: true, composerScroll: null, relatedSessionView: null,
+    messageFrame: null, followMessages: true, composerScroll: null, relatedSessionView: null, sessionPlan: null,
     editingMessage: null, editingQueuedMessage: null, pending: null, busy: false, stopping: false, connected: true,
     historyError: "", historyCursor: null, historyInitialized: true, historyScrollTop: 0, markdownRenderVersion: 0,
     textContent: item => item.text || "", $: selector => selector === "#messages" ? root : null,
@@ -11965,6 +11968,78 @@ test("Claude 任务清单只显示最新快照并随正文刷新保持在最下�
   h.render();
   assert.equal(h.root.children.at(-1).dataset.planScope, undefined,
     "最新清单为空时不能继续显示旧快照");
+});
+
+test("Claude 新页面任务清单独立于正文分页，空快照优先于旧轮次且不影响 Codex", () => {
+  const turns = Array.from({ length: 12 }, (_,index) => ({ id: `turn-${index}`,
+    _nativeUserId: `native-${index}`, status: "completed",
+    items: [{ id: `input-${index}`, type: "userMessage" }] }));
+  turns[0].plan = [{ step: "较早轮次中的任务", status: "pending" }];
+  const h = claudeExecutionFeedbackHarness(turns.slice(-10));
+  h.context.renderTurnPlanTitle = plan => h.context.element("div", "turn-plan-title", `${plan.length} 个任务`);
+  h.context.sessionPlan = [{ step: "会话最新任务", status: "inProgress" }];
+  h.render();
+  assert.equal(h.root.children.at(-1).dataset.planScope, "claude-session");
+  assert.equal(h.root.children.at(-1).children[1].children[0].textContent, "◌ 会话最新任务");
+  h.context.turns = new Map(turns.map(turn => [turn.id, turn]));
+  h.render();
+  assert.equal(h.root.children.at(-1).children[1].children[0].textContent, "◌ 会话最新任务",
+    "加载旧页不能改变完整会话的最新任务");
+  h.context.sessionPlan = [];
+  h.render();
+  assert.equal(h.root.children.some(node => node.dataset.planScope), false,
+    "明确空清单必须覆盖仍在历史中的旧任务");
+  h.context.sessionPlan = null;
+  h.context.turns = new Map([["codex-turn", { id: "codex-turn", status: "inProgress",
+    plan: [{ step: "Codex 任务", status: "pending" }], items: [{ id: "input", type: "userMessage" }] }]]);
+  h.render();
+  assert.equal(h.root.children.some(node => node.dataset.planScope), false);
+  assert.equal(h.root.children[0].children.at(-1).children[0].textContent, "○ Codex 任务");
+});
+
+test("Codex 任务计划实时更新与重进历史共用快照，较旧版本和迟到读取不撤回新状态", () => {
+  const c = vm.createContext({ nativeConnectionVersion: 1,
+    session: { device: { id: "device" } }, selectedId: "main", privateInputScope: () => "scope",
+    sessionMenu: { invalidate: () => null }, relatedSessionView: null, relatedMenuTimer: null, connected: true,
+    thread: { id: "main", status: { type: "active" } }, turns: new Map(), pending: null, sending: false,
+    messageVersion: 0, statusVersion: 0, itemVersions: new Map(), turnVersions: new Map(), turnFieldVersions: new Map(),
+    partialItems: new Set(), transcriptEventTypes: new Set(), sidebarReadRefreshSuppressions: new Set(),
+    recentPrioritySelectionSuppressions: new Set(), threadDeleted: () => false,
+    handleRemoteChannelEvent: () => false, scheduleRelatedMenuRefresh() {}, rememberBackgroundThreadDisplay() {},
+    receiveCompactionLifecycle() {}, mergeTranscriptEvents() {}, reconcileConfirmedInputOrder() {},
+    mergeItemProjection: (previous, incoming) => ({ ...previous, ...incoming }), enrichTurnTranscriptEvents: value => value,
+    updateComposer() {}, scheduleReload() {}, markVisibleThreadRead: async () => {},
+    scheduleMessages() {}, rememberTranscript() {}, scheduleSidebarRefresh() {},
+  });
+  vm.runInContext(sourceSection("function normalizeDi") + "\n"
+    + sourceSection("function mergeHi", "async functi") + "\n" + sourceSection("function receive(event) {"), c);
+  const initial = { id: "turn", status: "inProgress", items: [], remotePlanEpoch: "engine",
+    remotePlanRevision: 2, plan: [{ step: "任务", status: "pending" }] };
+  let turn = c.mergeHistoryTurn(initial, 0);
+  assert.equal(turn.plan[0].status, "pending", "新页面仅凭历史快照即可恢复任务");
+  c.turns.set(turn.id, turn);
+  const receive = (revision, plan) => c.receive({ method: "turn/plan/updated",
+    params: { threadId: "main", turnId: "turn", remotePlanEpoch: "engine", remotePlanRevision: revision, plan } });
+  receive(4, [{ step: "任务", status: "inProgress" }]);
+  turn = c.mergeHistoryTurn(initial, c.messageVersion);
+  assert.equal(turn.plan[0].status, "inProgress", "服务版本较旧，即使请求较晚也不能倒退");
+  assert.equal(turn.remotePlanRevision, 4);
+  c.turns.set(turn.id, turn);
+  receive(3, initial.plan);
+  assert.equal(c.turns.get(turn.id).plan[0].status, "inProgress", "乱序旧事件不能倒退");
+  const beforeClear = c.messageVersion;
+  receive(5, []);
+  turn = c.mergeHistoryTurn(initial, beforeClear);
+  assert.equal(turn.plan.length, 0, "迟到 HTTP 不能撤回原生清空");
+  c.turns.set(turn.id, turn);
+  turn = c.mergeHistoryTurn({ id: turn.id, items: [], remotePlanEpoch: "engine" }, c.messageVersion);
+  assert.equal(turn.plan.length, 0, "字段缺失不改变已确认清单");
+  receive(6, initial.plan);
+  turn = c.mergeHistoryTurn({ id: turn.id, items: [], remotePlanEpoch: "new-engine" }, c.messageVersion);
+  assert.equal(turn.plan, undefined, "新引擎无恢复证据时不保留旧缓存计划");
+  c.turns.set(turn.id, { ...initial, remotePlanEpoch: undefined, remotePlanRevision: undefined });
+  turn = c.mergeHistoryTurn({ id: turn.id, items: [], remotePlanEpoch: "new-engine" }, c.messageVersion);
+  assert.equal(turn.plan, undefined, "升级前没有代次标识的缓存也不能冒充新引擎的计划");
 });
 
 test("Claude 提问回答保留未回答题目并按受鉴权地址显示截图，拒答回退工具卡片", () => {

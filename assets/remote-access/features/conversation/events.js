@@ -29,7 +29,7 @@ import {
 import {
   claudeHistoryCursor, completedItem, itemVersions, messageVersion, normalizeDisplayedTurnItems,
   normalizeDisplayedUserMessage, orderClaudeHistoryTurns, partialItems, setHistoryCursor,
-  setMessageVersion, turnFieldVersions, turnVersions
+  setMessageVersion, setSessionPlan, turnFieldVersions, turnVersions
 } from "./history-state.js";
 import { retireClaudeHistoryTurns } from "./history.js";
 import { acceptedSendItem, pending } from "./pending-state.js";
@@ -43,7 +43,7 @@ import { markVisibleThreadRead } from "../messages/user-content.js";
 import { applyQueueSnapshot, reloadQueue } from "../queue/queue.js";
 import { clearSentMessageDisplays, reconcileConfirmedInputOrder, reconcileSentMessageDisplays, retiredSendPayloads } from "../queue/sent-display.js";
 import { queueVersion, setNotifiedQueue, setNotifiedQueueEdits, setQueueVersion } from "../queue/state.js";
-import { backendAvailable, privateInputScope } from "../session/capabilities.js";
+import { backendAvailable, claudeThreadId, privateInputScope } from "../session/capabilities.js";
 import { stream, withRecoveryErrorSilence } from "../session/connection-state.js";
 import { refreshConnectedSession, setConnection } from "../session/connection.js";
 import { relatedMenuTimer, relatedSessionView, setRelatedMenuTimer } from "../session/related-state.js";
@@ -65,6 +65,10 @@ function receiveClaudeHistory(params) {
   if (!params.thread || params.thread.id !== id || !Array.isArray(params.turns)) return;
   const version = setMessageVersion(messageVersion + 1);
   if (!params.preview) {
+    if (Array.isArray(params.sessionPlan)) {
+      setSessionPlan(params.sessionPlan);
+      turnFieldVersions.set("$session:plan", version);
+    }
     setThread({ ...thread, ...params.thread });
     setNotifiedGoal(thread.goal); setGoalVersion(goalVersion + 1);
     if (thread.compaction) reconcileCompaction(id, thread.compaction);
@@ -349,8 +353,21 @@ export function receive(event) {
           itemVersions.set(`${turnId}:${item.id}`, version); partialItems.delete(`${turnId}:${item.id}`);
         }
       }
-      if (event.method === "turn/plan/updated") {
-        turn.plan = params.plan; turnFieldVersions.set(`${turnId}:plan`, version);
+      if (event.method === "turn/plan/updated" && Array.isArray(params.plan)) {
+        const stale = params.remotePlanEpoch && params.remotePlanEpoch === turn.remotePlanEpoch
+          && Number.isSafeInteger(params.remotePlanRevision) && Number.isSafeInteger(turn.remotePlanRevision)
+          && params.remotePlanRevision < turn.remotePlanRevision;
+        if (!stale) {
+          turn.plan = params.plan;
+          if (params.remotePlanEpoch) {
+            turn.remotePlanEpoch = params.remotePlanEpoch;
+            turn.remotePlanRevision = params.remotePlanRevision;
+          }
+          turnFieldVersions.set(`${turnId}:plan`, version);
+          if (claudeThreadId(selectedId)) {
+            setSessionPlan(params.plan); turnFieldVersions.set("$session:plan", version);
+          }
+        }
       }
       if (event.method === "turn/diff/updated") {
         turn.diff = params.diff; turnFieldVersions.set(`${turnId}:diff`, version);

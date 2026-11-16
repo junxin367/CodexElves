@@ -402,8 +402,19 @@ pub(super) fn observe_plan_result(turn: &mut Value, block: &Value, frame: &Value
 pub(super) fn carried_tasks(previous: &Value) -> Option<Value> {
     [&previous["_claudeTasks"], &previous["_claudeTaskSeed"]]
         .into_iter()
-        .find(|tasks| tasks.as_array().is_some_and(|tasks| !tasks.is_empty()))
+        // 用户要求明确清空后不能恢复旧清单：空的最终状态优先于本轮开始时的旧 seed。
+        .find(|tasks| tasks.is_array())
         .cloned()
+}
+
+pub(super) fn session_plan(turns: &[Value]) -> Value {
+    // 用户要求 Claude 最新清单不受正文分页影响；从完整原生投影取最后一次快照，
+    // 包含显式空清单。回退后的 turns 已只含有效分支，不从旧缓存或正文推断。
+    turns
+        .iter()
+        .rev()
+        .find_map(|turn| turn.get("plan").filter(|plan| plan.is_array()).cloned())
+        .unwrap_or_else(|| json!([]))
 }
 
 fn recompute_plan(turn: &mut Value) {
@@ -776,6 +787,25 @@ mod tests {
         assert_eq!(second["plan"][0]["status"], "completed");
         // 第一轮的计划保持当时的快照。
         assert_eq!(first["plan"][0]["status"], "inProgress");
+    }
+
+    #[test]
+    fn task_plan_clear_survives_new_turn_and_failed_or_unknown_updates() {
+        let old = json!({"plan":[{"step":"旧任务","status":"pending"}],
+            "_claudeTasks":[{"id":"1","subject":"旧任务","status":"pending"}]});
+        let mut cleared = json!({"_claudeTaskSeed":carried_tasks(&old),"items":[]});
+        observe_plan_call(&mut cleared, &json!({"id":"clear","name":"TodoWrite","input":{"todos":[]}}));
+        assert_eq!(carried_tasks(&cleared), Some(json!([])));
+        let mut next = json!({"_claudeTaskSeed":carried_tasks(&cleared),"items":[]});
+        observe_plan_call(&mut next,
+            &json!({"id":"update","name":"TaskUpdate","input":{"taskId":"1","status":"completed"}}));
+        assert_eq!(next["plan"], json!([]));
+        assert_eq!(session_plan(&[old.clone(), cleared, next]), json!([]));
+        let mut history = vec![old.clone()];
+        history.extend((0..25).map(|index| json!({"id":index,"items":[]})));
+        assert_eq!(session_plan(&history), old["plan"]);
+        history.clear();
+        assert_eq!(session_plan(&history), json!([]));
     }
 
     #[test]

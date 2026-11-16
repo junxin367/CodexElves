@@ -1505,7 +1505,7 @@ impl Claude {
             // 用户要求修复中断假消息；HTTP 分页也提供完整有效 ID，旧缓存无需等待事件流才能退役错误轮次。
             "turnIds":c.turns.iter().map(|turn| &turn["id"]).collect::<Vec<_>>(),
             "nextCursor":if start == 0 {Value::Null} else {json!(start.to_string())},
-            "transcriptEvents":[],"backend":"claude"}))
+            "transcriptEvents":[],"backend":"claude","sessionPlan":tools::session_plan(&c.turns)}))
     }
 
     pub async fn queue(&self, id: &str) -> anyhow::Result<Value> {
@@ -2805,7 +2805,7 @@ impl Claude {
                     || job_id.len() == 8 && job_id.bytes().all(|byte| byte.is_ascii_hexdigit())),
             "Claude 原生会话身份无效"
         );
-        let (thread, turns, turn_ids, completed, usage_changed, changed, reverted) = self
+        let (thread, turns, turn_ids, session_plan, completed, usage_changed, changed, reverted) = self
             .change(|saved| {
                 let c = saved
                     .conversations
@@ -2966,6 +2966,7 @@ impl Claude {
                         .iter()
                         .map(|turn| turn["id"].clone())
                         .collect::<Vec<_>>(),
+                    tools::session_plan(&c.turns),
                     completed,
                     usage_changed,
                     changed,
@@ -2995,7 +2996,8 @@ impl Claude {
         }
         if changed {
             self.publish(json!({"method":"claude/history/updated","params":{
-                "threadId":id,"thread":thread,"turns":turns,"turnIds":turn_ids,"completed":completed}}));
+                "threadId":id,"thread":thread,"turns":turns,"turnIds":turn_ids,
+                "sessionPlan":session_plan,"completed":completed}}));
             self.publish(json!({"method":"remote/sidebarChanged","params":{"threadId":id}}));
         }
         if usage_changed {
@@ -4842,6 +4844,26 @@ mod tests {
             ],
         };
         (directory, service, c)
+    }
+
+    #[tokio::test]
+    async fn claude_history_returns_session_plan_outside_page_and_after_revert() {
+        let (_directory, service, mut c) = fixture();
+        c.turns = (0..25).map(|index| json!({"id":format!("turn-{index}"),
+            "_nativeUserId":format!("native-{index}"),"status":"completed","items":[]})).collect();
+        c.turns[0]["plan"] = json!([{"step":"跨页任务","status":"pending"}]);
+        service.saved.lock().await.conversations.insert(c.id.clone(), c.clone());
+        for cursor in [Value::Null, json!("10")] {
+            let history = service.history(&json!({"threadId":c.id,"cursor":cursor})).await.unwrap();
+            assert_eq!(history["sessionPlan"], c.turns[0]["plan"]);
+            assert!(history["data"].as_array().unwrap().len() <= 10);
+        }
+        c.turns[24]["plan"] = json!([]);
+        service.saved.lock().await.conversations.insert(c.id.clone(), c.clone());
+        assert_eq!(service.history(&json!({"threadId":c.id})).await.unwrap()["sessionPlan"], json!([]));
+        c.turns.truncate(1);
+        service.saved.lock().await.conversations.insert(c.id.clone(), c.clone());
+        assert_eq!(service.history(&json!({"threadId":c.id})).await.unwrap()["sessionPlan"], c.turns[0]["plan"]);
     }
 
     #[tokio::test]

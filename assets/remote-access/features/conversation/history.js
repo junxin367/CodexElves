@@ -25,7 +25,7 @@ import {
   setHistoryCursor, setHistoryError, setHistoryInitialized, setHistoryLoadFrame,
   setHistoryLoadVisibleItems, setHistoryLoading, setHistoryLoadingOlder, setHistoryLoadingTurnId,
   setHistoryLoadingVersion, setHistoryRequest, setLatestHistoryReadFailed, setMessageVersion,
-  setRecentHistoryPage, setThreadRequest, setTranscriptChecking, syncHistoryButtons, threadRequest,
+  sessionPlan, setRecentHistoryPage, setSessionPlan, setThreadRequest, setTranscriptChecking, syncHistoryButtons, threadRequest,
   transcriptChecking, turnFieldVersions, turnVersions
 } from "./history-state.js";
 import { setThreadReadFailed, setThreadReadVersion, syncThreadHash, threadReadVersion } from "./selection-state.js";
@@ -116,6 +116,12 @@ async function readHistoryPage(older, version, itemsTurnId, generation = foregro
         || pageLeaving || version !== selectionVersion || selectedId !== id || threadDeleted(id)) return;
     if (!Array.isArray(result?.data)) throw new Error("会话历史返回格式无效");
     if (itemsTurnId && (result.scope !== "items" || result.turnId !== itemsTurnId)) throw new Error("会话消息分页归属无效");
+    // 用户要求新开 Claude 页面显示完整会话的最新任务，翻旧页也不能回到旧清单；
+    // 读取开始后收到的正式更新优先，缺字段不清空，明确 [] 才清空。
+    if (Array.isArray(result.sessionPlan) && (turnFieldVersions.get("$session:plan") || 0) <= readVersion) {
+      setSessionPlan(result.sessionPlan);
+      turnFieldVersions.set("$session:plan", readVersion);
+    }
     if (!itemsTurnId && claudeThreadId(id))
       retireClaudeHistoryTurns(result.turnIds, readVersion, messageVersion + 1);
     // 用户要求旧摘要同步删除后不能被迟到读取复活；仅过滤本次读取开始后已明确删除的 Claude 轮次，不影响分页或 Codex。
@@ -136,6 +142,7 @@ async function readHistoryPage(older, version, itemsTurnId, generation = foregro
     if (latestPage) setRecentHistoryPage({
       turns: [...result.data].reverse(), transcriptEvents: result.transcriptEvents || [],
       historyCursor: result.nextCursor, followMessages: true, scrollTop: 0,
+      ...(Array.isArray(sessionPlan) ? { sessionPlan } : {}),
       ...(typeof result.ephemeral === "boolean" ? { ephemeral: result.ephemeral }
         : typeof threadEphemeralState(id) === "boolean" ? { ephemeral: threadEphemeralState(id) } : {}),
       ...(result.sideHistoryVersion === 1 ? { sideHistoryVersion: 1 } : {})
@@ -146,6 +153,9 @@ async function readHistoryPage(older, version, itemsTurnId, generation = foregro
       const merged = mergeHistoryTurn({
         id: itemsTurnId, items: result.data, itemsPageComplete: result.itemsPageComplete,
         itemsComplete: result.itemsComplete, itemsNextCursor: result.itemsNextCursor,
+        ...(Array.isArray(result.plan) ? { plan: result.plan } : {}),
+        ...(result.remotePlanEpoch ? { remotePlanEpoch: result.remotePlanEpoch,
+          remotePlanRevision: result.remotePlanRevision } : {}),
         itemsView: result.itemsComplete ? "full" : "summary"
       }, readVersion, { older: true, beforeId: cursorAnchor, mediaReadVersion });
       turns.set(itemsTurnId, merged);
@@ -265,6 +275,17 @@ function mergeHistoryTurn(snapshot, readVersion, { older = false, beforeId = nul
     snapshot = { ...snapshot, items: normalizeDisplayedTurnItems(snapshot.items) };
   }
   const current = turns.get(snapshot.id);
+  const livePlan = (turnFieldVersions.get(`${snapshot.id}:plan`) || 0) > readVersion
+    || current?.remotePlanEpoch && current.remotePlanEpoch === snapshot.remotePlanEpoch
+      && Number.isSafeInteger(current.remotePlanRevision) && Number.isSafeInteger(snapshot.remotePlanRevision)
+      && current.remotePlanRevision > snapshot.remotePlanRevision;
+  if (!Array.isArray(snapshot.plan)) {
+    snapshot = { ...snapshot };
+    delete snapshot.plan;
+    // 服务重建后的新代次没有旧计划的恢复证据，不能继续把旧浏览器缓存当作当前任务。
+    if (current && snapshot.remotePlanEpoch && current.remotePlanEpoch !== snapshot.remotePlanEpoch)
+      Object.assign(snapshot, { plan: undefined, remotePlanRevision: undefined });
+  }
   const withImages = turn => {
     if (!current?.items?.some(item => item.remoteImages?.length) && !snapshot.items?.some(item => item.remoteImages?.length))
       return turn;
@@ -386,9 +407,11 @@ function mergeHistoryTurn(snapshot, readVersion, { older = false, beforeId = nul
     }
   }
   const newer = (turnVersions.get(snapshot.id) || 0) > readVersion;
-  const liveFields = Object.fromEntries(["plan", "diff"]
+  const liveFields = Object.fromEntries(["diff"]
     .filter(field => (turnFieldVersions.get(`${snapshot.id}:${field}`) || 0) > readVersion)
     .map(field => [field, current[field]]));
+  if (livePlan) for (const field of ["plan", "remotePlanEpoch", "remotePlanRevision"])
+    liveFields[field] = current[field];
   const timing = Object.fromEntries(["startedAt", "completedAt", "durationMs", "turnStartedAtMs", "turnCompletedAtMs"]
     .filter(field => Number.isFinite(current[field]) && (newer || !Number.isFinite(snapshot[field])))
     .map(field => [field, current[field]]));

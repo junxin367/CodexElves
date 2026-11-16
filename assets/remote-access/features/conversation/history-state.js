@@ -16,6 +16,9 @@ export function setMessageFrame(value) { return messageFrame = value; }
 export let followMessages = true;
 export function setFollowMessages(value) { return followMessages = value; }
 export const renderedItems = new Map(), renderedTurns = new Map();
+// Claude 的会话清单独立于已加载的正文页；null 表示旧服务未提供，[] 表示明确没有任务。
+export let sessionPlan = null;
+export function setSessionPlan(value) { return sessionPlan = value; }
 export function updateScrollControl() {
   const messages = $("#messages"), control = $("#scroll-to-bottom");
   if (!messages || !control) return;
@@ -60,7 +63,7 @@ export function visibleMessageAnchor(root) {
   }
   return null;
 }
-// 用户要求 Claude 和 Codex 都保留 TODO 统计标题；仅统计原生 turn.plan 的状态，随计划更新，不从正文推测任务。
+// 用户要求 Claude 和 Codex 都保留 TODO 统计标题；仅统计原生计划快照，随计划更新，不从正文推测任务。
 export function renderTurnPlanTitle(plan) {
   const count = status => plan.filter(step => step.status === status).length;
   return element("div", "turn-plan-title",

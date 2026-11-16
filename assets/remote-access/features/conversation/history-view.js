@@ -19,8 +19,8 @@ import {
   followMessages, historyCursor, historyError, historyInitialized, historyLoadButton,
   legacySentDisplayTurn, messageFrame, renderTurnPlanTitle, renderedItems, renderedTurns,
   setFollowMessages, setHistoryCursor, setHistoryInitialized, setHistoryScrollTop, setMessageFrame,
-  setRecentHistoryPage, setTranscriptChecking, syncHistoryButtons, updateScrollControl,
-  visibleMessageAnchor
+  sessionPlan, setRecentHistoryPage, setSessionPlan, setTranscriptChecking, syncHistoryButtons, turnFieldVersions,
+  updateScrollControl, visibleMessageAnchor
 } from "./history-state.js";
 import { historyPlaceholder, loadHistory, scheduleHistoryLoad } from "./history.js";
 import { pending } from "./pending-state.js";
@@ -78,10 +78,11 @@ export function renderMessages(keepScroll = true) {
   if (reconcileSentMessageDisplays(selectedId, currentThreadDisplay()?.queuedMessages)) renderQueueArea();
   const sorted = withSentMessageDisplays();
   const lastRealTurn = [...sorted].reverse().find(turn => turns.has(turn.id));
-  // 用户要求 Claude 原生任务清单属于整个会话：用原生轮次标记识别 Claude，
-  // 后续只保留按时间顺序遇到的最新 plan，统一放到正文所有轮次之后。
-  const claudeSession = sorted.some(turn => turn?._nativeUserId);
-  let claudePlan = null;
+  // 用户要求 Claude 原生任务清单属于整个会话：完整清单或原生轮次标记识别 Claude，
+  // 统一放到正文所有轮次之后，旧服务才从已加载轮次寻找最新快照。
+  const claudeSession = sorted.some(turn => turn?._nativeUserId) || Array.isArray(sessionPlan);
+  // 用户要求新页面不等待下一次任务更新；新服务提供完整会话快照，旧服务才从已加载轮次兼容读取。
+  let claudePlan = Array.isArray(sessionPlan) ? sessionPlan : null;
   loadMessageSkillChoices(sorted.flatMap(turn => turn.items || []));
   if (historyError && sorted.length)
     children.push(historyLoadButton("最新记录加载失败，重试", () => void loadHistory()));
@@ -240,7 +241,7 @@ export function renderMessages(keepScroll = true) {
     for (const item of trailingManualCompactions) items.push(renderMessage(item));
     reconcileChildren(group, items);
     if (items.length) children.push(group);
-    if (claudeSession && Array.isArray(turn.plan)) claudePlan = turn.plan;
+    if (claudeSession && !Array.isArray(sessionPlan) && Array.isArray(turn.plan)) claudePlan = turn.plan;
   }
   if (claudeSession && claudePlan?.length) {
     const plan = element("section", "claude-session-plan");
@@ -298,6 +299,7 @@ export function restoreTranscript(id) {
     syncRelatedSessionLayout();
   }
   setTurns(view?.turns || new Map(cached.turns.filter(turn => !legacySentDisplayTurn(turn)).map(turn => [turn.id, turn])));
+  if (!turnFieldVersions.has("$session:plan")) setSessionPlan(Array.isArray(cached.sessionPlan) ? cached.sessionPlan : null);
   if (view) {
     for (const [key, value] of view.items) renderedItems.set(key, value);
     for (const [key, value] of view.groups) renderedTurns.set(key, value);

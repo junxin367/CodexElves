@@ -11,7 +11,7 @@ import {
   setHistoryAutoFailed, setHistoryController, setHistoryError, setHistoryLoadFrame,
   setHistoryLoadVisibleItems, setHistoryLoading, setHistoryLoadingOlder, setHistoryLoadingTurnId,
   setHistoryLoadingVersion, setHistoryRequest, setHistoryScrollTop, setLatestHistoryReadFailed,
-  setMessageFrame, setRecentHistoryPage, setThreadRequest, setTranscriptChecking, threadRequest,
+  sessionPlan, setMessageFrame, setRecentHistoryPage, setSessionPlan, setThreadRequest, setTranscriptChecking, threadRequest,
   turnFieldVersions, turnVersions
 } from "./history-state.js";
 import {
@@ -58,6 +58,7 @@ export function resetMessages() {
   for (const entry of renderedItems.values()) entry.node.messageActionBinding?.dispose();
   renderedItems.clear(); renderedTurns.clear(); renderedActivities.clear(); itemVersions.clear(); turnVersions.clear(); turnFieldVersions.clear();
   partialItems.clear();
+  setSessionPlan(null);
   setFollowMessages(true);
   setTranscriptChecking(false);
   setRecentHistoryPage(null);
@@ -81,12 +82,14 @@ export function rememberTranscript({ retainView = false, retainRelatedParent = f
   // 最近页起点和游标来自服务器；合并该页之后收到的新轮次，避免回退窗口遗漏刚完成的回复。
   const recentTurns = recentStart >= 0 ? currentTurns.slice(recentStart) : null;
   const recentIds = new Set(recentTurns?.map(turn => turn.id));
-  const recentWindow = recentTurns ? { ...recentHistoryPage, turns: recentTurns,
+  const plan = Array.isArray(sessionPlan) ? { sessionPlan } : {};
+  const recentWindow = recentTurns ? { ...recentHistoryPage, ...plan, turns: recentTurns,
     transcriptEvents: events.filter(event => recentIds.has(event.turnId)) } : recentHistoryPage;
   const snapshot = {
-    turns: currentTurns, transcriptEvents: events, historyCursor,
+    turns: currentTurns, transcriptEvents: events, historyCursor, ...plan,
     ...(typeof ephemeral === "boolean" ? { ephemeral } : {}),
-    ...readingPosition(), recentWindow, recentPage: recentHistoryPage,
+    ...readingPosition(), recentWindow,
+    recentPage: recentHistoryPage ? { ...recentHistoryPage, ...plan } : null,
     title: thread?.title || summary?.title || "",
     cwd: thread?.cwd || summary?.cwd || "",
     ...(recentHistoryPage?.sideHistoryVersion === 1 ? { sideHistoryVersion: 1 } : {}),

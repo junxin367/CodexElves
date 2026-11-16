@@ -14,6 +14,11 @@ struct CompactionRecord {
     sequence: u64,
 }
 
+struct PlanSnapshot {
+    plan: Value,
+    revision: u64,
+}
+
 pub(super) struct Projection {
     pub epoch: String,
     pub sequence: u64,
@@ -31,6 +36,10 @@ pub(super) struct Projection {
     // 每个主会话仅保留当前轮次的首个原生模型输出时间；服务重启或旧历史缺失时不估算。
     first_token_observations: HashMap<String, (String, Option<u64>)>,
     compaction_records: VecDeque<CompactionRecord>,
+    // 用户要求新开页面立即恢复已收到的任务；每个独立引擎只保留各会话/轮次最新计划，
+    // 不依赖浏览器是否正在查看，也不从 Codex App 或未包含计划的原生历史推测。
+    plans: HashMap<(String, String), PlanSnapshot>,
+    retired_plan_turns: HashSet<(String, String)>,
     completed: VecDeque<String>,
     events: VecDeque<(u64, Value)>,
     notifications: VecDeque<Value>,
@@ -56,6 +65,8 @@ impl Default for Projection {
             compactions: HashMap::new(),
             first_token_observations: HashMap::new(),
             compaction_records: VecDeque::new(),
+            plans: HashMap::new(),
+            retired_plan_turns: HashSet::new(),
             completed: VecDeque::new(),
             events: VecDeque::new(),
             notifications: VecDeque::new(),
@@ -76,6 +87,8 @@ impl Projection {
         self.clear_side_runtime(id);
         self.queue_turn_outcomes.remove(id);
         self.first_token_observations.remove(id);
+        self.plans.retain(|(thread, _), _| thread != id);
+        self.retired_plan_turns.retain(|(thread, _)| thread != id);
         self.notifications.retain(|entry| entry["threadId"] != id);
         self.pending_notifications
             .retain(|_, entry| entry["threadId"] != id);
@@ -107,6 +120,7 @@ impl Projection {
             side.clear_queue();
         }
         self.clear_side_runtime(id);
+        self.plans.retain(|(thread, _), _| thread != id);
         self.side_changed(id);
     }
 
@@ -253,6 +267,24 @@ impl Projection {
             .retain(|record| record.thread_id != id);
     }
 
+    pub fn retire_turn_plan(&mut self, id: &str, turn_id: &str) {
+        // 显式编辑回退只撤销被移除轮次；同代次迟到的计划事件也不能复活它。
+        let key = (id.to_owned(), turn_id.to_owned());
+        self.plans.remove(&key);
+        self.retired_plan_turns.insert(key);
+    }
+
+    fn decorate_turn_plan(&self, id: &str, turn: &mut Value) {
+        let Some(turn_id) = turn["id"].as_str() else { return };
+        let plan = self.plans.get(&(id.to_owned(), turn_id.to_owned()));
+        turn["remotePlanEpoch"] = json!(self.epoch);
+        if let Some(plan) = plan {
+            // 空数组是原生明确清空，必须与尚未收到计划区分。
+            turn["plan"] = plan.plan.clone();
+            turn["remotePlanRevision"] = json!(plan.revision);
+        }
+    }
+
     pub fn compaction(&self, id: &str) -> Value {
         self.compactions.get(id).cloned().unwrap_or_else(|| {
             self.compaction_records
@@ -338,6 +370,16 @@ impl Projection {
             .unwrap_or_default();
         let item_turn = history["turnId"].as_str().map(str::to_owned);
         let mut turns = history["data"].as_array().cloned().unwrap_or_default();
+        // 原生轮次尚未进入历史页时，已收到的真实计划仍可展示；仅补当前执行轮次，
+        // 不根据旧清单制造已完成轮次，也不改变原生分页游标。
+        if latest && item_turn.is_none()
+            && let Some(turn_id) = self.active.get(id)
+            && self.plans.contains_key(&(id.to_owned(), turn_id.clone()))
+            && !turns.iter().any(|turn| turn["id"] == turn_id.as_str())
+        {
+            turns.insert(0, json!({"id":turn_id,"status":"inProgress","items":[],
+                "itemsView":"summary","itemsComplete":false,"itemsPageComplete":false}));
+        }
         let oldest = turns.iter().filter_map(turn_started_ms).min().unwrap_or(0);
         for record in self
             .compaction_records
@@ -388,7 +430,18 @@ impl Projection {
             }
         }
         if item_turn.is_none() {
+            for turn in &mut turns {
+                self.decorate_turn_plan(id, turn);
+            }
             history["data"] = json!(turns);
+        } else if let Some(turn_id) = item_turn {
+            let mut turn = json!({"id":turn_id});
+            self.decorate_turn_plan(id, &mut turn);
+            for field in ["plan", "remotePlanEpoch", "remotePlanRevision"] {
+                if let Some(value) = turn.get(field) {
+                    history[field] = value.clone();
+                }
+            }
         }
         history["transcriptEvents"] = json!(events);
         history
@@ -414,6 +467,9 @@ impl Projection {
             self.queue_turn_outcomes.clear();
             self.compactions.clear();
             self.compaction_records.clear();
+            // 新引擎没有旧计划的恢复证据；旧代次缓存不能冒充当前原生状态。
+            self.plans.clear();
+            self.retired_plan_turns.clear();
             self.completed.clear();
             self.hidden_threads.clear();
             self.subagents = super::subagents::SubagentState::default();
@@ -433,6 +489,31 @@ impl Projection {
             .to_owned();
         if self.is_deleted(&id) && method != "thread/deleted" {
             return;
+        }
+        if method == "turn/plan/updated" {
+            let Some(turn_id) = frame["params"]["turnId"]
+                .as_str()
+                .filter(|turn| !turn.is_empty())
+            else {
+                return;
+            };
+            let key = (id.clone(), turn_id.to_owned());
+            if id.is_empty()
+                || !frame["params"]["plan"].is_array()
+                || self.retired_plan_turns.contains(&key)
+            {
+                return;
+            }
+            let revision = self.sequence + 1;
+            self.plans.insert(
+                key,
+                PlanSnapshot {
+                    plan: frame["params"]["plan"].clone(),
+                    revision,
+                },
+            );
+            frame["params"]["remotePlanEpoch"] = json!(self.epoch);
+            frame["params"]["remotePlanRevision"] = json!(revision);
         }
         let side = self.sides.threads.contains_key(&id);
         if let Some((_, closed)) = self.sides.observe(&frame) {
@@ -826,6 +907,70 @@ mod tests {
     use super::*;
 
     #[test]
+    fn harness_plan_snapshot_restores_without_event_replay_and_keeps_explicit_empty() {
+        let mut projection = Projection::default();
+        let plan = json!([{"step":"核对实现","status":"inProgress"}]);
+        projection.ingest(json!({"method":"turn/started","params":{
+            "threadId":"main","turn":{"id":"turn","status":"inProgress","items":[]}}}));
+        projection.ingest(json!({"method":"turn/plan/updated","params":{
+            "threadId":"main","turnId":"turn","plan":plan}}));
+        let revision = projection.sequence;
+        // 新客户端不能依赖有限事件队列重播；计划需要独立保留。
+        for _ in 0..=MAX_EVENTS {
+            projection.push(json!({"method":"remote/sidebarChanged","params":{}}));
+        }
+        let page = json!({"scope":"turns","data":[{"id":"turn","items":[]}],"nextCursor":"older"});
+        let restored = projection.history("main", page.clone(), true);
+        assert_eq!(restored["data"][0]["plan"], plan);
+        assert_eq!(restored["data"][0]["remotePlanRevision"], revision);
+        assert_eq!(restored["data"][0]["remotePlanEpoch"], projection.epoch);
+        assert_eq!(restored["nextCursor"], "older");
+        let early = projection.history("main", json!({"data":[],"nextCursor":null}), true);
+        assert_eq!(early["data"][0]["plan"], plan);
+        assert_eq!(early["data"][0]["id"], "turn");
+        assert_eq!(early["data"][0]["itemsComplete"], false);
+        assert!(projection.history("other", page.clone(), true)["data"][0].get("plan").is_none());
+        let items = projection.history("main",
+            json!({"scope":"items","turnId":"turn","data":[],"itemsNextCursor":"items"}), false);
+        assert_eq!(items["plan"], plan);
+        assert_eq!(items["itemsNextCursor"], "items");
+
+        projection.ingest(json!({"method":"turn/plan/updated","params":{
+            "threadId":"main","turnId":"turn","plan":[]}}));
+        projection.ingest(json!({"method":"turn/plan/updated","params":{
+            "threadId":"main","turnId":"turn"}}));
+        assert_eq!(projection.history("main", page, true)["data"][0]["plan"], json!([]));
+    }
+
+    #[test]
+    fn harness_plan_snapshot_retires_reverted_turn_and_isolates_engine_generations() {
+        let mut projection = Projection::default();
+        for turn in ["kept", "edited"] {
+            projection.ingest(json!({"method":"turn/plan/updated","params":{
+                "threadId":"main","turnId":turn,"plan":[{"step":turn,"status":"pending"}]}}));
+        }
+        projection.retire_turn_plan("main", "edited");
+        projection.ingest(json!({"method":"turn/plan/updated","params":{
+            "threadId":"main","turnId":"edited","plan":[{"step":"迟到旧任务","status":"pending"}]}}));
+        let page = json!({"data":[{"id":"kept","items":[]},{"id":"edited","items":[]}]});
+        let history = projection.history("main", page.clone(), true);
+        assert_eq!(history["data"][0]["plan"][0]["step"], "kept");
+        assert!(history["data"][1].get("plan").is_none());
+
+        let previous_epoch = projection.epoch.clone();
+        projection.ingest(json!({"method":"harness/connected","_generation":"new","_generationIndex":1}));
+        projection.ingest(json!({"method":"turn/plan/updated","_generation":"old","params":{
+            "threadId":"main","turnId":"kept","plan":[{"step":"旧引擎","status":"pending"}]}}));
+        let history = projection.history("main", page, true);
+        assert_ne!(history["data"][0]["remotePlanEpoch"], previous_epoch);
+        assert!(history["data"][0].get("plan").is_none());
+        projection.ingest(json!({"method":"turn/plan/updated","_generation":"new","params":{
+            "threadId":"main","turnId":"new-turn","plan":[]}}));
+        projection.forget_deleted_thread("main");
+        assert!(projection.plans.is_empty());
+    }
+
+    #[test]
     fn harness_first_token_uses_first_model_delta_and_resets_for_new_turn() {
         let mut projection = Projection::default();
         projection.ingest(json!({"method":"turn/started","params":{
@@ -926,8 +1071,10 @@ mod tests {
         let page = json!({"scope":"turns","data":[{"id":"older","startedAt":1,"items":[]}],
             "itemsPaginationByTurnId":{},"transcriptEvents":[],"nextCursor":"older-cursor"});
         let older = projection.history("main", page.clone(), false);
-        assert_eq!(older, page);
-        assert_eq!(projection.history("other", page.clone(), true), page);
+        let mut expected = page.clone();
+        expected["data"][0]["remotePlanEpoch"] = json!(projection.epoch);
+        assert_eq!(older, expected);
+        assert_eq!(projection.history("other", page.clone(), true), expected);
         let persisted = json!({"scope":"turns","data":[{"id":"compact-turn","startedAt":2,"items":[]}],
             "itemsPaginationByTurnId":{},"transcriptEvents":[]});
         assert_eq!(

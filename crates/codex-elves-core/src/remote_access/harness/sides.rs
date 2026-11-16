@@ -147,6 +147,20 @@ mod tests {
     }
 
     #[test]
+    fn harness_service_side_plan_retains_own_snapshot_after_expiry() {
+        let mut side = side();
+        side.observe(&json!({"method":"turn/started","params":{"turn":{
+            "id":"side-turn","status":"inProgress","items":[]}}}));
+        side.observe(&json!({"method":"turn/plan/updated","params":{
+            "turnId":"side-turn","plan":[{"step":"侧边任务","status":"inProgress"}],
+            "remotePlanEpoch":"engine","remotePlanRevision":2}}));
+        side.expire();
+        let history = side.history(&json!({"threadId":"side"})).unwrap();
+        assert_eq!(history["data"][0]["plan"][0]["step"], "侧边任务");
+        assert_eq!(history["data"][0]["remotePlanRevision"], 2);
+    }
+
+    #[test]
     fn harness_service_side_metrics_are_independent_and_retained_after_expiry() {
         let mut side = side();
         side.observe(&json!({"method":"turn/started","params":{"turn":{
@@ -440,6 +454,16 @@ impl SideThread {
                 }
             }
             "thread/status/changed" => self.metadata["status"] = params["status"].clone(),
+            "turn/plan/updated" => {
+                if let Some(turn) = self.turns.iter_mut().find(|turn| turn["id"] == params["turnId"]) {
+                    // 侧边只保留自身收到的计划；过期后随只读正文保留，主动关闭时一起释放。
+                    for field in ["plan", "remotePlanEpoch", "remotePlanRevision"] {
+                        if let Some(value) = params.get(field) {
+                            turn[field] = value.clone();
+                        }
+                    }
+                }
+            }
             "turn/started" | "turn/completed" => {
                 let raw = &params["turn"];
                 let Some(id) = raw["id"].as_str() else { return };

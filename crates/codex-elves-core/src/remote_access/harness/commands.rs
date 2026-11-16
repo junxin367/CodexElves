@@ -836,8 +836,12 @@ impl Harness {
                 Some(authorization),
             )
             .await?;
-        // 回退后以新的原生历史为准，不能把已删除轮次中的压缩记录重新补回。
-        self.projection.lock().await.forget_compactions(id);
+        // 回退后以新的原生历史为准，不能把已删除轮次中的压缩或任务计划重新补回。
+        {
+            let mut projection = self.projection.lock().await;
+            projection.forget_compactions(id);
+            projection.retire_turn_plan(id, payload["turnId"].as_str().unwrap_or(""));
+        }
         let mut followup = payload.clone();
         followup["clientUserMessageId"] = json!(uuid::Uuid::new_v4().to_string());
         // 修改文字仍保留原消息的图片等输入，不能在回退后悄悄丢失附件。
