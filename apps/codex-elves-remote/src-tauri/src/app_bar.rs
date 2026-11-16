@@ -6,6 +6,7 @@ use std::sync::OnceLock;
 use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows_sys::Win32::Graphics::Gdi::*;
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows_sys::Win32::System::Threading::GetCurrentThreadId;
 use windows_sys::Win32::UI::Controls::{
     DRAWITEMSTRUCT, ODS_FOCUS, ODS_NOFOCUSRECT, ODS_SELECTED, ODT_BUTTON, WM_MOUSELEAVE,
 };
@@ -80,6 +81,19 @@ unsafe fn redraw(hwnd: HWND) {
     }
 }
 
+// 用户反馈打开独立窗口后整个客户端无响应：顶栏及按钮必须由父窗口所属的界面线程创建和调整。
+// 在 tokio 等其他线程创建会让子窗口归属不处理消息的线程，主线程调整尺寸时跨线程 SendMessage 永久阻塞。
+// 调用线程不对时直接报错，不能退回跨线程创建；与 desktop::remote_open_session_window 的主线程调度同步核对。
+fn ensure_ui_thread(parent: HWND) -> tauri::Result<()> {
+    let owner = unsafe { GetWindowThreadProcessId(parent, null_mut()) };
+    if owner == 0 || owner != unsafe { GetCurrentThreadId() } {
+        return Err(tauri::Error::Anyhow(anyhow::anyhow!(
+            "原生应用顶栏只能在窗口所属的界面线程中创建或调整"
+        )));
+    }
+    Ok(())
+}
+
 pub fn install(window: &tauri::Window, title: &str, close_to_tray: bool) -> tauri::Result<()> {
     static REGISTERED: OnceLock<bool> = OnceLock::new();
     let registered = REGISTERED.get_or_init(|| unsafe {
@@ -97,6 +111,7 @@ pub fn install(window: &tauri::Window, title: &str, close_to_tray: bool) -> taur
         return Err(native_error("无法注册原生应用顶栏"));
     }
     let parent = window.hwnd()?.0 as HWND;
+    ensure_ui_thread(parent)?;
     let scale = window.scale_factor()?;
     let dark = window
         .theme()
@@ -172,6 +187,7 @@ pub fn install(window: &tauri::Window, title: &str, close_to_tray: bool) -> taur
 
 pub fn resize(window: &tauri::Window, width: u32, height: u32, scale: f64) -> tauri::Result<()> {
     let parent = window.hwnd()?.0 as HWND;
+    ensure_ui_thread(parent)?;
     unsafe {
         let hwnd = GetDlgItem(parent, BAR_ID);
         let data = state(hwnd);

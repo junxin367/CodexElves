@@ -28,7 +28,7 @@ struct SharedWebviewEnvironment(
 );
 
 // Wry 对 Windows 新窗口 opener 的同一 Environment 也采用此跨线程边界；
-// 实际创建 Controller 仍回到 Tauri 主线程，不能在工作线程直接调用 COM。
+// 仅为放入共享状态而标记，读取、克隆和创建 Controller 都在 Tauri 主线程，不能在工作线程直接调用 COM。
 unsafe impl Send for SharedWebviewEnvironment {}
 unsafe impl Sync for SharedWebviewEnvironment {}
 
@@ -37,7 +37,8 @@ struct ClientState {
     settings: Mutex<Settings>,
     home: Mutex<Option<Url>>,
     // Windows WebView2 要求共用同一用户数据目录的 WebView 复用同一 Environment；
-    // 独立会话窗口必须沿用主窗口环境，否则第二个环境会与正在运行的 profile 竞争并卡住。
+    // 独立会话窗口沿用主窗口环境及登录 profile。独立窗口无响应的实测根因是原生顶栏跨线程创建，
+    // 见 remote_open_session_window 的主线程说明，不能只靠共享环境规避。
     webview_environment: Mutex<Option<SharedWebviewEnvironment>>,
     auto_connect: AtomicBool,
     exiting: AtomicBool,
@@ -232,12 +233,6 @@ async fn remote_open_session_window(
         _ => return Err("请选择一个会话或文件预览目标。".into()),
     }
     .map_err(|error| error.to_string())?;
-    let environment = state
-        .webview_environment
-        .lock()
-        .unwrap()
-        .clone()
-        .ok_or_else(|| "远程客户端网页环境尚未就绪，请稍后重试。".to_owned())?;
     let cache = window_cache(&state, webview.window().label())?.fork_view(&source);
     let label = format!(
         "session-{}",
@@ -251,9 +246,48 @@ async fn remote_open_session_window(
             cache: cache.clone(),
         },
     );
-    let app = webview.app_handle();
+    let app = webview.app_handle().clone();
+    let (sender, receiver) = tokio::sync::oneshot::channel();
+    let window_app = app.clone();
+    let window_label = label.clone();
+    // 用户反馈点击“打开独立窗口”后整个客户端无响应：异步命令运行在 tokio 工作线程，
+    // 在此直接创建会把原生应用顶栏及按钮（Win32 子窗口）归属到不处理消息的工作线程，
+    // 主线程随后调整窗口尺寸时跨线程 SendMessage 永久阻塞（WER 记为 Cross-thread 挂起）。
+    // 因此整段窗口创建必须与 setup 中的主窗口一样在 Tauri 主线程执行，命令这里只异步等待回执，
+    // 不能阻塞等待，也不能改回在命令线程内直接调用 create_client_window / restore_window。
+    let dispatched = app.run_on_main_thread(move || {
+        let _ = sender.send(open_session_window(&window_app, &window_label, url, cache));
+    });
+    let result = match dispatched {
+        Ok(()) => receiver
+            .await
+            .unwrap_or_else(|_| Err("窗口创建已被客户端中断。".into())),
+        Err(error) => Err(error.to_string()),
+    };
+    if let Err(error) = result {
+        state.session_windows.lock().unwrap().remove(&label);
+        state.titlebar_theme.lock().unwrap().remove(&label);
+        return Err(format!("无法打开独立会话窗口：{error}"));
+    }
+    Ok(())
+}
+
+fn open_session_window(
+    app: &tauri::AppHandle,
+    label: &str,
+    url: Url,
+    cache: Arc<ResourceCache>,
+) -> Result<(), String> {
+    let state = app.state::<ClientState>();
+    // WebView2 Environment 只在主线程克隆和使用，与主窗口共用同一登录 profile。
+    let environment = state
+        .webview_environment
+        .lock()
+        .unwrap()
+        .clone()
+        .ok_or_else(|| "远程客户端网页环境尚未就绪，请稍后重试。".to_owned())?;
     let result = (|| -> tauri::Result<()> {
-        let window = create_client_window(app, &label, url, cache, Some(environment.0), false)?;
+        let window = create_client_window(app, label, url, cache, Some(environment.0), false)?;
         let mut settings = state.settings.lock().unwrap().clone();
         settings.window.x = None;
         settings.window.y = None;
@@ -263,12 +297,11 @@ async fn remote_open_session_window(
         Ok(())
     })();
     if let Err(error) = result {
-        if let Some(window) = app.get_window(&label) {
-            let _ = window.close();
+        // 创建失败时直接销毁半成品窗口，不经过关闭事件；服务来源登记由调用方统一清除。
+        if let Some(window) = app.get_window(label) {
+            let _ = window.destroy();
         }
-        state.session_windows.lock().unwrap().remove(&label);
-        state.titlebar_theme.lock().unwrap().remove(&label);
-        return Err(format!("无法打开独立会话窗口：{error}"));
+        return Err(error.to_string());
     }
     Ok(())
 }

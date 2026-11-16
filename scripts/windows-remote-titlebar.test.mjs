@@ -16,6 +16,19 @@ test("独立窗口复用主 WebView2 环境且不重复清理共享 profile", as
   assert.match(nativeCache, /ClearBrowsingData\(/);
 });
 
+test("独立窗口及原生顶栏只在主界面线程创建，异步命令不直接创建 Win32 子窗口", async () => {
+  const desktop = await readFile(new URL("src-tauri/src/desktop.rs", base), "utf8");
+  const appBar = await readFile(new URL("src-tauri/src/app_bar.rs", base), "utf8");
+  const command = desktop.slice(desktop.indexOf("async fn remote_open_session_window"),
+    desktop.indexOf("fn open_session_window("));
+  // 工作线程创建顶栏会让主线程调整尺寸时跨线程 SendMessage 永久阻塞（2026-11 实测 Cross-thread 挂起）。
+  assert.match(command, /app\.run_on_main_thread\(move \|\| \{\s*let _ = sender\.send\(open_session_window\(/);
+  assert.match(command, /receiver\s*\.await/);
+  assert.doesNotMatch(command, /create_client_window\(|restore_window\(/);
+  assert.match(appBar, /pub fn install[\s\S]*?ensure_ui_thread\(parent\)\?;[\s\S]*?CreateWindowExW/);
+  assert.match(appBar, /pub fn resize[\s\S]*?ensure_ui_thread\(parent\)\?;[\s\S]*?MoveWindow/);
+});
+
 test("外观连续变化合并为最新颜色并串行同步，模式来自实际页面", async () => {
   const frames = [], requests = [], completions = [], variables = new Map([
     ["--bg", "#181818"], ["--text", "#ededed"], ["--line", "#343434"],
