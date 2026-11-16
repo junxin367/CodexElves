@@ -38,13 +38,23 @@ export function clientOpenInContext() {
 }
 
 function applicationIcon(target) {
-  const node = element("span", `workspace-open-in-app-icon workspace-open-in-${target || "fallback"}`);
+  const id = typeof target === "string" ? target : target?.target;
+  const node = element("span", `workspace-open-in-app-icon workspace-open-in-${id || "fallback"}`);
   node.setAttribute("aria-hidden", "true");
-  if (applicationPaths[target])
-    node.innerHTML = `<svg viewBox="0 0 24 24" fill="currentColor">${applicationPaths[target]}</svg>`;
-  else if (target === "sublimeText") node.textContent = "S";
-  else if (["rider", "intellij"].includes(target)) node.append(element("span", "", target === "intellij" ? "IJ" : "RD"));
-  else node.append(icon(["gitBash", "cmder", "powershell", "wsl"].includes(target) ? "terminal" : "window"));
+  const fallback = () => {
+    if (applicationPaths[id])
+      node.innerHTML = `<svg viewBox="0 0 24 24" fill="currentColor">${applicationPaths[id]}</svg>`;
+    else if (id === "sublimeText") node.textContent = "S";
+    else if (["rider", "intellij"].includes(id)) node.append(element("span", "", id === "intellij" ? "IJ" : "RD"));
+    else node.append(icon(["gitBash", "cmder", "powershell", "wsl"].includes(id) ? "terminal" : "window"));
+  };
+  // 用户要求 Git 与 WSL 使用已安装程序图标；仅接受服务端校验过的 PNG 数据，失败时保留原回退。
+  if (typeof target?.icon === "string" && target.icon) {
+    const image = element("img");
+    image.alt = ""; image.src = target.icon;
+    image.addEventListener("error", () => { node.replaceChildren(); fallback(); }, { once: true });
+    node.append(image);
+  } else fallback();
   return node;
 }
 
@@ -57,7 +67,11 @@ function normalizeTargets(result, context) {
       && (target.target !== "wsl" || context?.wslInstance === true)
       && target.available === true && typeof target.label === "string" && target.label.length <= 80
       && target.label.trim() && !seen.has(target.target) && seen.add(target.target))
-    .map(({ target, label }) => ({ target, label }));
+    .map(({ target, label, icon }) => {
+      const installedIcon = typeof icon === "string" && icon.length <= 200000
+        && /^data:image\/png;base64,[A-Za-z0-9+/]+={0,2}$/.test(icon) ? icon : null;
+      return { target, label, ...(installedIcon ? { icon: installedIcon } : {}) };
+    });
   return { root: result.root, targets };
 }
 
@@ -89,7 +103,7 @@ export function mountWorkspaceOpenIn({ anchor, beforeOpen = () => {} }) {
   const owns = context => !!context && current()?.key === context.key;
   const ownsPopup = () => activePopup?.trigger === arrow;
   function setPrimary(target) {
-    primary.replaceChildren(applicationIcon(target?.target));
+    primary.replaceChildren(applicationIcon(target));
     const title = target ? `用 ${target.label} 打开工作区` : "用首选应用打开工作区";
     primary.title = title; primary.setAttribute("aria-label", title);
   }
@@ -141,8 +155,11 @@ export function mountWorkspaceOpenIn({ anchor, beforeOpen = () => {} }) {
   }
   function decorateMenu() {
     if (!ownsPopup()) return;
-    for (const option of activePopup.list.querySelectorAll("button[data-value]"))
-      if (applicationIds.has(option.dataset.value)) option.prepend(applicationIcon(option.dataset.value));
+    for (const option of activePopup.list.querySelectorAll("button[data-value]")) {
+      if (!applicationIds.has(option.dataset.value)) continue;
+      const target = loaded?.targets.find(value => value.target === option.dataset.value);
+      option.prepend(applicationIcon(target || option.dataset.value));
+    }
     fitMenu();
   }
   function menuOptions(context, result) {

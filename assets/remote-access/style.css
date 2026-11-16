@@ -1160,7 +1160,8 @@ input:focus,textarea:focus,.prompt-editor:focus,button:focus-visible{outline:1px
 .workspace-open-in-arrow[aria-expanded=true]>.ui-icon{transform:rotate(180deg)}
 .workspace-open-in-primary>.workspace-open-in-app-icon{width:14px;height:14px}
 .workspace-open-in-app-icon{display:inline-flex;align-items:center;justify-content:center;flex:0 0 auto;width:18px;height:18px}
-.workspace-open-in-app-icon>svg{display:block;width:100%;height:100%}
+.workspace-open-in-app-icon>svg,.workspace-open-in-app-icon>img{display:block;width:100%;height:100%}
+.workspace-open-in-app-icon>img{object-fit:contain}
 .workspace-open-in-app-icon>.ui-icon{width:100%;height:100%}
 .workspace-open-in-vscode{color:#23a8f2}
 .workspace-open-in-visualStudio{color:#b587e6}
@@ -1173,7 +1174,7 @@ input:focus,textarea:focus,.prompt-editor:focus,button:focus-visible{outline:1px
 /* 用户确认展开菜单不显示 Open in 描述；178px 菜单、31px 行高、5px 内边距与效果图一致，只放应用项。 */
 .workspace-open-in-menu.ui-popup{width:178px;padding:5px;border-color:var(--menu-divider,var(--line));border-radius:10px;background:var(--control-bg,var(--side));color:var(--text);box-shadow:0 14px 40px #0000004d;animation:none}
 .workspace-open-in-menu .popup-option{height:31px;min-height:31px;gap:8px;padding:0 8px;border-radius:6px;font:12px/18px system-ui,sans-serif}
-.workspace-open-in-menu .workspace-open-in-app-icon>svg{width:16px;height:16px}
+.workspace-open-in-menu .workspace-open-in-app-icon>svg,.workspace-open-in-menu .workspace-open-in-app-icon>img{width:16px;height:16px}
 .workspace-open-in-menu .popup-option-label{overflow:hidden;white-space:nowrap}
 .workspace-open-in-menu .popup-option-label>span{overflow:hidden;text-overflow:ellipsis}
 .workspace.related-session-view .workspace-open-in{display:none!important}

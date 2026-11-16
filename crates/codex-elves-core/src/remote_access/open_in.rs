@@ -94,6 +94,19 @@ fn applications(root: &Path, wsl_session: Option<&WslSession>) -> Vec<Applicatio
         .collect()
 }
 
+#[cfg(windows)]
+fn application_icon(application: &Application) -> Option<String> {
+    // 用户要求 Git 与 WSL 显示已安装程序自身图标；仅传 PNG 数据，不公开安装路径。
+    matches!(application.target, "gitBash" | "wsl")
+        .then(|| windows::icon_data(&application.executable))
+        .flatten()
+}
+
+#[cfg(not(windows))]
+fn application_icon(_: &Application) -> Option<String> {
+    None
+}
+
 async fn wsl_session(
     state: &WebState,
     identity: &Value,
@@ -144,9 +157,16 @@ pub(super) async fn targets(
     let result = tokio::task::spawn_blocking(move || {
         let targets: Vec<_> = applications(&root, wsl_session.as_ref())
             .into_iter()
-            .map(|app| json!({"target": app.target, "label": app.label, "available": true}))
+            .map(|app| {
+                let mut value =
+                    json!({"target": app.target, "label": app.label, "available": true});
+                if let Some(icon) = application_icon(&app) {
+                    value["icon"] = json!(icon);
+                }
+                value
+            })
             .collect();
-        // 只公开应用 ID、名称和原生确认的目录，不向网页暴露安装路径。
+        // 只公开应用 ID、名称、程序图标 PNG 和原生确认的目录，不向网页暴露安装路径。
         json!({"ok": true, "root": display_path(&root), "targets": targets})
     })
     .await

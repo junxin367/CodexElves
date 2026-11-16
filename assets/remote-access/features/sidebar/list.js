@@ -4,7 +4,7 @@ import { $, button, element } from "../../ui/dom.js";
 import { copyText } from "../../ui/clipboard.js";
 import { icon } from "../../ui/icons.js";
 import { notice } from "../../ui/notice.js";
-import { activePopup, closePopup, fitPopup, openPopup } from "../../ui/popup.js";
+import { activePopup, closePopup, fitPopup, renderPopup } from "../../ui/popup.js";
 import { setSelectOptions } from "../../ui/select.js";
 import { selectThread } from "../../core/actions.js";
 import { connected, pageLeaving, selectedId, session, setSidebar, sidebar, thread } from "../../core/state.js";
@@ -35,7 +35,7 @@ import {
   setClientUnreadBadgeRequest, setClientUnreadBadgeTimer, setRecentLimit, setRecentPriorityIds,
   setRecentPriorityKnownIds, setRecentPriorityOpenedAt, setSidebarFilterDeviceId, setSidebarRequest,
   setSidebarVersion, sidebarAttentionState, sidebarFilterDeviceId, sidebarReadRefreshSuppressions,
-  sidebarRecentDateGroups, sidebarRequest, sidebarTimestamp, sidebarUpdatedAt, sidebarVersion
+  sidebarRecentDateGroups, sidebarRequest, sidebarThreadActive, sidebarTimestamp, sidebarUpdatedAt, sidebarVersion
 } from "./list-state.js";
 import { checkThreadDeletion, deleteSidebarThread, threadDeletionConflict } from "./thread-deletion.js";
 
@@ -202,6 +202,30 @@ export async function loadSidebar(cursor = null, { fresh = false, resourcePriori
     if (sidebarRequest?.promise === promise) setSidebarRequest(null);
   }
 }
+function captureSidebarPopup(root) {
+  const popup = activePopup && root.contains(activePopup.trigger) ? activePopup : null;
+  if (!popup) return null;
+  const box = popup.trigger.getBoundingClientRect();
+  return { popup, id: popup.trigger.id, position: popup.position
+    ? { x: popup.position.x - box.left, y: popup.position.y - box.top } : null };
+}
+function restoreSidebarPopup(state) {
+  if (!state || activePopup !== state.popup) return;
+  const { popup } = state, trigger = document.getElementById(state.id);
+  if (!trigger || trigger.disabled) { closePopup(); return; }
+  // 用户要求右键菜单不能因侧栏刷新再次弹出，也不能沿用刷新前的屏幕坐标；
+  // 保留同一弹层节点，仅换绑同会话的新行，并按行内偏移计算当前锚点。
+  popup.trigger.setAttribute("aria-expanded", "false");
+  popup.trigger.removeAttribute("aria-controls");
+  popup.trigger = trigger;
+  if (state.position) {
+    const box = trigger.getBoundingClientRect();
+    popup.position = { x: box.left + state.position.x, y: box.top + state.position.y };
+  }
+  trigger.setAttribute("aria-expanded", "true");
+  trigger.setAttribute("aria-controls", popup.node.id);
+  renderPopup();
+}
 export function renderSidebar() {
   renderSessionFilter();
   syncSideThreadUnread();
@@ -212,12 +236,10 @@ export function renderSidebar() {
   filterSideThreadSidebar(sidebar);
   syncClientUnreadBadge();
   const scrollTop = root.scrollTop;
-  const popupState = activePopup && root.contains(activePopup.trigger)
-    ? { id: activePopup.trigger.id, index: activePopup.index, focused: activePopup.node.contains(document.activeElement), position: activePopup.position } : null;
+  const popupState = captureSidebarPopup(root);
   const focusId = root.contains(document.activeElement) ? document.activeElement.id : null;
   const focusedThread = document.activeElement.closest(".thread-row")?.dataset.threadId;
   const focusedMenu = document.activeElement.classList.contains("row-menu-button");
-  if (popupState) closePopup();
   root.replaceChildren();
   // 用户要求按会话实例筛选所有分组，并与实例开关取交集；保留原快照和未读状态。
   const typeMatches = item => sessionTypeVisible(item);
@@ -250,11 +272,7 @@ export function renderSidebar() {
   const allowedProjectThreadLimits = new Set([5, 10, 20, 50]);
   const projectThreadLimit = allowedProjectThreadLimits.has(appearance.projectThreadLimit)
     ? appearance.projectThreadLimit : 5;
-  const isActive = item => {
-    const status = item.status?.status || item.status;
-    const type = typeof status === "string" ? status : status?.type;
-    return type === "active" || type === "inProgress";
-  };
+
   const openThread = async item => {
     await selectThread(item.id);
     if (!item.hasUnreadTurn || threadReadOnly(item.id) || !connected || selectedId !== item.id || thread?.id !== item.id) return;
@@ -281,8 +299,7 @@ export function renderSidebar() {
     } else title.replaceChildren(element("span", "thread-label", item.title));
     if (selectedId === item.id) title.setAttribute("aria-current", "page");
     const attention = sidebarAttentionState(item);
-    const active = attention !== "waiting" && (item.sideThreadAttention?.active === true
-      || (typeof item.priority?.active === "boolean" ? item.priority.active : isActive(item)));
+    const active = attention !== "waiting" && sidebarThreadActive(item);
     // 用户要求 Codex 与 Claude 列表均显示对应品牌，置顶不再用通用聊天图标；
     // 最近列表仅在标题行放图标，与项目/置顶列表共用 1em 尺寸、3px 间距和文字居中对齐规则。
     const backend = item.backend === "claude" || claudeThreadId(item.id) ? "claude" : "codex";
@@ -453,16 +470,8 @@ export function renderSidebar() {
   setSelectOptions($("#project-select"), newChatProjectOptions(sidebar.projects));
   changeCreationProject();
   root.scrollTop = scrollTop;
-  if (popupState) {
-    const trigger = document.getElementById(popupState.id);
-    if (trigger && !trigger.disabled) {
-      openPopup(trigger, { focus: false, position: popupState.position });
-      if (activePopup) {
-        activePopup.index = popupState.index;
-        if (popupState.focused) activePopup.list.querySelectorAll("button")[popupState.index]?.focus({ preventScroll: true });
-      }
-    }
-  } else if (focusId) {
+  if (popupState) restoreSidebarPopup(popupState);
+  else if (focusId) {
     const restored = document.getElementById(focusId) || [...root.querySelectorAll(".thread-row")]
       .find(item => item.dataset.threadId === focusedThread)?.querySelector(focusedMenu ? ".row-menu-button" : ".thread-link");
     restored?.focus({ preventScroll: true });

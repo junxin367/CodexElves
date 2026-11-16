@@ -165,7 +165,9 @@ function clientUnreadBadgeHarness() {
       return request.promise;
     },
   });
-  nodeVm.runInContext((sourceSection("let clientUn", "function set") + "\n" + sourceSection("function clientUnreadBad", "async function l") + "\n" + sourceSection("function clientUnreadThr", "function sid")), context);
+  nodeVm.runInContext((sourceSection("let clientUn", "function set") + "\n" + sourceSection("function clientUnreadBad", "async function l")
+    + "\n" + sourceSection("function sidebarThreadActive(", "function sidebarTimestamp(")
+    + "\n" + sourceSection("function sidebarAttentionState(")), context);
   return { context, counts, requests, intervals };
 }
 
@@ -186,6 +188,24 @@ test("独立客户端角标按未读主会话去重，最近/项目/置顶重复
   value.recent[1].hasUnreadTurn = false;
   assert.equal(context.clientUnreadThreadCount(value), 2);
   assert.equal(context.clientUnreadThreadCount(null), 0);
+});
+
+test("任务栏角标按会话栏未读状态计数并排除执行中会话", () => {
+  const { context } = clientUnreadBadgeHarness();
+  const value = { pinnedThreads: [], projects: [], recent: [
+    { id: "idle-unread", hasUnreadTurn: true },
+    { id: "priority-running", hasUnreadTurn: true, priority: { attentionState: "unread", active: true } },
+    { id: "status-running", hasUnreadTurn: true, status: { type: "inProgress" } },
+    { id: "waiting-reply", hasUnreadTurn: true, status: { type: "waiting" } },
+    { id: "side-running", hasUnreadTurn: true, sideThreadAttention: { active: true } },
+    { id: "explicit-idle", hasUnreadTurn: true, status: { type: "active" },
+      priority: { attentionState: "unread", active: false } },
+  ] };
+  assert.equal(context.clientUnreadThreadCount(value), 2, "执行中会话不计入，明确的 idle 优先于旧 status");
+  value.recent[0].priority = { attentionState: "unread", active: true };
+  assert.equal(context.clientUnreadThreadCount(value), 1, "未读会话开始执行后立即减少角标");
+  value.recent[0].priority.active = false;
+  assert.equal(context.clientUnreadThreadCount(value), 2, "执行结束后仍按原未读标记恢复计数");
 });
 
 test("后台角标读取共享请求并合并后续刷新，不更新聊天正文或侧栏对象", async () => {
@@ -2542,6 +2562,40 @@ test("实例筛选可持久保存，旧类型选择迁到启用的默认实例�
   assert.equal(context.sessionTypeVisible({ instanceId: "codex:local" }, preferences), false);
 });
 
+test("侧栏刷新保留同一个右键菜单并按新行位置修正锚点", () => {
+  const trigger = (left, top) => ({
+    disabled: false, attributes: new Map(),
+    setAttribute(name, value) { this.attributes.set(name, String(value)); },
+    removeAttribute(name) { this.attributes.delete(name); },
+    getBoundingClientRect: () => ({ left, top }),
+  });
+  const oldTrigger = trigger(200, 400), newTrigger = trigger(220, 460);
+  const popup = { trigger: oldTrigger, node: { id: "active-popup" }, position: { x: 260, y: 425 } };
+  let renders = 0, closes = 0, opens = 0;
+  const context = nodeVm.createContext({
+    activePopup: popup, document: { getElementById: () => newTrigger },
+    renderPopup() { ++renders; }, closePopup() { ++closes; }, openPopup() { ++opens; },
+  });
+  nodeVm.runInContext(sourceSection("function captureSidebarPopup(", "function restoreSidebarPopup(")
+    + sourceSection("function restoreSidebarPopup(", "function renderSidebar("), context);
+  const state = context.captureSidebarPopup({ contains: node => node === oldTrigger });
+  assert.equal(state.popup, popup);
+  assert.deepEqual([state.position.x, state.position.y], [60, 25], "刷新前保存行内偏移而非旧屏幕坐标");
+  context.restoreSidebarPopup(state);
+  assert.equal(context.activePopup, popup, "侧栏刷新不能销毁并重新创建弹层");
+  assert.equal(popup.trigger, newTrigger);
+  assert.deepEqual([popup.position.x, popup.position.y], [280, 485], "按新行位置恢复同一右键锚点");
+  assert.equal(renders, 1, "只更新当前弹层内容");
+  assert.equal(opens, 0, "不能再次执行打开动画和 showPopover");
+  assert.equal(closes, 0);
+  assert.equal(newTrigger.attributes.get("aria-expanded"), "true");
+  assert.equal(newTrigger.attributes.get("aria-controls"), "active-popup");
+  context.document.getElementById = () => null;
+  context.restoreSidebarPopup(state);
+  assert.equal(closes, 1, "原会话行消失时关闭旧菜单，不能重绑到其他会话");
+  assert.equal(opens, 0);
+});
+
 function sessionFilterPopupHarness({ enabled = ["codex:local", "claude:wsl:a", "claude:wsl:b"], filter = "all" } = {}) {
   const listeners = new Map(), saved = [], nodes = new Map();
   let document;
@@ -2767,6 +2821,39 @@ test("Open in 前端接受独立服务的全部目标，IDEA、WSL 和 PowerShel
   for (const target of ["intellij", "wsl", "powershell"]) assert.ok(accepted.includes(target));
   assert.equal(context.normalizeTargets(context.input, { wslInstance: false }).targets
     .some(target => target.target === "wsl"), false, "本机实例不能被旧后台的 WSL 项误启用");
+});
+
+test("Open in 的 Git Bash 和 WSL 使用安装程序图标，无效图片回退终端图标", () => {
+  const element = (tag, className = "", text = "") => ({
+    tag, className, textContent: text, children: [], attributes: {}, events: {},
+    setAttribute(name, value) { this.attributes[name] = String(value); },
+    append(...children) { this.children.push(...children); },
+    replaceChildren(...children) { this.children = children; },
+    addEventListener(name, callback) { this.events[name] = callback; },
+  });
+  const context = rawVm.createContext({ element, icon: name => element("span", `ui-icon ${name}`) });
+  rawVm.runInContext(workspaceOpenInSource.slice(workspaceOpenInSource.indexOf("const applicationIds ="),
+    workspaceOpenInSource.indexOf("const applicationPaths ="))
+    + workspaceOpenInSource.slice(workspaceOpenInSource.indexOf("const applicationPaths ="),
+      workspaceOpenInSource.indexOf("export function clientOpenInContext("))
+    + workspaceOpenInSource.slice(workspaceOpenInSource.indexOf("function applicationIcon("),
+      workspaceOpenInSource.indexOf("function preferenceKey(")), context);
+  const icon = "data:image/png;base64,iVBORw0KGgo=";
+  const result = context.normalizeTargets({ ok: true, root: "E:\\项目", targets: [
+    { target: "gitBash", label: "Git Bash", available: true, icon },
+    { target: "wsl", label: "WSL", available: true, icon },
+    { target: "vscode", label: "VS Code", available: true, icon: "https://example.com/icon.png" },
+  ] }, { wslInstance: true });
+  assert.equal(result.targets[0].icon, icon);
+  assert.equal(result.targets[1].icon, icon);
+  assert.equal(result.targets[2].icon, undefined, "非 PNG 数据不能进入图片地址");
+  for (const target of result.targets.slice(0, 2)) {
+    const node = context.applicationIcon(target), image = node.children[0];
+    assert.equal(image.tag, "img", `${target.target} 必须渲染安装程序图片`);
+    assert.equal(image.src, icon);
+    image.events.error();
+    assert.equal(node.children.at(-1).className, "ui-icon terminal", "加载失败保留原终端图标");
+  }
 });
 
 test("Open in 按执行实例显示 WSL，Windows 挂载目录保留 WSL 身份且更换用户使旧请求失效", () => {

@@ -53,18 +53,26 @@ export function mergeIncompleteSidebar(previous, current) {
 export let clientUnreadBadgeTimer = null, clientUnreadBadgeRequest = null;
 export function setClientUnreadBadgeTimer(value) { return clientUnreadBadgeTimer = value; }
 export function setClientUnreadBadgeRequest(value) { return clientUnreadBadgeRequest = value; }
+export function sidebarThreadActive(item) {
+  const status = item?.status?.status || item?.status;
+  const type = typeof status === "string" ? status : status?.type;
+  return item?.sideThreadAttention?.active === true
+    || (typeof item?.priority?.active === "boolean"
+      ? item.priority.active : type === "active" || type === "inProgress");
+}
 export function clientUnreadThreadCount(value) {
   const unread = new Set(), sideIds = new Set(value?.sideThreadIds || []);
-  // 对照本机 Windows Codex：按未读主会话去重，不按消息/轮次累加；
+  // 用户要求角标与会话栏实际未读数量一致：执行中的会话即使保留未读标记也不计入；
   // 最近、项目、置顶重复出现仍只算 1，侧边子会话/子代理不单独增加任务栏数字。
   for (const item of [...(value?.recent || []), ...(value?.pinnedThreads || []),
     ...(value?.projects || []).flatMap(project => project.threads || [])]) {
     if (!item?.id || item.archived === true || sideIds.has(item.id)
         || item.parentThreadId && item.parentThreadId !== item.id
         || item.threadSource === "subagent" || item.source?.subAgent || item.source?.subagent) continue;
-    const hasUnread = typeof item.hasUnreadTurn === "boolean"
-      ? item.hasUnreadTurn : item.priority?.attentionState === "unread";
-    if (hasUnread) unread.add(item.id);
+    const attention = sidebarAttentionState(item);
+    // 明确的 hasUnreadTurn=false 是已读抑制，不能被尚未同步的旧 priority 未读标记重新计入。
+    const hasUnread = typeof item.hasUnreadTurn === "boolean" ? item.hasUnreadTurn : attention === "unread";
+    if (hasUnread && attention === "unread" && !sidebarThreadActive(item)) unread.add(item.id);
   }
   return unread.size;
 }

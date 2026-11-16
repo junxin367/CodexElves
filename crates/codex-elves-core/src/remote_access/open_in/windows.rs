@@ -1,12 +1,20 @@
-use std::ffi::OsString;
-use std::os::windows::ffi::OsStringExt;
+use std::ffi::{OsString, c_void};
+use std::os::windows::ffi::{OsStrExt, OsStringExt};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
+use base64::Engine as _;
+use image::ImageEncoder as _;
+use windows::Win32::Graphics::Gdi::{
+    BI_RGB, BITMAP, BITMAPINFO, BITMAPINFOHEADER, CreateCompatibleDC, DIB_RGB_COLORS, DeleteDC,
+    DeleteObject, GetDIBits, GetObjectW, HBITMAP, HDC, HGDIOBJ,
+};
 use windows::Win32::System::Registry::{
     HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, RRF_RT_REG_EXPAND_SZ, RRF_RT_REG_SZ,
     RRF_SUBKEY_WOW6432KEY, RRF_SUBKEY_WOW6464KEY, RegGetValueW,
 };
+use windows::Win32::UI::Shell::ExtractIconExW;
+use windows::Win32::UI::WindowsAndMessaging::{DestroyIcon, GetIconInfo, HICON, ICONINFO};
 use windows::core::PCWSTR;
 
 use super::{ApiError, Application, LaunchOutcome, display_path};
@@ -250,6 +258,160 @@ pub(super) fn find_application(target: &str, root: &Path) -> Option<PathBuf> {
     }
 }
 
+struct IconHandle(HICON);
+impl Drop for IconHandle {
+    fn drop(&mut self) {
+        if !self.0.0.is_null() {
+            unsafe {
+                let _ = DestroyIcon(self.0);
+            }
+        }
+    }
+}
+struct BitmapHandle(HBITMAP);
+impl Drop for BitmapHandle {
+    fn drop(&mut self) {
+        if !self.0.0.is_null() {
+            unsafe {
+                let _ = DeleteObject(HGDIOBJ(self.0.0));
+            }
+        }
+    }
+}
+struct DeviceContext(HDC);
+impl Drop for DeviceContext {
+    fn drop(&mut self) {
+        if !self.0.0.is_null() {
+            unsafe {
+                let _ = DeleteDC(self.0);
+            }
+        }
+    }
+}
+
+fn bitmap_pixels(dc: HDC, bitmap: HBITMAP, width: u32, height: u32) -> Option<Vec<u8>> {
+    let mut pixels = vec![0_u8; width.checked_mul(height)?.checked_mul(4)? as usize];
+    let mut info = BITMAPINFO {
+        bmiHeader: BITMAPINFOHEADER {
+            biSize: size_of::<BITMAPINFOHEADER>() as u32,
+            biWidth: width as i32,
+            // 负高度按顶向下读取，后续无需再翻转图标。
+            biHeight: -(height as i32),
+            biPlanes: 1,
+            biBitCount: 32,
+            biCompression: BI_RGB.0,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    (unsafe {
+        GetDIBits(
+            dc,
+            bitmap,
+            0,
+            height,
+            Some(pixels.as_mut_ptr().cast()),
+            &mut info,
+            DIB_RGB_COLORS,
+        )
+    } == height as i32)
+        .then_some(pixels)
+}
+
+fn png_data_url(width: u32, height: u32, rgba: Vec<u8>) -> Option<String> {
+    if rgba.len() != width.checked_mul(height)?.checked_mul(4)? as usize {
+        return None;
+    }
+    let mut png = std::io::Cursor::new(Vec::new());
+    image::codecs::png::PngEncoder::new(&mut png)
+        .write_image(&rgba, width, height, image::ExtendedColorType::Rgba8)
+        .ok()?;
+    Some(format!(
+        "data:image/png;base64,{}",
+        base64::engine::general_purpose::STANDARD.encode(png.into_inner())
+    ))
+}
+
+pub(super) fn icon_data(path: &Path) -> Option<String> {
+    if !path.is_file() {
+        return None;
+    }
+    let path: Vec<_> = path.as_os_str().encode_wide().chain([0]).collect();
+    let mut large = HICON(std::ptr::null_mut());
+    let mut small = HICON(std::ptr::null_mut());
+    if unsafe {
+        ExtractIconExW(
+            PCWSTR(path.as_ptr()),
+            0,
+            Some(&mut large),
+            Some(&mut small),
+            1,
+        )
+    } == 0
+    {
+        return None;
+    }
+    let _large = IconHandle(large);
+    let _small = IconHandle(small);
+    let icon = if !large.0.is_null() { large } else { small };
+    if icon.0.is_null() {
+        return None;
+    }
+    let mut info = ICONINFO::default();
+    unsafe { GetIconInfo(icon, &mut info) }.ok()?;
+    let color = BitmapHandle(info.hbmColor);
+    let mask = BitmapHandle(info.hbmMask);
+    let source_is_mask = color.0.0.is_null();
+    let source = if source_is_mask { mask.0 } else { color.0 };
+    if source.0.is_null() {
+        return None;
+    }
+    let mut bitmap = BITMAP::default();
+    if unsafe {
+        GetObjectW(
+            HGDIOBJ(source.0),
+            size_of::<BITMAP>() as i32,
+            Some(&mut bitmap as *mut _ as *mut c_void),
+        )
+    } == 0
+    {
+        return None;
+    }
+    let width = bitmap.bmWidth.unsigned_abs();
+    let mut height = bitmap.bmHeight.unsigned_abs();
+    if source_is_mask && height % 2 == 0 {
+        height /= 2;
+    }
+    if width == 0 || height == 0 || width > 256 || height > 256 {
+        return None;
+    }
+    let dc = DeviceContext(unsafe { CreateCompatibleDC(HDC(std::ptr::null_mut())) });
+    if dc.0.0.is_null() {
+        return None;
+    }
+    let bgra = bitmap_pixels(dc.0, source, width, height)?;
+    let mask = if source_is_mask {
+        Some(bgra.clone())
+    } else if !mask.0.0.is_null() {
+        bitmap_pixels(dc.0, mask.0, width, height)
+    } else {
+        None
+    };
+    let has_alpha = !source_is_mask && bgra.chunks_exact(4).any(|pixel| pixel[3] != 0);
+    let mut rgba = Vec::with_capacity(bgra.len());
+    for (index, pixel) in bgra.chunks_exact(4).enumerate() {
+        let alpha = if has_alpha {
+            pixel[3]
+        } else if mask.as_ref().is_some_and(|mask| mask[index * 4] != 0) {
+            0
+        } else {
+            255
+        };
+        rgba.extend_from_slice(&[pixel[2], pixel[1], pixel[0], alpha]);
+    }
+    png_data_url(width, height, rgba)
+}
+
 fn windows_terminal() -> Option<PathBuf> {
     in_path("wt.exe").or_else(|| {
         let base = PathBuf::from(std::env::var_os("LOCALAPPDATA")?);
@@ -456,6 +618,47 @@ mod tests {
                     "attach",
                     "job-fixture"
                 ]
+            );
+        }
+    }
+
+    #[test]
+    fn icon_png_encoding_preserves_rgba_pixels() {
+        use base64::Engine as _;
+        let pixels = vec![255, 0, 0, 255, 0, 0, 255, 128];
+        let url = png_data_url(2, 1, pixels.clone()).unwrap();
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(url.strip_prefix("data:image/png;base64,").unwrap())
+            .unwrap();
+        let image = image::load_from_memory(&bytes).unwrap().to_rgba8();
+        assert_eq!((image.width(), image.height()), (2, 1));
+        assert_eq!(image.into_raw(), pixels);
+    }
+
+    #[test]
+    fn installed_git_and_wsl_icons_are_valid_png_when_available() {
+        use base64::Engine as _;
+        for target in ["gitBash", "wsl"] {
+            let Some(executable) = find_application(target, Path::new(r"E:\\")) else {
+                continue;
+            };
+            let url = icon_data(&executable)
+                .unwrap_or_else(|| panic!("无法提取 {} 的图标", executable.display()));
+            let bytes = base64::engine::general_purpose::STANDARD
+                .decode(url.strip_prefix("data:image/png;base64,").unwrap())
+                .unwrap();
+            let image = image::load_from_memory(&bytes).unwrap();
+            assert!(image.width() > 0 && image.height() > 0);
+            assert!(image.width() <= 256 && image.height() <= 256);
+            assert!(
+                image.to_rgba8().pixels().any(|pixel| pixel.0[3] > 0),
+                "{target} 图标不能全透明"
+            );
+            eprintln!(
+                "已提取 {target} 图标：{} ({}x{})",
+                executable.display(),
+                image.width(),
+                image.height()
             );
         }
     }
