@@ -14,6 +14,7 @@ use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent}
 use tauri::{Emitter, Manager, PhysicalPosition, PhysicalSize, Position, Size, WindowEvent};
 
 static APP_EXITING: AtomicBool = AtomicBool::new(false);
+static EXIT_PREPARING: AtomicBool = AtomicBool::new(false);
 const TRAY_MENU_SHOW: &str = "tray_show_main";
 const TRAY_MENU_QUIT: &str = "tray_quit_app";
 const MANAGER_WAKE_SHOW: u8 = 1;
@@ -182,8 +183,7 @@ fn install_tray<R: tauri::Runtime>(app: &tauri::App<R>) -> tauri::Result<()> {
                 show_main_window(app);
             }
             TRAY_MENU_QUIT => {
-                APP_EXITING.store(true, Ordering::SeqCst);
-                app.exit(0);
+                prepare_manager_exit(app.clone());
             }
             _ => {}
         })
@@ -208,6 +208,28 @@ fn install_tray<R: tauri::Runtime>(app: &tauri::App<R>) -> tauri::Result<()> {
 
     let _ = tray_builder.build(app)?;
     Ok(())
+}
+
+fn prepare_manager_exit<R: tauri::Runtime>(app: tauri::AppHandle<R>) {
+    if EXIT_PREPARING.swap(true, Ordering::AcqRel) {
+        return;
+    }
+    // 用户要求托盘退出先回收安全空闲 Claude；异步等待结果，窗口关闭按钮仍按原规则收进托盘。
+    tauri::async_runtime::spawn(async move {
+        let result =
+            codex_elves_core::remote_access::prepare_service_shutdown("manager_exit").await;
+        let value = result.unwrap_or_else(|error| {
+            serde_json::json!({
+                "status":"pending","message":format!("{error:#}"),"pendingStartupCheck":true
+            })
+        });
+        let _ = codex_elves_core::diagnostic_log::append_diagnostic_log(
+            "manager.remote_cleanup",
+            value,
+        );
+        APP_EXITING.store(true, Ordering::Release);
+        app.exit(0);
+    });
 }
 
 fn register_main_window_events<R: tauri::Runtime>(window: tauri::WebviewWindow<R>) {

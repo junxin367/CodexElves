@@ -17,8 +17,8 @@ use serde_json::{Value, json};
 
 const ENDPOINT_FILE: &str = "remote-access-service.json";
 const LOCK_FILE: &str = "remote-access-service.lock";
-// 用户要求完全移除远程 Codex App 桥接；协议 7 只支持独立服务，不能复用具备桌面 IPC 路由的旧进程。
-const PROTOCOL_VERSION: u32 = 7;
+// 协议 8 增加本机受控退出；仍仅支持独立服务，不能复用具有桌面 IPC 路由的旧进程。
+const PROTOCOL_VERSION: u32 = 8;
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(8);
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(60);
 #[cfg(windows)]
@@ -37,6 +37,7 @@ struct Endpoint {
 #[derive(Clone)]
 struct ServiceState {
     endpoint: Endpoint,
+    handle: axum_server::Handle<std::net::SocketAddr>,
 }
 
 fn acquire_service_lock(directory: &Path) -> anyhow::Result<Option<File>> {
@@ -120,6 +121,8 @@ async fn retire_obsolete_service(directory: &Path) -> anyhow::Result<()> {
     }
     #[cfg(windows)]
     {
+        // 旧服务没有受控退出接口；先保存受管身份，下次启动补偿，不能把强制终止当作已回收。
+        super::claude::remember_shutdown(directory, "legacy_service_upgrade")?;
         anyhow::ensure!(
             crate::windows_integration::terminate_process(endpoint.process_id),
             "旧版远程访问后台仍在运行，请退出 CodexElves 后重试"
@@ -201,6 +204,7 @@ fn supported_action(action: &str) -> bool {
     matches!(
         action,
         "status"
+            | "prepareShutdown"
             | "apply"
             | "revoke"
             | "diagnostics"
@@ -217,7 +221,10 @@ fn supported_action(action: &str) -> bool {
 
 async fn request(endpoint: &Endpoint, action: &str, payload: &Value) -> anyhow::Result<Value> {
     anyhow::ensure!(supported_action(action), "不支持的远程管理操作");
-    let timeout = if matches!(action, "testPrimaryRoute" | "applyPrimaryRoute")
+    let timeout = if action == "prepareShutdown" {
+        // 与服务端 60 秒清理预算同步，另留 5 秒返回已保存的结果。
+        Duration::from_secs(65)
+    } else if matches!(action, "testPrimaryRoute" | "applyPrimaryRoute")
         && payload["provider"] == "frp"
     {
         Duration::from_secs(420)
@@ -237,6 +244,27 @@ async fn request(endpoint: &Endpoint, action: &str, payload: &Value) -> anyhow::
         .error_for_status()
         .context("远程访问后台拒绝了管理请求")?;
     response.json().await.context("远程访问后台返回了无效状态")
+}
+
+pub async fn prepare_shutdown(reason: &str) -> anyhow::Result<Value> {
+    let directory = crate::paths::default_app_state_dir();
+    super::claude::remember_shutdown(&directory, reason)?;
+    let Some(endpoint) = load_endpoint_any(&directory)? else {
+        return Ok(json!({"status":"not_running","cleanup":"pending_startup_check"}));
+    };
+    if !endpoint_is_active(&endpoint).await? {
+        return Ok(json!({"status":"not_running","cleanup":"pending_startup_check"}));
+    }
+    if endpoint.protocol_version < PROTOCOL_VERSION {
+        // 安装包用新 helper 请求旧服务时不恢复旧桥接；旧版无法响应的清理保留到新服务启动。
+        return Ok(json!({"status":"legacy_service","cleanup":"pending_startup_check"}));
+    }
+    let value = request(&endpoint, "prepareShutdown", &json!({"reason":reason})).await?;
+    anyhow::ensure!(
+        matches!(value["status"].as_str(), Some("stopped" | "closing")),
+        "远程后台未确认受控退出"
+    );
+    Ok(value)
 }
 
 pub(super) async fn try_request(action: &str, payload: &Value) -> anyhow::Result<Option<Value>> {
@@ -293,6 +321,23 @@ async fn admin(
     if !supported_action(&action) {
         return Err(StatusCode::NOT_FOUND);
     }
+    if action == "prepareShutdown" {
+        let mut response = match tokio::time::timeout(
+            SHUTDOWN_TIMEOUT,
+            super::prepare_controller_shutdown(),
+        )
+        .await
+        {
+            Ok(value) => value,
+            Err(_) => json!({"status":"closing","cleanup":{
+                "complete":false,"reason":"outcome_unknown","pendingStartupCheck":true
+            }}),
+        };
+        response["serviceProcessId"] = json!(endpoint.process_id);
+        // 先给本机调用者返回逐会话结果，再停止管理监听；不改变用户保存的启用开关及设备授权。
+        state.handle.graceful_shutdown(Some(Duration::from_secs(2)));
+        return Ok(Json(response));
+    }
     let mut response = super::admin_request(&action, payload).await;
     response["serviceProcessId"] = json!(endpoint.process_id);
     Ok(Json(response))
@@ -321,7 +366,9 @@ pub async fn run() -> anyhow::Result<()> {
     };
     let state = ServiceState {
         endpoint: endpoint.clone(),
+        handle: axum_server::Handle::new(),
     };
+    let handle = state.handle.clone();
     let router = Router::new()
         .route("/health", get(health))
         .route("/admin/{action}", post(admin))
@@ -331,7 +378,9 @@ pub async fn run() -> anyhow::Result<()> {
         )
         .layer(DefaultBodyLimit::max(16 * 1024))
         .with_state(state);
-    let server = axum_server::from_tcp(listener)?.serve(router.into_make_service());
+    let server = axum_server::from_tcp(listener)?
+        .handle(handle)
+        .serve(router.into_make_service());
     crate::settings::atomic_write(
         &directory.join(ENDPOINT_FILE),
         &serde_json::to_vec(&endpoint)?,
@@ -474,6 +523,63 @@ mod tests {
         assert!(authorized(&headers, &endpoint));
         headers.insert(header::ORIGIN, "http://127.0.0.1:12345".parse().unwrap());
         assert!(!authorized(&headers, &endpoint));
+    }
+
+    #[tokio::test]
+    async fn controlled_shutdown_exits_service_without_changing_saved_settings() {
+        let directory = test_directory();
+        let remote_port = std::net::TcpListener::bind(("127.0.0.1", 0))
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        let mut settings = crate::settings::BackendSettings::default();
+        settings.remote_access.enabled = true;
+        settings.remote_access.port = remote_port;
+        let settings_path = directory.path().join("settings.json");
+        crate::settings::SettingsStore::new(settings_path.clone())
+            .save(&settings)
+            .unwrap();
+        let before = std::fs::read(&settings_path).unwrap();
+        let mut child = test_command("runtime_worker", directory.path())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        #[cfg(windows)]
+        let _job = remote_service_job(&child).unwrap();
+        let endpoint = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                if let Some(endpoint) = active_endpoint(directory.path()).await.unwrap() {
+                    return endpoint;
+                }
+                assert!(child.try_wait().unwrap().is_none());
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let report = request(&endpoint, "prepareShutdown", &json!({"reason":"test_exit"}))
+            .await
+            .unwrap();
+        assert_eq!(report["status"], "stopped");
+        assert_eq!(report["cleanup"]["complete"], true);
+        tokio::time::timeout(Duration::from_secs(8), async {
+            loop {
+                if let Some(status) = child.try_wait().unwrap() {
+                    assert!(status.success());
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(active_endpoint(directory.path()).await.unwrap().is_none());
+        assert_eq!(std::fs::read(settings_path).unwrap(), before);
+        assert!(acquire_service_lock(directory.path()).unwrap().is_some());
+        assert!(std::net::TcpListener::bind(("127.0.0.1", remote_port)).is_ok());
+        assert!(std::net::TcpListener::bind(("127.0.0.1", endpoint.port)).is_ok());
     }
 
     #[tokio::test]

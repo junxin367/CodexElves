@@ -724,6 +724,13 @@ impl Claude {
     }
 
     pub(super) async fn drain_remote_queues(self: &Arc<Self>) {
+        if !self.accepting() {
+            return;
+        }
+        let _lifecycle = self.lifecycle_gate.read().await;
+        if !self.accepting() {
+            return;
+        }
         let candidates: Vec<_> = self
             .saved
             .lock()
@@ -789,6 +796,9 @@ impl Claude {
             let auth = controller.authorization(device, Some("send"));
             // 自动续发也逐次核对原设备授权；退出、只读或撤销后不能继续派发。
             if auth.check().await.is_err() {
+                continue;
+            }
+            if self.cleanup_store.cancel(&id).is_err() {
                 continue;
             }
             let _ = self

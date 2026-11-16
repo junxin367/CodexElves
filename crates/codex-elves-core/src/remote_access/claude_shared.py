@@ -171,6 +171,20 @@ def native_time(value):
         return 0
 
 
+def native_time_zone():
+    """只认当前 WSL 登录环境；没有可核对来源时不借用 Windows 或固定时区。"""
+    value = os.environ.get("TZ", "").strip()
+    if value:
+        if len(value) > 256 or any(c in value for c in "\0\r\n"):
+            raise NativeError("ETIMEZONE", "目标 WSL 的 TZ 无效，Claude 消息尚未发送")
+        return value
+    localtime = str(Path("/etc/localtime").resolve())
+    for prefix in ("/usr/share/zoneinfo/", "/usr/lib/zoneinfo/"):
+        if localtime.startswith(prefix) and len(localtime) > len(prefix):
+            return localtime[len(prefix):]
+    raise NativeError("ETIMEZONE", "无法核对目标 WSL 时区，Claude 消息尚未发送")
+
+
 def native_interruption(row):
     # 用户要求核实中断提示：只认原生关联字段与完整控制块，真实用户引用/同名文字不能按前缀过滤。
     if row.get("type") != "user":
@@ -1537,7 +1551,7 @@ def empty_permission_prompt(lines):
     return end is not None and not any(line.strip() for line in trailing[:end])
 
 
-def native_input_state(lines):
+def native_input_state(lines, *, allow_borderless=False):
     """判断原生输入框是空闲、含草稿还是无法确认。"""
     positions = [index for index, line in enumerate(lines) if re.match(r"^\s*❯", line)]
     if not positions:
@@ -1548,6 +1562,10 @@ def native_input_state(lines):
     trailing = lines[position + 1:]
     end = next((index for index, line in enumerate(trailing) if re.match(r"^\s*[─╌━]{6,}", line)), None)
     if end is None:
+        # Claude 2.1.325 后台完整快照实测：空闲输入区可只有 ❯ 和后续空白行，没有下边框。
+        # 仅回收路径在原生状态明确 idle 时启用；截断在 ❯ 的单行片段仍保持未知。
+        if allow_borderless and trailing:
+            return "draft" if any(line.strip() for line in trailing) else "empty"
         return "unknown"
     return "draft" if any(line.strip() for line in trailing[:end]) else "empty"
 
@@ -2498,8 +2516,10 @@ class NativeSession:
     def start(self, text=None):
         if self.native_id:
             self.check_history_resume()
-        # 网页与 CLI 必须操作所选项目的同一目录；仅关闭默认 worktree 隔离，保留原生提示和工具。
-        arguments = [self.cli, "--bg", "--settings", '{"worktree":{"bgIsolation":"none"}}']
+        # 用户要求实际后台执行继承当前 WSL 时区；--bg 可复用旧 daemon/预热 worker，
+        # 必须经 CLI 原生的会话设置传递 TZ，不能只依赖外层 Python 的环境或强制重启其他会话。
+        settings = {"worktree": {"bgIsolation": "none"}, "env": {"TZ": native_time_zone()}}
+        arguments = [self.cli, "--bg", "--settings", json.dumps(settings, separators=(",", ":"))]
         if self.permission_mode and self.permission_mode != "configured":
             mode = self.permission_mode
             if mode == "default" and "manual" in self.permission_catalog and "default" not in self.permission_catalog:
@@ -2723,9 +2743,17 @@ class NativeSession:
         # 远程服务关闭时只回收安全的空闲后台 job；执行、审批、问答、草稿或后台任务
         # 均保留原生会话，避免服务重启把正在执行的消息变成未核对结果。
         live = self.lookup() if self.native_id else None
-        if (not live or live.get("outcome")
-                or live.get("state") in ("done", "stopped", "failed", "ended")
-                and live.get("sessionStatus") not in ("busy", "idle", "waiting")):
+        if not live:
+            if self.short and self.job_alive() or self.session_holders():
+                return {"stopped": False, "reason": "identity_unknown"}
+            return {"stopped": True, "alreadyStopped": True}
+        if ((live.get("resumeSessionId") or live.get("sessionId")) != self.native_id
+                or self.short and live.get("short") != self.short):
+            return {"stopped": False, "reason": "identity_changed"}
+        # done/outcome 仅说明轮次结束，不能当成后台进程已退出；真实存活状态仍须核对。
+        if (live.get("sessionStatus") not in ("busy", "idle", "waiting")
+                and live.get("state") in ("done", "stopped", "failed", "ended")
+                and not self.job_alive() and not self.session_holders()):
             return {"stopped": True, "alreadyStopped": True}
         self.bind(live)
         self.read_messages()
@@ -2739,12 +2767,26 @@ class NativeSession:
                 lines = self.read_terminal_screen()
             except (OSError, ValueError, RuntimeError, NativeError):
                 return {"stopped": False, "reason": "screen_unknown"}
-        if native_input_state(lines) != "empty":
-            return {"stopped": False, "reason": "native_draft"}
+        input_state = native_input_state(lines, allow_borderless=live.get("sessionStatus") == "idle")
+        if input_state != "empty":
+            return {"stopped": False, "reason": "native_draft" if input_state == "draft" else "screen_unknown"}
         background = self.background_work(lines)
         if background is None:
             return {"stopped": False, "reason": "screen_unknown"}
         if background:
+            return {"stopped": False, "reason": "background_work"}
+        # 用户要求退出只回收安全空闲进程；发出 stop 前再次核对，避免检查期间终端启动了新任务。
+        latest = self.lookup()
+        if (not latest or latest.get("short") != self.short
+                or (latest.get("resumeSessionId") or latest.get("sessionId")) != self.native_id
+                or latest.get("sessionStatus") not in (None, "idle")
+                or NativeDiscovery.status(latest, self.messages).get("tempo") != "idle"
+                or latest.get("needs")):
+            return {"stopped": False, "reason": "state_changed"}
+        stored = native_json(self.root / "jobs" / self.short / "state.json")
+        in_flight = stored.get("inFlight") or {}
+        if (in_flight.get("tasks") or in_flight.get("queued") or in_flight.get("kinds")
+                or in_flight.get("drainableMonitors")):
             return {"stopped": False, "reason": "background_work"}
         self.stop_job()
         return {"stopped": True, "jobId": self.short}
@@ -3904,8 +3946,21 @@ def main():
     arguments.add_argument("--native-id", default="")
     arguments.add_argument("--job-id", default="")
     arguments.add_argument("--discover", action="store_true")
+    arguments.add_argument("--cleanup", action="store_true")
     options = arguments.parse_args()
     native = NativeDiscovery() if options.discover else NativeSession(options.cli, options.native_id, options.job_id)
+    if options.cleanup:
+        # 启动补偿只检查保存的同一原生身份，不 initialize、不恢复会话、不发送模型消息。
+        if (options.discover or not re.fullmatch(r"[0-9a-f]{8}", options.job_id)
+                or str(uuid.UUID(options.native_id)) != options.native_id):
+            raise RuntimeError("Claude 回收目标身份无效")
+        try:
+            with contextlib.redirect_stdout(sys.stderr):
+                result = native.shutdown()
+        except (OSError, ValueError, RuntimeError, subprocess.SubprocessError):
+            result = {"stopped": False, "reason": "cleanup_failed"}
+        emit(result)
+        return
     incoming = queue.Queue()
     native.incoming = incoming
 
@@ -3928,7 +3983,7 @@ def main():
         except queue.Empty:
             continue
         if line is None:
-            # 用户要求网页断线/服务退出不停止原版会话；这里只结束连接端。
+            # 网页断线仍保留会话；计划退出由 shared_shutdown 回收，异常断线留给下次启动补偿。
             return
         if isinstance(line, dict):
             native.stream_preview(line["_stream"])

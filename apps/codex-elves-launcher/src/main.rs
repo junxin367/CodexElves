@@ -80,9 +80,23 @@ async fn main() -> Result<()> {
             }),
         );
     }
-    let handle = launch_and_inject_with_hooks(options, &hooks).await?;
-    handle.wait_for_exit().await?;
-    Ok(())
+    let outcome = async {
+        let handle = launch_and_inject_with_hooks(options, &hooks).await?;
+        handle.wait_for_exit().await?;
+        Ok(())
+    }
+    .await;
+    // 用户要求退出回收先于 Windows Job Object 关闭；失败仍保留待回收记录，启动时补偿。
+    let cleanup = codex_elves_core::remote_access::prepare_service_shutdown("launcher_exit").await;
+    let _ = codex_elves_core::diagnostic_log::append_diagnostic_log(
+        "launcher.remote_cleanup",
+        cleanup.unwrap_or_else(|error| {
+            json!({
+                "status":"pending","message":format!("{error:#}"),"pendingStartupCheck":true
+            })
+        }),
+    );
+    outcome
 }
 
 fn spawn_obsolete_session_backup_cleanup() {

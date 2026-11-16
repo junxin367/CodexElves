@@ -1,5 +1,6 @@
 Unicode true
 !include "MUI2.nsh"
+!include "LogicLib.nsh"
 
 !ifndef VERSION
   !define VERSION "0.0.0"
@@ -32,6 +33,15 @@ LangString FinishRunManager ${LANG_SIMPCHINESE} "运行 CodexElves 管理工具"
 LangString FinishRunManager ${LANG_ENGLISH} "Run CodexElves Manager"
 
 Section "Install"
+  ; 用户要求安装升级先请求安全回收；使用包内新版 helper，旧版无接口时保存意图供启动补偿。
+  InitPluginsDir
+  SetOutPath "$PLUGINSDIR"
+  File /oname=codex-elves-shutdown-helper.exe "${ROOT}\dist\windows\app\codex-elves-manager.exe"
+  nsExec::ExecToLog '"$PLUGINSDIR\codex-elves-shutdown-helper.exe" --prepare-remote-shutdown'
+  Pop $0
+  ${If} $0 != 0
+    DetailPrint "Claude 回收尚未全部确认，已保留记录供下次启动核对。"
+  ${EndIf}
   SetOutPath "$INSTDIR"
 
   nsExec::ExecToLog 'taskkill /IM codex-elves.exe /F'
@@ -81,6 +91,9 @@ Section "Install"
 SectionEnd
 
 Section "Uninstall"
+  ; 卸载也先走受控退出；只回收安全空闲 job，不删除原生历史、草稿或用户数据。
+  nsExec::ExecToLog '"$INSTDIR\codex-elves-manager.exe" --prepare-remote-shutdown'
+  Pop $0
   nsExec::ExecToLog 'taskkill /IM codex-elves.exe /F'
   Pop $0
   nsExec::ExecToLog 'taskkill /IM codex-elves-manager.exe /F'

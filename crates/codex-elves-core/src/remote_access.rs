@@ -60,7 +60,10 @@ mod zrok_tunnel;
 use credentials::{AccessKey, AccessKeyStore, lock_access_key_store};
 pub use credentials::{access_credentials_status, configure_access_key};
 pub use frp_tunnel::program_directory as frp_program_directory;
-pub use service::{ensure_running as ensure_service_running, run as run_service};
+pub use service::{
+    ensure_running as ensure_service_running, prepare_shutdown as prepare_service_shutdown,
+    run as run_service,
+};
 use zrok_tunnel::ZrokTunnelService;
 
 // 网页资源由 build.rs 按统一目录规则生成（见 scripts/remote-access-resources.mjs）；
@@ -242,7 +245,10 @@ impl RemoteDispatchPermit {
             .access_policy
             .read()
             .unwrap_or_else(|error| error.into_inner());
-        if !policy.enabled || !controller.running.load(Ordering::SeqCst) {
+        if controller.closing.load(Ordering::Acquire)
+            || !policy.enabled
+            || !controller.running.load(Ordering::SeqCst)
+        {
             return Err(ApiError::new(503, "远程访问服务已停止").into());
         }
         if self.expires_at_ms <= now_ms() {
@@ -397,6 +403,9 @@ pub struct RemoteAccessController {
     access_policy: RwLock<AccessPolicy>,
     live: Mutex<LiveService>,
     running: AtomicBool,
+    closing: AtomicBool,
+    shutdown_complete: AtomicBool,
+    shutdown_serial: Mutex<()>,
     events: broadcast::Sender<Value>,
     key_checks: Arc<tokio::sync::Semaphore>,
     public_origin: Arc<RwLock<Option<String>>>,
@@ -481,6 +490,9 @@ impl RemoteAccessController {
                 frp_retry_at: 0,
             }),
             running: AtomicBool::new(false),
+            closing: AtomicBool::new(false),
+            shutdown_complete: AtomicBool::new(false),
+            shutdown_serial: Mutex::new(()),
             events,
             key_checks: Arc::new(tokio::sync::Semaphore::new(4)),
             public_origin,
@@ -767,7 +779,14 @@ impl RemoteAccessController {
         self.publish_event(json!({"method":"remote/authorizationChanged"}));
     }
 
-    pub async fn reconcile(self: &Arc<Self>, settings: RemoteAccessSettings) {
+    pub async fn reconcile(self: &Arc<Self>, mut settings: RemoteAccessSettings) {
+        if self.shutdown_complete.load(Ordering::Acquire) {
+            return;
+        }
+        if self.closing.load(Ordering::Acquire) {
+            // 用户要求计划退出先停止派发和重连；后台配置监视不能在回收途中重新开启服务。
+            settings.enabled = false;
+        }
         // Publish restrictions before any file lock, native call, or tunnel await.
         self.publish_access_policy(&settings);
         // 远程服务关闭时停止 Codex 队列派发；真正释放 app-server 仍由 Harness 按空闲状态判断。
@@ -782,6 +801,9 @@ impl RemoteAccessController {
             .err()
             .map(|error| error.to_string());
         let mut live = self.live.lock().await;
+        if self.shutdown_complete.load(Ordering::Acquire) {
+            return;
+        }
         self.configure_secondary_channel(settings.enabled && settings.ngrok_enabled);
         let finished = live.server.as_ref().is_some_and(|task| task.is_finished());
         let was_enabled = live
@@ -828,12 +850,13 @@ impl RemoteAccessController {
         live.settings = Some(settings.clone());
         live.error = None;
         if !settings.enabled {
-            self.harness.stop_preparation().await;
-            self.claude.release().await;
             live.ngrok.stop().await;
             live.zrok.reconcile(false, &zrok_target).await;
             if finished || was_enabled {}
             drop(live);
+            // 用户要求关闭即撤下公网入口；Claude 回收可等待，不能持有监听锁让隧道继续运行。
+            self.harness.stop_preparation().await;
+            self.claude.release().await;
             self.prune_stale_public_devices().await;
             return;
         }
@@ -957,11 +980,13 @@ impl RemoteAccessController {
         let ngrok = live.ngrok.status();
         let primary = self.primary_status(&live);
         drop(live);
+        let cleanup = self.claude.cleanup_report();
         let auth = self.auth.lock().await;
         json!({
             "status":"ok", "enabled":settings.enabled,
             "running":self.running.load(Ordering::SeqCst),
             "serviceConnected":self.harness_connected.load(Ordering::SeqCst),
+            "closing":self.closing.load(Ordering::Acquire),"claudeCleanup":cleanup,
             "error":error, "addresses":access_addresses(settings),
             "devices":auth.devices.iter().filter(|device|device.expires_at_ms>now_ms())
                 .filter(|device|auth.access_key.as_ref().is_some_and(|key|device.key_id==key.id))
@@ -973,6 +998,11 @@ impl RemoteAccessController {
     }
 
     pub async fn admin(self: &Arc<Self>, action: &str, payload: Value) -> anyhow::Result<Value> {
+        if self.closing.load(Ordering::Acquire) {
+            anyhow::ensure!(action == "status", "远程后台正在关闭，管理操作尚未执行");
+            let settings = SettingsStore::default().load()?.remote_access;
+            return Ok(self.admin_status(&settings).await);
+        }
         match action {
             "saveFrp" | "testPrimaryRoute" | "applyPrimaryRoute" => {
                 self.primary_command(action, payload).await
@@ -1304,6 +1334,9 @@ impl RemoteAccessController {
         mut payload: Value,
         authorization: &RemoteAuthorization,
     ) -> anyhow::Result<Value> {
+        if self.closing.load(Ordering::Acquire) {
+            return Err(ApiError::new(503, "远程服务正在关闭，操作尚未派发").into());
+        }
         let instance_id = payload
             .get("instanceId")
             .map(|value| {
@@ -1891,7 +1924,9 @@ pub fn start_monitor() -> anyhow::Result<RemoteAccessMonitor> {
     let (shutdown, mut receiver) = tokio::sync::oneshot::channel();
     let task = tokio::spawn(async move {
         loop {
-            if let Ok(settings) = SettingsStore::default().load() {
+            if !controller.closing.load(Ordering::Acquire)
+                && let Ok(settings) = SettingsStore::default().load()
+            {
                 controller.reconcile(settings.remote_access).await;
             }
             tokio::select! {
@@ -1915,6 +1950,35 @@ pub async fn admin_request(action: &str, payload: Value) -> Value {
         )),
     };
     result.unwrap_or_else(|error| json!({"status":"failed","message":error.to_string()}))
+}
+
+async fn prepare_controller_shutdown() -> Value {
+    let Some(controller) = CONTROLLER.get() else {
+        return json!({"status":"stopped","cleanup":{"complete":true}});
+    };
+    controller.closing.store(true, Ordering::Release);
+    controller.publish_access_policy(&RemoteAccessSettings::default());
+    controller.claude.set_reconnect_enabled(false);
+    controller.harness.enabled.store(false, Ordering::Release);
+    let _serial = controller.shutdown_serial.lock().await;
+    if !controller.shutdown_complete.load(Ordering::Acquire) {
+        let settings = controller
+            .live
+            .lock()
+            .await
+            .settings
+            .clone()
+            .unwrap_or_default();
+        controller.reconcile(settings).await;
+        if controller.claude.record_clean_exit().is_err() {
+            let _ = crate::diagnostic_log::append_diagnostic_log(
+                "claude.cleanup_exit_journal_failed",
+                json!({"pendingStartupCheck":true}),
+            );
+        }
+        controller.shutdown_complete.store(true, Ordering::Release);
+    }
+    json!({"status":"stopped","cleanup":controller.claude.cleanup_report()})
 }
 
 pub async fn service_admin_request(action: &str, payload: Value) -> Value {
@@ -10839,7 +10903,7 @@ readline.createInterface({input:process.stdin}).on('line',line=>{
 
     #[tokio::test]
     async fn service_dispatch_rechecks_policy_at_the_queue_commit_boundary() {
-        for change in ["readonly", "stop", "expired"] {
+        for change in ["readonly", "stop", "closing", "expired"] {
             let (_directory, authorization) = service_dispatch_fixture().await;
             let mut permit = authorization.prepare_dispatch().await.unwrap();
             match change {
@@ -10856,6 +10920,10 @@ readline.createInterface({input:process.stdin}).on('line',line=>{
                     .controller
                     .running
                     .store(false, Ordering::SeqCst),
+                "closing" => authorization
+                    .controller
+                    .closing
+                    .store(true, Ordering::Release),
                 "expired" => permit.expires_at_ms = 0,
                 _ => unreachable!(),
             }
@@ -10872,7 +10940,7 @@ readline.createInterface({input:process.stdin}).on('line',line=>{
                 error.downcast_ref::<ApiError>().unwrap().code,
                 match change {
                     "readonly" => 403,
-                    "stop" => 503,
+                    "stop" | "closing" => 503,
                     _ => 401,
                 }
             );

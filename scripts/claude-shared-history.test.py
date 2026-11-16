@@ -960,7 +960,7 @@ class SharedQueueHistoryTests(unittest.TestCase):
         output = io.StringIO()
         with patch.dict(namespace, {"NativeSession": lambda *args: native}), \
                 patch.object(namespace["argparse"].ArgumentParser, "parse_args",
-                             return_value=SimpleNamespace(cli="unused", native_id="", job_id="", discover=False)), \
+                             return_value=SimpleNamespace(cli="unused", native_id="", job_id="", discover=False, cleanup=False)), \
                 patch.object(namespace["queue"], "Queue", return_value=incoming), \
                 patch.object(namespace["threading"], "Thread"), contextlib.redirect_stdout(output):
             namespace["main"]()
@@ -1347,6 +1347,92 @@ class SharedQueueHistoryTests(unittest.TestCase):
         self.assertFalse(result["stopped"])
         self.assertEqual(result["reason"], "active")
         run.assert_not_called()
+
+    def test_shutdown_done_turn_does_not_imply_worker_has_exited(self):
+        native = NativeSession("native-cli", "test-session", "saved-job")
+        native.read_messages = lambda: None
+        native.lookup = lambda: {"short": "saved-job", "sessionId": "test-session",
+                                  "tempo": "idle", "state": "done", "sessionStatus": "idle"}
+        native.read_terminal_screen = lambda: ["❯ ", "────────────────", "? for shortcuts"]
+        native.stop_job = MagicMock()
+        self.assertTrue(native.shutdown()["stopped"])
+        native.stop_job.assert_called_once()
+
+    def test_shutdown_preserves_native_draft_and_unknown_screen(self):
+        native = NativeSession("native-cli", "test-session", "saved-job")
+        native.read_messages = lambda: None
+        native.lookup = lambda: {"short": "saved-job", "sessionId": "test-session",
+                                  "tempo": "idle", "state": "idle", "sessionStatus": "idle"}
+        native.stop_job = MagicMock()
+        for lines, reason in ((["❯ 未发送的草稿", "────────────────"], "native_draft"),
+                              (["没有可核对的输入框"], "screen_unknown"),
+                              (["❯ ", "────────────────", "1 shell · ↓ to manage"], "background_work")):
+            native.current_screen = lambda value=lines: value
+            self.assertEqual(native.shutdown()["reason"], reason)
+        native.stop_job.assert_not_called()
+
+    def test_shutdown_rechecks_a_new_native_turn_before_stop(self):
+        native = NativeSession("native-cli", "test-session", "saved-job")
+        native.read_messages = lambda: None
+        idle = {"short": "saved-job", "sessionId": "test-session",
+                "tempo": "idle", "state": "idle", "sessionStatus": "idle"}
+        lookups = iter([idle, {**idle, "tempo": "active", "sessionStatus": "busy"}])
+        native.lookup = lambda: next(lookups)
+        native.current_screen = lambda: ["❯ ", "────────────────", "? for shortcuts"]
+        native.stop_job = MagicMock()
+        self.assertEqual(native.shutdown()["reason"], "state_changed")
+        native.stop_job.assert_not_called()
+
+    def test_shutdown_accepts_complete_borderless_idle_prompt_but_preserves_wrapped_draft(self):
+        native = NativeSession("native-cli", "test-session", "saved-job")
+        native.read_messages = lambda: None
+        native.lookup = lambda: {"short": "saved-job", "sessionId": "test-session",
+                                  "tempo": "idle", "state": "done", "sessionStatus": "idle"}
+        native.stop_job = MagicMock()
+        # 实际 2.1.325 后台快照在最终回复后显示裸提示符，没有旧版输入框的下横线。
+        native.current_screen = lambda: ["● 已完成", "", "❯", "", ""]
+        self.assertTrue(native.shutdown()["stopped"])
+        native.stop_job.assert_called_once()
+        native.stop_job.reset_mock()
+        native.current_screen = lambda: ["● 已完成", "", "❯", "第二行草稿", ""]
+        self.assertEqual(native.shutdown()["reason"], "native_draft")
+        native.current_screen = lambda: ["● 已完成", "", "❯"]
+        self.assertEqual(native.shutdown()["reason"], "screen_unknown")
+        native.stop_job.assert_not_called()
+
+    def test_shutdown_does_not_treat_unidentified_live_job_as_already_stopped(self):
+        native = NativeSession("native-cli", "test-session", "saved-job")
+        native.lookup = lambda: None
+        native.job_alive = lambda: True
+        native.stop_job = MagicMock()
+        self.assertEqual(native.shutdown()["reason"], "identity_unknown")
+        native.stop_job.assert_not_called()
+
+    def test_background_start_passes_wsl_timezone_in_native_session_settings(self):
+        native = NativeSession("native-cli", "")
+        native.model = "gpt-6.1-sol"
+        native.rpc = lambda operation: {"jobs": [{"short": "1234abcd", "sessionId": "test-session"}]}
+        native.bind = MagicMock()
+        with patch.dict(os.environ, {"TZ": "America/Los_Angeles"}), \
+                patch.object(namespace["subprocess"], "run") as run:
+            run.return_value.returncode = 0
+            run.return_value.stdout = b"backgrounded: 1234abcd"
+            run.return_value.stderr = b""
+            native.start("只查询当前时间")
+        arguments = run.call_args.args[0]
+        settings = json.loads(arguments[arguments.index("--settings") + 1])
+        self.assertEqual(settings["env"], {"TZ": "America/Los_Angeles"})
+        self.assertEqual(settings["worktree"], {"bgIsolation": "none"})
+        self.assertEqual(arguments[arguments.index("--model") + 1], "gpt-6.1-sol")
+
+    def test_timezone_missing_or_invalid_never_defaults_to_host_timezone(self):
+        with patch.dict(os.environ, {"TZ": ""}), \
+                patch.object(namespace["Path"], "resolve", return_value=Path("/unidentified/localtime")):
+            with self.assertRaises(namespace["NativeError"]):
+                namespace["native_time_zone"]()
+        with patch.dict(os.environ, {"TZ": "America/Los_Angeles\nUTC"}):
+            with self.assertRaises(namespace["NativeError"]):
+                namespace["native_time_zone"]()
 
     def test_idle_cli_version_skew_respawns_same_job_before_sending(self):
         native = NativeSession("native-cli", "test-session", "saved-job")

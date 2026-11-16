@@ -500,13 +500,27 @@ pub fn launch_codex_elves(request: LaunchRequest) -> CommandResult<Value> {
 }
 
 #[tauri::command]
-pub fn restart_codex_elves(request: LaunchRequest) -> CommandResult<Value> {
+pub async fn restart_codex_elves(request: LaunchRequest) -> CommandResult<Value> {
+    // 用户要求内置重启复用受控退出；先保存并等待安全回收，不能先强杀 launcher 使清理失去执行机会。
+    let cleanup = codex_elves_core::remote_access::prepare_service_shutdown("restart")
+        .await
+        .unwrap_or_else(|error| {
+            json!({
+                "status":"pending","message":format!("{error:#}"),"pendingStartupCheck":true
+            })
+        });
+    let _ = codex_elves_core::diagnostic_log::append_diagnostic_log(
+        "manager.restart_remote_cleanup",
+        cleanup.clone(),
+    );
     codex_elves_core::watcher::stop_launcher_processes_and_wait();
     codex_elves_core::watcher::stop_codex_processes_and_wait();
-    spawn_codex_elves_launch(
+    let mut result = spawn_codex_elves_launch(
         request,
         "ChatGPT/Codex 应用已请求重启，启动任务正在后台运行。",
-    )
+    );
+    result.payload["remoteCleanup"] = cleanup;
+    result
 }
 
 fn spawn_codex_elves_launch(

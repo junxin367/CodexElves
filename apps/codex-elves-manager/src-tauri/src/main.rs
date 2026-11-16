@@ -1,6 +1,32 @@
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
 fn main() {
+    if std::env::args().any(|arg| arg == "--prepare-remote-shutdown") {
+        // 安装包使用内嵌的新 helper；此入口不启动界面、launcher、代理或新的远程服务。
+        let result = tokio::runtime::Runtime::new()
+            .map_err(anyhow::Error::from)
+            .and_then(|runtime| {
+                runtime.block_on(codex_elves_core::remote_access::prepare_service_shutdown(
+                    "installer",
+                ))
+            });
+        let (code, value) = match result {
+            Ok(value) => (0, value),
+            Err(error) => (
+                1,
+                serde_json::json!({
+                    "status":"pending","message":format!("{error:#}"),
+                    "pendingStartupCheck":true
+                }),
+            ),
+        };
+        let _ = codex_elves_core::diagnostic_log::append_diagnostic_log(
+            "remote_access.prepare_shutdown",
+            value.clone(),
+        );
+        println!("{value}");
+        std::process::exit(code);
+    }
     if std::env::args().any(|arg| arg == "--remote-access-service") {
         let result = tokio::runtime::Runtime::new()
             .map_err(anyhow::Error::from)
