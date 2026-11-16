@@ -427,8 +427,20 @@ fn window_title(application: &Application, root: &Path) -> String {
         .unwrap_or_else(|| format!("{} · {}", application.label, display_path(root)))
 }
 
-fn command(application: &Application, root: &Path, terminal: Option<&Path>) -> Command {
-    let path = display_path(root);
+fn command(
+    application: &Application,
+    root: &Path,
+    terminal: Option<&Path>,
+    file: Option<&Path>,
+) -> Command {
+    let path = display_path(file.unwrap_or(root));
+    // 正文打开编辑器时传入原文件；终端进入文件所在目录，WSL 仍按原会话身份恢复，不能执行文件内容或另建对话。
+    let directory = if application.target == "wsl" || application.target == "githubDesktop" {
+        root
+    } else {
+        file.and_then(Path::parent).unwrap_or(root)
+    };
+    let directory_path = display_path(directory);
     let mut command = Command::new(terminal.unwrap_or(&application.executable));
     if terminal.is_some() {
         // 用户要求终端在当前会话目录可见打开；显式指定 PowerShell/WSL，不能误用 Windows Terminal 的默认配置。
@@ -437,9 +449,9 @@ fn command(application: &Application, root: &Path, terminal: Option<&Path>) -> C
             "new",
             "new-tab",
             "-d",
-            &path,
+            &directory_path,
             "--title",
-            &window_title(application, root),
+            &window_title(application, directory),
             "--suppressApplicationTitle",
         ]);
         command.arg(&application.executable);
@@ -447,13 +459,17 @@ fn command(application: &Application, root: &Path, terminal: Option<&Path>) -> C
     match application.target {
         "githubDesktop" => {
             // GitHub Desktop 原生 CLI 使用 --cli-open；--path 只会启动程序而不会切到指定仓库。
-            command.arg("--cli-open").arg(&path);
+            command.arg("--cli-open").arg(display_path(root));
+        }
+        "fileManager" if file.is_some() => {
+            // 用户要求在 File Explorer 定位所点文件；固定 /select 参数与路径作为一个参数，不经 shell 拼接执行。
+            command.arg(format!("/select,{path}"));
         }
         "gitBash" => {
-            command.arg(format!("--cd={path}"));
+            command.arg(format!("--cd={directory_path}"));
         }
         "cmder" => {
-            command.arg("/START").arg(&path);
+            command.arg("/START").arg(&directory_path);
         }
         "powershell" => {
             command.arg("-NoExit");
@@ -487,7 +503,7 @@ fn command(application: &Application, root: &Path, terminal: Option<&Path>) -> C
     }
     // 用户选择的是可见应用；不能沿用后台 CLI 的 CREATE_NO_WINDOW，也不经 cmd/PowerShell 拼接命令。
     command
-        .current_dir(root)
+        .current_dir(directory)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -508,7 +524,13 @@ pub(super) fn launch(application: &Application, root: &Path) -> Result<LaunchOut
     let terminal = matches!(application.target, "powershell" | "wsl")
         .then(windows_terminal)
         .flatten();
-    let mut command = command(application, root, terminal.as_deref());
+    // 应用列表读取后文件可能被替换；实际启动前再次核对同一个允许根目录内的原文件，不能只相信网页路径。
+    let file = application
+        .file
+        .as_ref()
+        .map(|file| super::super::workspace::open_in_file_path(&file.root, &file.relative))
+        .transpose()?;
+    let mut command = command(application, root, terminal.as_deref(), file.as_deref());
     let snapshot = foreground::Snapshot::capture();
     // 用户要求应用/文件夹打开后可见：通过 Windows Shell 正常显示启动，再恢复并激活对应目标窗口；不模拟键盘或修改系统焦点策略。
     let process_id = start::launch(&mut command)
@@ -518,7 +540,15 @@ pub(super) fn launch(application: &Application, root: &Path) -> Result<LaunchOut
         application,
         terminal.as_deref(),
         process_id,
-        root,
+        if application.target == "wsl" || application.target == "githubDesktop" {
+            root
+        } else if application.target == "fileManager"
+            || matches!(application.target, "powershell" | "gitBash" | "cmder")
+        {
+            file.as_deref().and_then(Path::parent).unwrap_or(root)
+        } else {
+            file.as_deref().unwrap_or(root)
+        },
     );
     Ok(LaunchOutcome {
         foreground: focus,
@@ -541,6 +571,7 @@ mod tests {
             label: target,
             executable: executable.into(),
             wsl_session: None,
+            file: None,
         }
     }
 
@@ -554,15 +585,26 @@ mod tests {
     #[test]
     fn editors_receive_one_workspace_path_and_terminals_receive_start_directories() {
         let root = Path::new(r"E:\工作区 with spaces\a;b");
-        let idea = command(&application("intellij", r"C:\Apps\idea64.exe"), root, None);
+        let idea = command(
+            &application("intellij", r"C:\Apps\idea64.exe"),
+            root,
+            None,
+            None,
+        );
         assert_eq!(args(&idea), [root.to_str().unwrap()]);
-        let powershell = command(&application("powershell", r"C:\Apps\pwsh.exe"), root, None);
+        let powershell = command(
+            &application("powershell", r"C:\Apps\pwsh.exe"),
+            root,
+            None,
+            None,
+        );
         assert_eq!(args(&powershell), ["-NoExit"]);
         assert_eq!(powershell.get_current_dir(), Some(root));
         let powershell = command(
             &application("powershell", r"C:\Apps\pwsh.exe"),
             root,
             Some(Path::new(r"C:\Apps\wt.exe")),
+            None,
         );
         assert_eq!(powershell.get_program(), OsString::from(r"C:\Apps\wt.exe"));
         let values = args(&powershell);
@@ -584,6 +626,47 @@ mod tests {
     }
 
     #[test]
+    fn file_editors_receive_exact_file_and_explorer_selects_it_without_a_shell() {
+        let root = Path::new(r"E:\repo");
+        let file = Path::new(r"E:\repo\子目录 with spaces\a;b.ts");
+        for target in ["vscode", "visualStudio", "intellij", "sublimeText", "rider"] {
+            let editor = command(
+                &application(target, r"C:\Apps\editor.exe"),
+                root,
+                None,
+                Some(file),
+            );
+            assert_eq!(args(&editor), [file.to_str().unwrap()], "{target}");
+            assert_eq!(editor.get_current_dir(), file.parent());
+        }
+        let explorer = command(
+            &application("fileManager", r"C:\Windows\explorer.exe"),
+            root,
+            None,
+            Some(file),
+        );
+        assert_eq!(args(&explorer), [format!("/select,{}", file.display())]);
+        let bash = command(
+            &application("gitBash", r"C:\Apps\git-bash.exe"),
+            root,
+            None,
+            Some(file),
+        );
+        assert_eq!(
+            args(&bash),
+            [format!("--cd={}", file.parent().unwrap().display())]
+        );
+        let powershell = command(
+            &application("powershell", r"C:\Apps\pwsh.exe"),
+            root,
+            None,
+            Some(file),
+        );
+        assert_eq!(args(&powershell), ["-NoExit"]);
+        assert_eq!(powershell.get_current_dir(), file.parent());
+    }
+
+    #[test]
     fn wsl_keeps_session_identity_even_for_a_windows_mounted_project() {
         let mut application = application("wsl", r"C:\Windows\System32\wsl.exe");
         application.wsl_session = Some(super::super::WslSession {
@@ -599,7 +682,7 @@ mod tests {
             r"E:\项目",
             r"\\wsl.localhost\codex-elves-claude-test\home\junes\项目",
         ] {
-            let command = command(&application, Path::new(root), None);
+            let command = command(&application, Path::new(root), None, None);
             assert_eq!(
                 args(&command),
                 [
@@ -682,6 +765,7 @@ mod tests {
                 label,
                 executable,
                 wsl_session: None,
+                file: None,
             },
             &root,
         )

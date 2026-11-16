@@ -62,6 +62,8 @@ function normalizeTargets(result, context) {
   if (result?.ok !== true || typeof result.root !== "string" || !result.root
       || result.root.length > 32768 || !Array.isArray(result.targets))
     throw new Error("工作区应用列表无效，请重新打开会话。");
+  if (context?.path && result.path !== context.path)
+    throw new Error("应用列表与所选文件不一致，请重新打开文件菜单。");
   const seen = new Set();
   const targets = result.targets.filter(target => target && applicationIds.has(target.target)
       && (target.target !== "wsl" || context?.wslInstance === true)
@@ -87,7 +89,7 @@ function preferredTarget(context, result) {
 
 const workspaceOpenRequests = new Set();
 async function performWorkspaceOpenIn(context, chosen, owns) {
-  const key = JSON.stringify([context.scope, context.threadId]);
+  const key = JSON.stringify([context.scope, context.threadId, context.path || ""]);
   if (!owns(context) || workspaceOpenRequests.has(key)) return null;
   workspaceOpenRequests.add(key);
   let dispatching = false, timer = null, operationKey = null;
@@ -95,7 +97,9 @@ async function performWorkspaceOpenIn(context, chosen, owns) {
     const controller = new AbortController();
     timer = setTimeout(() => controller.abort(), 45000);
     // 顶部 Open in 与会话右键菜单共用持久回执；结果未知时仅核对同一请求，不能重复启动应用。
-    operationKey = `codex-elves-open-in-request-v1:${JSON.stringify([context.scope, context.threadId, chosen.target])}`;
+    // 文件操作按路径隔离回执；目录操作保留既有存储键，结果未知时不能被另一个文件的点击覆盖。
+    operationKey = `codex-elves-open-in-request-v1:${JSON.stringify([context.scope, context.threadId, chosen.target,
+      ...(context.path ? [context.path] : [])])}`;
     let requestId;
     try {
       requestId = sessionStorage.getItem(operationKey);
@@ -107,7 +111,8 @@ async function performWorkspaceOpenIn(context, chosen, owns) {
     if (!owns(context)) return null;
     dispatching = true;
     const response = await api("/api/workspace/open-in",
-      { threadId: context.threadId, target: chosen.target }, requestId, controller.signal);
+      { threadId: context.threadId, target: chosen.target, ...(context.path ? { path: context.path } : {}) },
+      requestId, controller.signal);
     const receipt = validateRemoteReceipt(response, requestId);
     if (receipt.state === "failed") {
       sessionStorage.removeItem(operationKey);
@@ -116,12 +121,16 @@ async function performWorkspaceOpenIn(context, chosen, owns) {
     }
     if (receipt.state !== "completed") throw new Error("无法确认应用启动结果");
     const opened = receipt.result;
-    if (opened.target !== chosen.target || typeof opened.root !== "string")
+    if (opened.target !== chosen.target || typeof opened.root !== "string"
+        || context.path && opened.path !== context.path)
       throw new Error("无法确认应用启动结果");
     sessionStorage.removeItem(operationKey);
     if (!owns(context)) return null;
-    try { localStorage.setItem(preferenceKey(context, opened.root), chosen.target); }
-    catch { notice("应用启动请求已提交，但首选打开方式未能保存。", true); }
+    // 正文选择某个文件的打开程序，不改变顶部按工作目录记忆的首选应用。
+    if (!context.path) {
+      try { localStorage.setItem(preferenceKey(context, opened.root), chosen.target); }
+      catch { notice("应用启动请求已提交，但首选打开方式未能保存。", true); }
+    }
     // 启动成功但未确认前台时保留成功回执，只提示在任务栏查看，不能再次启动。
     if (typeof opened.warning === "string" && opened.warning.trim()) notice(opened.warning);
     return opened;
@@ -309,10 +318,25 @@ export function threadOpenInMenu(item, { isAvailable = () => true } = {}) {
     ...(sidebar?.recent || []), ...(sidebar?.pinnedThreads || []),
     ...(sidebar?.projects || []).flatMap(project => project.threads || [])
   ].find(value => value.id === item.id)) : null;
+  return createWorkspaceOpenInMenu(context, current);
+}
+
+export function fileOpenInMenu(path, { getItem } = {}) {
+  // 文件路径只附着于原会话身份；实际相对目录、Windows/WSL 映射及文件权限均由独立服务验证。
+  const current = () => {
+    const context = sidebarOpenInContext(getItem?.());
+    return context && typeof path === "string" && path.trim()
+      ? { ...context, path, key: JSON.stringify([context.key, path]) } : null;
+  };
+  return createWorkspaceOpenInMenu(current(), current);
+}
+
+function createWorkspaceOpenInMenu(context, current) {
   const owns = expected => !!expected && current()?.key === expected.key;
   const read = async signal => {
     if (!owns(context)) throw new Error("会话已变化，请重新打开菜单。");
-    const value = await api("/api/workspace/open-in-targets", { threadId: context.threadId }, undefined, signal);
+    const value = await api("/api/workspace/open-in-targets",
+      { threadId: context.threadId, ...(context.path ? { path: context.path } : {}) }, undefined, signal);
     if (!owns(context)) throw new Error("会话已变化，请重新打开菜单。");
     return normalizeTargets(value, context);
   };
@@ -328,7 +352,7 @@ export function threadOpenInMenu(item, { isAvailable = () => true } = {}) {
       if (owns(context) && error.name !== "AbortError") notice(error.message || "无法打开工作区", true);
     }
   };
-  return { disabled: !context, submenuKey: context?.key, submenuWidth: 178,
+  return { disabled: !context, submenuKey: context?.key, submenuWidth: 178, openTarget: activate,
     submenuClassName: "workspace-open-in-menu",
     submenu: async ({ signal }) => {
       const result = await read(signal);

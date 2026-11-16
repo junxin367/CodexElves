@@ -7,6 +7,8 @@ import { createSidebarPreferenceStore } from "../assets/remote-access/recovery-s
 import { createSelectComponent } from "../assets/remote-access/ui/select.js";
 import { mountInstancePermissions, permissionLabel, permissionModeKnown, permissionOptions } from "../assets/remote-access/permissions.js";
 import { menuHorizontalLeft } from "../assets/remote-access/ui/position.js";
+import { localFileReference } from "../assets/remote-access/file-reference.js";
+import { marked, Renderer } from "../assets/remote-access/vendor/marked.esm.js";
 
 function storage() {
   const records = new Map();
@@ -84,6 +86,76 @@ const workspaceOpenInSource = await readFile(new URL("../assets/remote-access/fe
 const popupSource = await readFile(new URL("../assets/remote-access/ui/popup.js", import.meta.url), "utf8");
 const markdownRendererSource = await readFile(new URL("../assets/remote-access/markdown-renderer.js", import.meta.url), "utf8");
 const devServerSource = await readFile(new URL("./dev-remote-access.mjs", import.meta.url), "utf8");
+const markdownSource = await readFile(new URL("../assets/remote-access/markdown.js", import.meta.url), "utf8");
+
+test("正文文件引用接受相对和绝对路径，纯文件名及文件名行号保持普通内容", () => {
+  for (const value of ["README.md", "app.ts", "app.ts:12", "README.md#L10", "LICENSE", "README%2Emd"])
+    assert.equal(localFileReference(value, true), null, value);
+  for (const [value, path, line] of [
+    ["src/app.ts", "src/app.ts", null], ["./README.md", "./README.md", null],
+    ["src\\app.ts:12:3", "src/app.ts", 12], [".\\README.md", "./README.md", null],
+    ["E:\\repo\\app.ts#L9", "E:/repo/app.ts", 9], ["/home/junes/repo/app.ts", "/home/junes/repo/app.ts", null],
+    ["file:///E:/repo/app.ts", "E:/repo/app.ts", null], ["src%2Fapp.ts", "src/app.ts", null]
+  ]) assert.deepEqual(localFileReference(value), { path, name: path.split("/").at(-1), line });
+  for (const value of ["https://example.com/app.ts", "javascript:alert(1)", "file://other-host/app.ts"])
+    assert.equal(localFileReference(value, true), null, value);
+});
+
+test("正文 Markdown 只给有路径的文字、代码和链接添加文件操作，纯文件名无文件菜单元数据", () => {
+  const context = rawVm.createContext({ localFileReference, videoPreviewMarkup: () => "",
+    dependencies: { marked, Renderer, createDOMPurify: () => ({ addHook() {}, sanitize: html => html }) } });
+  rawVm.runInContext(markdownRendererSource.replace(/^import .*;$/gm, "").replace(/^export /gm, "")
+    + "\nglobalThis.fixture = createMarkdownRenderer(dependencies);", context);
+  const plain = context.fixture.markdown("README.md `app.ts:12` [README.md](README.md)");
+  assert.doesNotMatch(plain, /data-local-file-path|local-file-reference/);
+  assert.match(plain, /README\.md/); assert.match(plain, /<code>app\.ts:12<\/code>/);
+  const files = context.fixture.markdown("src/app.ts `./README.md` [app.ts](src/app.ts#L12)");
+  assert.equal((files.match(/data-local-file-path=/g) || []).length, 3);
+  assert.match(files, /data-local-file-path="src\/app\.ts" data-local-file-line="12"/);
+  assert.match(context.fixture.markdown("[README.md](README.md)", [], { fileDocument: true }),
+    /data-local-file-path="README\.md"/, "文件预览文档仍保留其相对文档链接");
+});
+
+test("文件引用绑定忽略旧缓存中的纯文件名，只给真实路径绑定右键和长按", () => {
+  const link = path => ({ dataset: { localFilePath: path }, events: new Map(),
+    addEventListener(name, action) { this.events.set(name, action); } });
+  const links = [link("README.md"), link("app.ts:12"), link("src/app.ts"), link("./README.md")];
+  const context = rawVm.createContext({ localFileReference });
+  rawVm.runInContext(markdownSource.slice(markdownSource.indexOf("export function bindLocalFileReferences("),
+    markdownSource.indexOf('\ndocument.addEventListener("click"')).replace(/^export /, ""), context);
+  context.bindLocalFileReferences({ querySelectorAll: () => links });
+  assert.equal(links[0].events.size, 0); assert.equal(links[1].events.size, 0);
+  for (const value of links.slice(2)) {
+    assert.ok(value.events.has("contextmenu")); assert.ok(value.events.has("pointerdown"));
+  }
+});
+
+test("正文文件菜单固定四项，相对路径预览基于会话 cwd，旧会话不能借用当前身份", () => {
+  const opened = [], copied = [], native = [];
+  const context = nodeVm.createContext({ pageLeaving: false, selectedId: "main",
+    localFileReference,
+    session: { device: { id: "device" } }, thread: { id: "main", cwd: "E:\\repo\\packages\\client", instanceId: "codex:local" },
+    privateInputScope: value => value?.device.id,
+    currentFileBrowserThreadId: () => context.selectedId, copyText: value => copied.push(value),
+    fileOpenInMenu: (path, { getItem }) => ({ disabled: !getItem(), submenu: [],
+      openTarget: target => { if (getItem()) native.push([path, target.target]); } }) });
+  nodeVm.runInContext(sourceSection("function localFileMenuOwner("), context);
+  const actions = context.localFileReferenceActions({ openFile: (...value) => opened.push(value) });
+  const options = actions.getMenuOptions("src/app.ts", 12);
+  assert.deepEqual(Array.from(options, option => option.label), [
+    "打开文件", "在 File Explorer 打开", "打开方式", "复制路径"
+  ]);
+  options[0].action(); options[1].action(); options[3].action();
+  assert.deepEqual(opened, [["E:/repo/packages/client/src/app.ts", 12]]);
+  assert.deepEqual(native, [["src/app.ts", "fileManager"]]); assert.deepEqual(copied, ["src/app.ts"]);
+  actions.openFile("./README.md", null);
+  assert.deepEqual(opened.at(-1), ["E:/repo/packages/client/README.md", null]);
+  actions.openFile("E:\\repo\\packages\\client\\src\\absolute.ts", 4);
+  assert.deepEqual(opened.at(-1), ["E:/repo/packages/client/src/absolute.ts", 4]);
+  context.selectedId = "other";
+  options[0].action(); options[1].action(); options[3].action();
+  assert.equal(opened.length, 3); assert.equal(native.length, 1); assert.equal(copied.length, 1);
+});
 
 function localFileBrowserHarness({ android = false, desktop = true, nativeClient = false } = {}) {
   const opened = [], requests = [], notices = [];
@@ -3100,6 +3172,69 @@ test("会话右键打开方式在异步准备后复核授权和删除状态，�
     await targets[0].action();
     assert.equal(writes, 0, change);
   }
+});
+
+test("正文文件打开方式携带所点相对路径，保留图标列表且不改写工作区首选程序", async () => {
+  const requests = [], disk = storage(), preferences = storage();
+  disk.removeItem = key => disk.records.delete(key);
+  preferences.setItem("existing-workspace-preference", "vscode");
+  const item = { id: "main", cwd: "E:\\repo\\packages\\client", instanceId: "codex:local" };
+  const context = rawVm.createContext({ nativeConnectionVersion: 1, pageLeaving: false,
+    session: { device: { id: "device" }, capabilities: { workspaceOpenIn: true } },
+    privateInputScope: value => value.device.id, threadReadOnly: () => false,
+    AbortController, setTimeout, clearTimeout, notice() {}, sessionStorage: disk, localStorage: preferences,
+    randomId: () => "file-request", validateRemoteReceipt: value => value,
+    api: async (path, payload, requestId) => {
+      requests.push({ path, payload: JSON.parse(JSON.stringify(payload)), requestId });
+      return path.endsWith("targets") ? { ok: true, root: item.cwd, path: payload.path, targets: [
+        { target: "vscode", label: "VS Code", available: true },
+        { target: "fileManager", label: "File Explorer", available: true }
+      ] } : { state: "completed", result: { target: payload.target, root: item.cwd, path: payload.path } };
+    } });
+  rawVm.runInContext(workspaceOpenInSource.slice(workspaceOpenInSource.indexOf("const applicationIds ="),
+    workspaceOpenInSource.indexOf("const applicationPaths ="))
+    + workspaceOpenInSource.slice(workspaceOpenInSource.indexOf("function normalizeTargets("),
+      workspaceOpenInSource.indexOf("export function mountWorkspaceOpenIn("))
+    + workspaceOpenInSource.slice(workspaceOpenInSource.indexOf("function sidebarOpenInContext("))
+      .replace(/^export /gm, ""), context);
+  const menu = context.fileOpenInMenu("src/app.ts", { getItem: () => item });
+  const targets = await menu.submenu({});
+  assert.deepEqual(Array.from(targets, target => target.value), ["vscode", "fileManager"]);
+  await targets[0].action();
+  assert.equal(requests.length, 3);
+  assert.ok(requests.every(request => request.payload.threadId === item.id && request.payload.path === "src/app.ts"));
+  assert.equal(requests[2].payload.target, "vscode");
+  assert.equal(preferences.records.size, 1); assert.equal(disk.records.size, 0);
+  context.api = async () => ({ ok: true, root: item.cwd, path: "other/file.ts", targets: [] });
+  await assert.rejects(menu.submenu({}), /所选文件不一致/);
+});
+
+test("正文不同文件的打开回执分别保留，结果未知不自动重发或打开工作区兜底", async () => {
+  const disk = storage(), writes = [], notices = [];
+  disk.removeItem = key => disk.records.delete(key);
+  const item = { id: "main", cwd: "E:\\repo", instanceId: "codex:local" };
+  let sequence = 0;
+  const context = rawVm.createContext({ nativeConnectionVersion: 1, pageLeaving: false,
+    session: { device: { id: "device" }, capabilities: { workspaceOpenIn: true } },
+    privateInputScope: value => value.device.id, threadReadOnly: () => false,
+    AbortController, setTimeout, clearTimeout, notice: value => notices.push(value), sessionStorage: disk,
+    localStorage: storage(), randomId: () => `file-request-${++sequence}`, validateRemoteReceipt: value => value,
+    api: async (path, payload, requestId) => {
+      if (path.endsWith("targets")) return { ok: true, root: item.cwd, path: payload.path,
+        targets: [{ target: "fileManager", label: "File Explorer", available: true }] };
+      writes.push([payload.path, requestId]); return { state: "accepted" };
+    } });
+  rawVm.runInContext(workspaceOpenInSource.slice(workspaceOpenInSource.indexOf("const applicationIds ="),
+    workspaceOpenInSource.indexOf("const applicationPaths ="))
+    + workspaceOpenInSource.slice(workspaceOpenInSource.indexOf("function normalizeTargets("),
+      workspaceOpenInSource.indexOf("export function mountWorkspaceOpenIn("))
+    + workspaceOpenInSource.slice(workspaceOpenInSource.indexOf("function sidebarOpenInContext("))
+      .replace(/^export /gm, ""), context);
+  for (const path of ["src/first.ts", "./README.md"])
+    await context.fileOpenInMenu(path, { getItem: () => item }).openTarget({ target: "fileManager" });
+  assert.deepEqual(writes, [["src/first.ts", "file-request-1"], ["./README.md", "file-request-2"]]);
+  assert.equal(disk.records.size, 2);
+  assert.ok(notices.every(value => value.includes("未能确认应用启动结果")));
 });
 
 function workspaceOpenInPositionHarness() {

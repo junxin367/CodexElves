@@ -1,29 +1,5 @@
 import { videoPreviewMarkup } from "./attachments.js";
-
-function localFileReference(value, explicit = false) {
-  let path = String(value ?? "").trim(), line = null;
-  if (!path || path.length > 16384 || /[\u0000-\u001f\u007f<>"`]/u.test(path)) return null;
-  const position = /(?::([1-9]\d*)(?::[1-9]\d*)?|#L([1-9]\d*)(?:C\d+)?(?:-L?\d+(?:C\d+)?)?)$/u.exec(path);
-  if (position) { line = Number(position[1] || position[2]); path = path.slice(0, position.index); }
-  if (/^file:/iu.test(path)) {
-    try {
-      const url = new URL(path);
-      if (url.hostname && url.hostname !== "localhost") return null;
-      path = decodeURIComponent(url.pathname);
-    } catch { return null; }
-  } else {
-    if (/^[a-z][a-z\d+.-]*:/iu.test(path) && !/^[a-z]:[\\/]/iu.test(path)) return null;
-    try { path = decodeURIComponent(path); } catch { return null; }
-  }
-  path = path.replaceAll("\\", "/");
-  if (/^\/[a-z]:\//iu.test(path)) path = path.slice(1);
-  if (path.startsWith("//") || path.startsWith("#") || /[\u0000-\u001f\u007f?#]/u.test(path)) return null;
-  const name = path.split("/").at(-1);
-  if (!name || name === "." || name === "..") return null;
-  if (!explicit && !/\.(?:md|mdx|txt|rst|log|json|jsonl|ya?ml|toml|xml|ini|conf|config|csv|tsv|js|mjs|cjs|jsx|ts|tsx|vue|svelte|css|scss|less|html?|rs|py|java|kt|kts|go|c|cc|cpp|h|hpp|cs|swift|sh|ps1|bat|sql|proto|gradle|properties|png|jpe?g|gif|webp|svg|pdf)$/iu.test(name)
-      && !/^(?:README|LICENSE|Dockerfile|Makefile|Cargo\.lock|\.gitignore|\.env)$/u.test(name)) return null;
-  return { path, name, line: Number.isSafeInteger(line) && line <= 1000000 ? line : null };
-}
+import { localFileReference } from "./file-reference.js";
 
 export function createMarkdownRenderer({ marked, Renderer, createDOMPurify }) {
 
@@ -63,7 +39,7 @@ export function createMarkdownRenderer({ marked, Renderer, createDOMPurify }) {
     ? renderer.parser.parseInline(token.tokens)
     : escapeHtml(token.text);
 
-  const createRenderer = (remoteImages, { userMessage = false, skills = [], skillLink, remoteVideos = [] } = {}) => {
+  const createRenderer = (remoteImages, { userMessage = false, skills = [], skillLink, remoteVideos = [], fileDocument = false } = {}) => {
     const registeredVideos = new Map((Array.isArray(remoteVideos) ? remoteVideos : [])
       .filter(video => typeof video?.source === "string").map(video => [video.source, video]));
     const registeredImages = new Map();
@@ -93,7 +69,7 @@ export function createMarkdownRenderer({ marked, Renderer, createDOMPurify }) {
       let result = "", start = 0;
       for (const match of text.matchAll(pattern)) {
         const candidate = match[0].replace(/[.,;!?]+$/u, "");
-        const reference = localFileReference(candidate);
+        const reference = localFileReference(candidate, false, fileDocument);
         if (!reference || match.index > 0 && /[\p{L}\p{N}_@:/\\.-]/u.test(text[match.index - 1])) continue;
         result += escapeHtml(text.slice(start, match.index)) + fileLink(reference);
         start = match.index + candidate.length;
@@ -110,7 +86,7 @@ export function createMarkdownRenderer({ marked, Renderer, createDOMPurify }) {
     };
     const renderCodespan = renderer.codespan;
     renderer.codespan = function (token) {
-      const reference = !linkDepth && localFileReference(token.text);
+      const reference = !linkDepth && localFileReference(token.text, false, fileDocument);
       return reference ? fileLink(reference) : renderCodespan.call(this, token);
     };
 
@@ -144,9 +120,9 @@ export function createMarkdownRenderer({ marked, Renderer, createDOMPurify }) {
         return `<a href="${escapeHtml(href)}"${title} target="_blank" rel="noopener noreferrer">${label}</a>`;
       }
       if (isLocalReference(token.href)) {
-        const reference = localFileReference(token.href, true);
+        const reference = localFileReference(token.href, true, fileDocument);
         if (reference) return fileLink(reference);
-        return `<span class="local-file-reference" title="${escapeHtml(token.href)}">${label}</span>`;
+        return label;
       }
       return label;
     };
@@ -198,7 +174,7 @@ export function createMarkdownRenderer({ marked, Renderer, createDOMPurify }) {
   };
 
   purifier.addHook("uponSanitizeAttribute", (_node, data) => {
-    if (data.attrName === "data-local-file-path" && !localFileReference(data.attrValue, true)) data.keepAttr = false;
+    if (data.attrName === "data-local-file-path" && !localFileReference(data.attrValue, true, true)) data.keepAttr = false;
     if (data.attrName === "href" && safeHref(data.attrValue) === null && safeImagePath(data.attrValue) === null) {
       data.keepAttr = false;
     }
@@ -209,7 +185,7 @@ export function createMarkdownRenderer({ marked, Renderer, createDOMPurify }) {
     }
   });
 
-  function markdown(text, remoteImages = [], { userMessage = false, skills = [], skillLink, remoteVideos = [], inline = false } = {}) {
+  function markdown(text, remoteImages = [], { userMessage = false, skills = [], skillLink, remoteVideos = [], inline = false, fileDocument = false } = {}) {
     const source = String(text ?? "");
     if (inline) {
       const renderer = new Renderer();
@@ -226,7 +202,7 @@ export function createMarkdownRenderer({ marked, Renderer, createDOMPurify }) {
       breaks: userMessage,
       gfm: true,
       pedantic: false,
-      renderer: createRenderer(remoteImages, { userMessage, skills, skillLink, remoteVideos })
+      renderer: createRenderer(remoteImages, { userMessage, skills, skillLink, remoteVideos, fileDocument })
     });
     return purifier.sanitize(html, sanitizeOptions);
   }

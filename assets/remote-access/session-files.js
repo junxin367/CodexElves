@@ -1029,12 +1029,14 @@ export function mountSessionFiles({
       }));
     } else if (value.kind === "text" && !sourceMode) {
       const document = node("div", "markdown session-files-markdown");
-      document.innerHTML = markdown(value.text);
+      // 用户此次只限制会话正文；文件预览中的 README.md 等文档相对链接继续按当前文档目录导航。
+      document.innerHTML = markdown(value.text, [], { fileDocument: true });
       for (const copy of document.querySelectorAll(".copy-code")) {
         if (copyText) copy.onclick = () => void copyText(copy.closest(".code-block").querySelector("code").textContent);
         else copy.remove();
       }
       bindLocalFileReferences(document, {
+        allowFilename: true,
         openFile: (reference, line) => {
           const path = resolveDocumentReference(reference);
           if (path) {

@@ -343,6 +343,13 @@ fn local_browser_file_url(root: &Path, requested: &str) -> Result<reqwest::Url, 
         .map_err(|_| ApiError::new(422, "无法转换本地文件地址"))
 }
 
+pub(super) fn open_in_file_path(root: &Path, relative: &str) -> Result<PathBuf, ApiError> {
+    // 正文 Open in 只使用同一会话允许读取的原文件；复用逐级链接检查和已打开句柄校验，不读取或复制正文。
+    let _file =
+        open_local(root, relative)?.ok_or_else(|| ApiError::new(404, "文件不存在或已被删除"))?;
+    Ok(root.join(relative))
+}
+
 #[cfg(windows)]
 fn launch_system_browser(target: &reqwest::Url) -> Result<(), ApiError> {
     use std::os::windows::ffi::OsStringExt;
@@ -574,7 +581,7 @@ fn workspace_root_matches(cwd: &Path, root: &Path) -> bool {
             }))
 }
 
-async fn resolve_file_target(
+pub(super) async fn resolve_file_target(
     cwd: PathBuf,
     context: &Value,
     requested: &str,
@@ -3694,6 +3701,25 @@ mod tests {
             local_browser_file_url(&root, "missing.html")
                 .unwrap_err()
                 .code,
+            404
+        );
+    }
+
+    #[test]
+    fn open_in_file_paths_keep_preview_boundaries_and_reject_non_files() {
+        let fixture = fixture_dir();
+        let root = std::fs::canonicalize(fixture.path()).unwrap();
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(root.join("src/app.ts"), "export {};").unwrap();
+        assert_eq!(
+            open_in_file_path(&root, "src/app.ts").unwrap(),
+            root.join("src/app.ts")
+        );
+        for invalid in ["../private.txt", ".git/config", "src"] {
+            assert!(open_in_file_path(&root, invalid).is_err(), "{invalid}");
+        }
+        assert_eq!(
+            open_in_file_path(&root, "src/missing.ts").unwrap_err().code,
             404
         );
     }

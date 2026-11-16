@@ -1,3 +1,6 @@
+import { localFileReference } from "./file-reference.js";
+import { activePopup, closePopup, openPopup } from "./ui/popup.js";
+
 // 格式增强不属于登录和会话请求的启动依赖；未就绪时只显示安全的纯文本。
 const stateEvent = "codex-elves-markdown-state";
 const maximumRetries = 2;
@@ -249,76 +252,40 @@ export function settleMessageImage(image) {
   image.closest(".message-image-link")?.classList.remove("message-image-loading");
 }
 
-let localFileMenu = null;
-let localFileMenuLayer = null;
-let localFileMenuClose = null;
+let localFileMenuTrigger = null;
 
 function closeLocalFileMenu() {
-  localFileMenuClose?.();
-  localFileMenuClose = null;
+  if (localFileMenuTrigger && activePopup?.trigger === localFileMenuTrigger) closePopup();
+  localFileMenuTrigger = null;
 }
 
-function ensureLocalFileMenu() {
-  if (localFileMenu?.isConnected) return localFileMenu;
-  localFileMenuLayer = document.createElement("div");
-  localFileMenuLayer.className = "local-file-reference-menu-layer";
-  localFileMenuLayer.hidden = true;
-  localFileMenu = document.createElement("div");
-  localFileMenu.className = "local-file-reference-menu";
-  localFileMenu.setAttribute("role", "menu");
-  localFileMenu.setAttribute("aria-label", "文件引用操作");
-  localFileMenuLayer.append(localFileMenu);
-  document.body.append(localFileMenuLayer);
-  return localFileMenu;
-}
-
-function showLocalFileMenu(link, position, { openFile, openBrowser }) {
-  const menu = ensureLocalFileMenu();
+function showLocalFileMenu(link, position, { openFile, openBrowser, getMenuOptions, allowFilename }) {
+  const reference = localFileReference(link.dataset.localFilePath, true, allowFilename);
+  if (!reference) return;
   closeLocalFileMenu();
-  menu.replaceChildren();
-  const path = link.dataset.localFilePath || "";
+  const path = reference.path;
   const line = Number(link.dataset.localFileLine) || null;
-  const addAction = (label, callback) => {
-    const button = document.createElement("button");
-    button.type = "button";
-    button.className = "local-file-reference-menu-item";
-    button.setAttribute("role", "menuitem");
-    button.textContent = label;
-    button.disabled = typeof callback !== "function";
-    button.addEventListener("click", event => {
-      event.preventDefault();
-      event.stopPropagation();
-      closeLocalFileMenu();
-      if (button.disabled) return;
-      try { void callback(path, line); } catch {}
-    });
-    menu.append(button);
-    return button;
-  };
-  const file = addAction("文件", openFile);
-  addAction("浏览器", openBrowser);
-  localFileMenuLayer.hidden = false;
-  menu.style.left = "0px";
-  menu.style.top = "0px";
-  const margin = 8;
-  const rect = menu.getBoundingClientRect();
-  const maxLeft = Math.max(margin, innerWidth - rect.width - margin);
-  const maxTop = Math.max(margin, innerHeight - rect.height - margin);
-  const left = Math.min(Math.max(margin, Number(position?.x) || 0), maxLeft);
-  const top = Math.min(Math.max(margin, Number(position?.y) || 0), maxTop);
-  menu.style.left = `${left}px`;
-  menu.style.top = `${top}px`;
-  localFileMenuClose = () => {
-    localFileMenuLayer.hidden = true;
-    menu.replaceChildren();
-    file.blur();
-  };
-  file.focus({ preventScroll: true });
+  // 正文菜单由所属会话提供四项操作，复用通用弹层的 Open in 子菜单、键盘与边缘避让；文件预览页保留原操作。
+  link.menuOptions = getMenuOptions ? getMenuOptions(path, line) : [
+    { value: "openFile", label: "文件", icon: "folder", disabled: typeof openFile !== "function",
+      action: () => openFile(path, line) },
+    { value: "openBrowser", label: "浏览器", icon: "globe", disabled: typeof openBrowser !== "function",
+      action: () => openBrowser(path, line) }
+  ];
+  link.popupClassName = "local-file-reference-popup thread-row-popup";
+  // 240px 为“在 File Explorer 打开”及左右图标预留空间，子菜单继续沿用 Open in 的 178px。
+  link.popupWidth = 240;
+  link.popupAutoWidth = true;
+  link.setAttribute("aria-label", `文件引用操作：${path}`);
+  localFileMenuTrigger = link;
+  openPopup(link, { position });
 }
 
-export function bindLocalFileReferences(root, { openFile, openBrowser } = {}) {
+export function bindLocalFileReferences(root, { openFile, openBrowser, getMenuOptions, allowFilename = false } = {}) {
   if (!root?.querySelectorAll) return;
   for (const link of root.querySelectorAll("a[data-local-file-path]")) {
+    // 同时拦住缓存或其他渲染入口留下的纯文件名，不能只依赖 Markdown 新渲染结果。
+    if (!localFileReference(link.dataset.localFilePath, true, allowFilename)) continue;
     if (link.dataset.localFileMenuBound === "true") continue;
     link.dataset.localFileMenuBound = "true";
     let press = null;
@@ -341,7 +308,7 @@ export function bindLocalFileReferences(root, { openFile, openBrowser } = {}) {
           current.opened = true;
           link.dataset.localFileClickSuppressedUntil = String(Date.now() + 1200);
           event.preventDefault();
-          showLocalFileMenu(link, { x: current.x, y: current.y }, { openFile, openBrowser });
+          showLocalFileMenu(link, { x: current.x, y: current.y }, { openFile, openBrowser, getMenuOptions, allowFilename });
         }, 500)
       };
     });
@@ -362,7 +329,7 @@ export function bindLocalFileReferences(root, { openFile, openBrowser } = {}) {
       event.preventDefault();
       event.stopPropagation();
       cancel(true);
-      showLocalFileMenu(link, { x: event.clientX, y: event.clientY }, { openFile, openBrowser });
+      showLocalFileMenu(link, { x: event.clientX, y: event.clientY }, { openFile, openBrowser, getMenuOptions, allowFilename });
     });
     link.addEventListener("keydown", event => {
       if (event.key !== "ContextMenu" && !(event.shiftKey && event.key === "F10")) return;
@@ -370,7 +337,7 @@ export function bindLocalFileReferences(root, { openFile, openBrowser } = {}) {
       event.stopPropagation();
       cancel(true);
       const rect = link.getBoundingClientRect();
-      showLocalFileMenu(link, { x: rect.left, y: rect.bottom + 6 }, { openFile, openBrowser });
+      showLocalFileMenu(link, { x: rect.left, y: rect.bottom + 6 }, { openFile, openBrowser, getMenuOptions, allowFilename });
     });
     link.addEventListener("click", event => {
       const suppressedUntil = Number(link.dataset.localFileClickSuppressedUntil) || 0;
@@ -400,17 +367,21 @@ document.addEventListener("click", event => {
 
 // 用户要求文件右键菜单点外部即收起；外层允许点击穿透，须在捕获阶段处理，且不拦截原控件的点击。
 document.addEventListener("pointerdown", event => {
-  if (localFileMenuClose && !localFileMenu?.contains(event.target)) closeLocalFileMenu();
+  if (localFileMenuTrigger && activePopup?.trigger === localFileMenuTrigger
+      && !activePopup.node.contains(event.target) && !localFileMenuTrigger.contains(event.target)) closeLocalFileMenu();
 }, true);
 
 document.addEventListener("keydown", event => {
-  if (event.key === "Escape" && !localFileMenuLayer?.hidden) {
+  if (event.key === "Escape" && !event.defaultPrevented
+      && localFileMenuTrigger && activePopup?.trigger === localFileMenuTrigger) {
     event.preventDefault();
     closeLocalFileMenu();
   }
-}, true);
+});
 
 window.addEventListener("resize", closeLocalFileMenu);
 window.addEventListener("blur", closeLocalFileMenu);
 // 首次右键后可能还有正文布局/跟随产生的异步 scroll，不能据此立即关闭；用户滚轮或外部按下仍即时收起。
-window.addEventListener("wheel", closeLocalFileMenu, { capture: true, passive: true });
+window.addEventListener("wheel", event => {
+  if (!activePopup?.node.contains(event.target)) closeLocalFileMenu();
+}, { capture: true, passive: true });

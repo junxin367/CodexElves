@@ -21,7 +21,7 @@ import {
 import { scheduleHistoryLoad } from "../conversation/history.js";
 import { mergeRemoteImageProjection } from "../conversation/transcript-events.js";
 import { rememberTranscript } from "../conversation/transcript.js";
-import { openLocalFileInBrowser } from "../local-files.js";
+import { localFileReferenceActions } from "../local-files.js";
 import { reconcileChildren } from "./item-presentation.js";
 import {
   currentMessageImageOwner, markdownRenderVersion, messageImageOwner, messageImageReadSequence,
@@ -209,10 +209,9 @@ export function setMarkdown(node, text, remoteImages = [], options) {
   }
   node.markdownHtml = html;
   for (const copy of node.querySelectorAll(".copy-code")) copy.onclick = () => copyText(copy.closest(".code-block").querySelector("code").textContent);
-  bindLocalFileReferences(node, {
-    openFile: (path, line) => sessionTools?.openFile(path, line),
-    openBrowser: (path, line) => openLocalFileInBrowser(path, line)
-  });
+  bindLocalFileReferences(node, localFileReferenceActions({
+    openFile: (path, line) => sessionTools?.openFile(path, line)
+  }));
   bindMessageImages(node);
   bindMessageVideos(node, prepareRemoteTunnelAccess);
 }

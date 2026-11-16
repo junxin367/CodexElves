@@ -683,11 +683,8 @@ input:focus,textarea:focus,.prompt-editor:focus,button:focus-visible{outline:1px
 .local-file-reference{font-family:"JetBrains Mono",Consolas,monospace;font-size:.9em;background:var(--code);border-radius:4px;padding:2px 4px;overflow-wrap:anywhere}
 .markdown a.local-file-reference{color:var(--skill);background:transparent;padding:0;text-decoration:none;cursor:pointer}
 .markdown a.local-file-reference:hover{text-decoration:underline;text-underline-offset:3px}
-.local-file-reference-menu-layer{position:fixed;inset:0;z-index:1200;pointer-events:none}
-.local-file-reference-menu{position:fixed;display:grid;min-width:148px;max-width:calc(100vw - 16px);padding:5px;border:1px solid var(--line);border-radius:10px;background:var(--side);box-shadow:0 10px 28px #0003;pointer-events:auto}
-.local-file-reference-menu-item{min-height:40px;border:0;border-radius:7px;padding:8px 14px;background:transparent;color:var(--text);font-size:.92857rem;text-align:left}
-.local-file-reference-menu-item:hover,.local-file-reference-menu-item:focus-visible{background:var(--hover)}
-.local-file-reference-menu-item:disabled{color:var(--muted);cursor:not-allowed}
+/* 正文文件菜单与会话列表共用二级弹层；宽度下限 240px 在 markdown.js 中维护，为 Explorer 文案预留空间。 */
+.local-file-reference-popup .popup-option-label>span{white-space:normal}
 .attachment-placeholder{display:block;margin-top:8px;color:var(--muted);font-size:.85714rem}
 .image-load-retry{white-space:normal}
 .transcript-event{display:flex;align-items:center;gap:7px;min-width:0;margin:20px 0;font-size:.78571rem;line-height:1.5;text-align:center}
@@ -1646,8 +1643,8 @@ body{font-weight:var(--ui-font-weight,400)}
 }
 /* 用户要求参考 Codex：菜单、排队和详细信息使用独立于输入框的控件表面；挂到 body/顶层的菜单也继承同一配色。
  * 菜单项 hover 在控件底色上叠加主题文字基色，不能复用页面 hover 后在深色菜单上反而变暗。 */
-.ui-popup,.composer-popover,.session-related-menu,.local-file-reference-menu{background:var(--control-bg,var(--side))}
-.ui-popup,.composer-popover,.session-related-menu,.local-file-reference-menu,.composer-context{--hover:var(--control-hover)}
+.ui-popup,.composer-popover,.session-related-menu{background:var(--control-bg,var(--side))}
+.ui-popup,.composer-popover,.session-related-menu,.composer-context{--hover:var(--control-hover)}
 
 /* 用户要求设置按 Codex 的内容分组卡片呈现；外观仅保留一层导航，字体使用统一 Select，颜色浮层沿用控件实色背景。 */
 .appearance-panel-title{margin:0 0 30px;font-size:1.65rem;line-height:1.35}

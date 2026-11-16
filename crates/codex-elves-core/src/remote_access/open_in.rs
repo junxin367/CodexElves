@@ -33,6 +33,14 @@ struct Application {
     label: &'static str,
     executable: PathBuf,
     wsl_session: Option<WslSession>,
+    file: Option<FileTarget>,
+}
+
+#[derive(Debug)]
+struct FileTarget {
+    root: PathBuf,
+    relative: String,
+    requested: String,
 }
 
 #[derive(Debug, Clone)]
@@ -55,15 +63,78 @@ fn identity(payload: &Value, opening: bool) -> Result<Value, ApiError> {
     let object = payload
         .as_object()
         .ok_or_else(|| ApiError::new(400, "打开工作区参数无效"))?;
-    // 用户要求打开当前会话目录；客户端只能提交身份和固定应用 ID，不能传 cwd、程序路径或命令参数。
+    // 用户要求正文文件复用 Open in；只允许会话/项目身份、文件引用路径和固定应用 ID，不能传 cwd、程序或命令参数。
     if object.keys().any(|key| {
-        !matches!(key.as_str(), "threadId" | "projectId") && !(opening && key == "target")
+        !matches!(key.as_str(), "threadId" | "projectId" | "path") && !(opening && key == "target")
     }) {
         return Err(ApiError::new(400, "只能通过会话或项目标识打开工作区"));
     }
     let mut context = object.clone();
     context.remove("target");
+    requested_file(payload)?;
     super::workspace_identity(&Value::Object(context))
+}
+
+fn requested_file(payload: &Value) -> Result<Option<&str>, ApiError> {
+    match payload.get("path") {
+        None => Ok(None),
+        Some(value) => value
+            .as_str()
+            .filter(|path| {
+                !path.trim().is_empty() && path.len() <= 16 * 1024 && !path.contains('\0')
+            })
+            .map(Some)
+            .ok_or_else(|| ApiError::new(400, "文件路径无效")),
+    }
+}
+
+fn file_reference_path(cwd: &Path, requested: &str) -> String {
+    let path = requested.replace('\\', "/");
+    if path.starts_with('/') || path.as_bytes().get(1) == Some(&b':') {
+        return path;
+    }
+    // 文件树以 Git 根目录展开，但正文相对引用必须以会话 cwd 为起点；保留 .. 交由既有越界规则拒绝。
+    let relative = path
+        .split('/')
+        .filter(|part| *part != ".")
+        .collect::<Vec<_>>()
+        .join("/");
+    format!(
+        "{}/{relative}",
+        display_path(cwd).trim_end_matches(['/', '\\'])
+    )
+}
+
+async fn resolve_file(
+    root: &Path,
+    metadata: &Value,
+    payload: &Value,
+    authorization: &super::RemoteAuthorization,
+) -> Result<Option<FileTarget>, ApiError> {
+    let Some(requested) = requested_file(payload)? else {
+        return Ok(None);
+    };
+    // 相对路径以当前会话工作目录解析；绝对路径及 WSL 映射沿用文件预览的项目/所属引擎范围，不允许越界。
+    let resolved = file_reference_path(root, requested);
+    let (root, relative) = super::workspace::resolve_file_target(
+        root.to_owned(),
+        metadata,
+        &resolved,
+        false,
+        authorization,
+    )
+    .await?;
+    let file = FileTarget {
+        root,
+        relative,
+        requested: requested.to_owned(),
+    };
+    tokio::task::spawn_blocking(move || {
+        super::workspace::open_in_file_path(&file.root, &file.relative)?;
+        Ok(Some(file))
+    })
+    .await
+    .map_err(|_| ApiError::new(503, "无法确认所选文件"))?
 }
 
 fn response(value: Value) -> Response {
@@ -89,6 +160,7 @@ fn applications(root: &Path, wsl_session: Option<&WslSession>) -> Vec<Applicatio
                 label,
                 executable,
                 wsl_session: (target == "wsl").then(|| wsl_session.cloned()).flatten(),
+                file: None,
             })
         })
         .collect()
@@ -153,6 +225,7 @@ pub(super) async fn targets(
         .map_err(super::authorization_error)?;
     let identity = identity(&payload, false)?;
     let (root, metadata) = super::workspace_file_context(&state, &identity, &authorization).await?;
+    let file = resolve_file(&root, &metadata, &payload, &authorization).await?;
     let wsl_session = wsl_session(&state, &identity, &metadata).await?;
     let result = tokio::task::spawn_blocking(move || {
         let targets: Vec<_> = applications(&root, wsl_session.as_ref())
@@ -167,7 +240,11 @@ pub(super) async fn targets(
             })
             .collect();
         // 只公开应用 ID、名称、程序图标 PNG 和原生确认的目录，不向网页暴露安装路径。
-        json!({"ok": true, "root": display_path(&root), "targets": targets})
+        let mut value = json!({"ok": true, "root": display_path(&root), "targets": targets});
+        if let Some(file) = file {
+            value["path"] = json!(file.requested);
+        }
+        value
     })
     .await
     .map_err(|_| ApiError::new(503, "无法检测可用的工作区应用"))?;
@@ -236,17 +313,22 @@ pub(super) async fn dispatch(
         .ok_or_else(|| ApiError::new(400, "请选择可用的工作区应用"))?
         .to_owned();
     let (root, metadata) = super::workspace_file_context(&state, &identity, authorization).await?;
+    let file = resolve_file(&root, &metadata, &payload, authorization).await?;
     let wsl_session = wsl_session(&state, &identity, &metadata).await?;
     let (root, application) = tokio::task::spawn_blocking(move || {
-        let application = applications(&root, wsl_session.as_ref())
+        let mut application = applications(&root, wsl_session.as_ref())
             .into_iter()
             .find(|app| app.target == target)
             .ok_or_else(|| ApiError::new(409, "该应用已不可用，请重新选择打开方式"))?;
+        application.file = file;
         Ok::<_, ApiError>((root, application))
     })
     .await
     .map_err(|_| ApiError::new(503, "无法确认工作区应用"))??;
     let mut result = json!({"ok": true, "root": display_path(&root), "target": application.target});
+    if let Some(file) = &application.file {
+        result["path"] = json!(file.requested);
+    }
     let permit = authorization
         .prepare_dispatch()
         .await
@@ -283,4 +365,51 @@ fn launch(application: &Application, root: &Path) -> Result<LaunchOutcome, ApiEr
 #[cfg(not(windows))]
 fn launch(_: &Application, _: &Path) -> Result<LaunchOutcome, ApiError> {
     Err(ApiError::new(422, "当前服务系统不支持打开工作区应用"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn file_open_in_accepts_only_identity_path_and_known_target() {
+        let payload = json!({"threadId":"main","path":"src/app.ts","target":"vscode"});
+        assert_eq!(validate_open(&payload).unwrap(), json!({"threadId":"main"}));
+        assert_eq!(requested_file(&payload).unwrap(), Some("src/app.ts"));
+        for payload in [
+            json!({"threadId":"main","path":null,"target":"vscode"}),
+            json!({"threadId":"main","path":"","target":"vscode"}),
+            json!({"threadId":"main","path":"src/app.ts","target":"unknown"}),
+            json!({"threadId":"main","path":"src/app.ts","target":"vscode","cwd":"E:/other"}),
+            json!({"threadId":"main","path":"src/app.ts","target":"vscode","arguments":["--execute"]}),
+        ] {
+            assert!(validate_open(&payload).is_err(), "{payload}");
+        }
+        assert!(validate_open(&json!({"threadId":"main","target":"vscode"})).is_ok());
+    }
+
+    #[test]
+    fn relative_file_references_are_based_on_session_cwd_instead_of_git_root() {
+        let cwd = Path::new(r"E:\repo\packages\client");
+        assert_eq!(
+            file_reference_path(cwd, "src/app.ts").replace('\\', "/"),
+            "E:/repo/packages/client/src/app.ts"
+        );
+        assert_eq!(
+            file_reference_path(cwd, "./README.md").replace('\\', "/"),
+            "E:/repo/packages/client/README.md"
+        );
+        assert_eq!(
+            file_reference_path(cwd, r"src\app.ts").replace('\\', "/"),
+            "E:/repo/packages/client/src/app.ts"
+        );
+        assert_eq!(
+            file_reference_path(cwd, "/home/junes/app.ts"),
+            "/home/junes/app.ts"
+        );
+        assert!(
+            file_reference_path(cwd, "../private.txt").contains("/../"),
+            "不能抹掉 .. 绕过现有文件边界检查"
+        );
+    }
 }

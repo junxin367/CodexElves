@@ -1,9 +1,13 @@
 // 在系统默认浏览器中打开会话工作区内的本机文件。
 
 import { isAndroidContainer, openAndroidBrowser } from "../platform.js";
+import { localFileReference } from "../file-reference.js";
 import { notice } from "../ui/notice.js";
-import { creating, selectedId } from "../core/state.js";
+import { copyText } from "../ui/clipboard.js";
+import { creating, pageLeaving, selectedId, session, thread } from "../core/state.js";
 import { api } from "./api.js";
+import { privateInputScope } from "./session/capabilities.js";
+import { fileOpenInMenu } from "./session/open-in.js";
 import { relatedSessionView } from "./session/related-state.js";
 import { workspaceSidePanel } from "./session/side-panel.js";
 
@@ -59,4 +63,41 @@ export function installLocalFileOpenListener() {
   window.addEventListener("codex-elves-open-local-file", event => {
     openLocalFileInBrowser(event.detail?.path);
   });
+}
+
+function localFileMenuOwner() {
+  const scope = privateInputScope(session), threadId = currentFileBrowserThreadId();
+  if (!scope || !threadId || pageLeaving || thread?.id !== selectedId) return null;
+  const item = { ...thread, id: threadId };
+  return { item, key: JSON.stringify([scope, selectedId, threadId, thread.cwd || "",
+    thread.instanceId || "", thread.wslDistribution || "", thread.wslUser || ""]) };
+}
+
+export function localFileReferenceActions({ openFile } = {}) {
+  const owner = localFileMenuOwner();
+  const owns = () => !!owner && localFileMenuOwner()?.key === owner.key;
+  const preview = (path, line) => {
+    if (!owns()) return;
+    const reference = localFileReference(path, true);
+    if (!reference) return;
+    path = reference.path;
+    // 文件页原本按 Git 根目录处理相对路径；正文引用必须相对会话 cwd，先附着明确目录，避免子目录会话打开同名根文件。
+    const cwd = owner.item.cwd?.replaceAll("\\", "/").replace(/\/+$/, "");
+    const target = !/^(?:\/|[a-z]:\/)/i.test(path) && cwd
+      ? `${cwd}/${path.split("/").filter(part => part !== ".").join("/")}` : path;
+    return openFile?.(target, line ?? reference.line);
+  };
+  return { openFile: preview, getMenuOptions(path, line) {
+    const opening = fileOpenInMenu(path, { getItem: () => owns() ? owner.item : null });
+    // 用户要求正文文件菜单固定此顺序；Explorer 定位所点文件，复制不附加行号，旧会话/授权的操作不得借用当前身份。
+    return [
+      { value: "openFile", label: "打开文件", icon: "folder", disabled: !owns() || typeof openFile !== "function",
+        action: () => preview(path, line) },
+      { value: "revealFile", label: "在 File Explorer 打开", icon: "folderClosed", disabled: opening.disabled,
+        action: () => opening.openTarget({ target: "fileManager" }) },
+      { ...opening, value: "openIn", label: "打开方式", icon: "window" },
+      { value: "copyPath", label: "复制路径", icon: "copy", separatorBefore: true, disabled: !owns(),
+        action: () => { if (owns()) void copyText(path); } }
+    ];
+  } };
 }
