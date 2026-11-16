@@ -163,11 +163,15 @@ html{scrollbar-color:var(--muted) transparent}
 .claude-usage-percent{font-weight:400}
 .claude-usage-dot{color:var(--muted)}
 .claude-usage-tooltip.ui-popup{display:block;gap:0;padding:14px;border-color:var(--menu-divider,var(--line));border-radius:10px;background:var(--control-bg,var(--side));color:var(--text);font-size:12px;line-height:1.5;overflow:auto}
-/* 用户要求账号邮箱与订阅等级始终在弹窗顶部单行展示；过长邮箱由标题省略并保留完整 title。 */
+/* 用户要求账号邮箱默认脱敏并与订阅等级、眼睛按钮单行展示；过长邮箱省略，title 只包含当前显示版本。 */
 .claude-usage-title{display:flex;align-items:center;gap:8px;margin-bottom:12px;font-size:13px;font-weight:600;white-space:nowrap}
 .claude-usage-title-text{min-width:0;flex:1 1 auto;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 /* 用户确认等级紧贴标题右侧，沿用效果图的淡紫色圆角标签；320px 弹层和手机字号保持不变，长等级只省略标签。 */
 .claude-usage-subscription{display:inline-block;flex:0 1 auto;min-width:0;max-width:128px;height:20px;padding:0 6px;border:1px solid color-mix(in srgb,#ad83e7 45%,transparent);border-radius:6px;background:color-mix(in srgb,#ad83e7 15%,transparent);color:color-mix(in srgb,#ad83e7 65%,var(--text));font-size:11px;font-weight:600;line-height:18px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+/* 用户指定账号行右侧提供眼睛开关；使用现有 eye/eyeOff 图标，不增加文字按钮。 */
+.claude-usage-account-toggle{display:inline-grid;place-items:center;flex:0 0 24px;width:24px;height:20px;padding:0;border:0;border-radius:4px;background:transparent;color:var(--muted);cursor:pointer}
+.claude-usage-account-toggle:is(:hover,:active){background:var(--control-hover);color:var(--text)}
+.claude-usage-account-toggle>.ui-icon{width:14px;height:14px}
 .claude-usage-section+.claude-usage-section{margin-top:16px}
 .claude-usage-detail-row{display:flex;align-items:center;justify-content:space-between;gap:12px;white-space:nowrap;font-variant-numeric:tabular-nums}
 .claude-usage-remaining{font-size:11px}
@@ -251,6 +255,8 @@ html{scrollbar-color:var(--muted) transparent}
 .context-usage-ring{display:grid;width:18px;height:18px;place-items:center;flex:0 0 18px;border-radius:50%;background:radial-gradient(circle closest-side,var(--composer-bg,var(--side)) calc(100% - 2px),transparent calc(100% - 1.5px)),conic-gradient(var(--accent) var(--context-progress),transparent 0),radial-gradient(circle closest-side,var(--composer-bg,var(--side)) calc(100% - 1px),transparent calc(100% - .5px)),var(--line);color:var(--text);font-size:6.5px;font-variant-numeric:tabular-nums;line-height:1}
 .context-usage-tooltip.ui-popup{gap:5px;padding:10px 12px;overflow:auto;overflow-wrap:anywhere;background:var(--control-bg,var(--side));font-size:calc(var(--font-size)*.8);line-height:1.6}
 .composer-tooltip{position:fixed;inset:auto;margin:0;max-width:min(320px,calc(100vw - 16px));max-height:calc(100dvh - 16px);padding:6px 10px;border:1px solid color-mix(in srgb,var(--tooltip-text) 18%,var(--tooltip-bg));border-radius:12px;background:var(--tooltip-bg);color:var(--tooltip-text);box-shadow:0 4px 16px #0002;font-size:calc(var(--font-size)*.85);line-height:1.5;white-space:normal;overflow-wrap:anywhere;overflow:hidden;pointer-events:none;user-select:none;z-index:calc(var(--layer-menu,200) + 1)}
+/* 用户确认 Token hover 为一行描述，仅显示已返回字段；复用现有主题、定位和 200ms 延迟，窄屏边缘仍保留 8px。 */
+.composer-tooltip.composer-metrics-tooltip{max-width:calc(100vw - 16px);white-space:nowrap;font-variant-numeric:tabular-nums;text-overflow:ellipsis}
 /* 用户要求上下文用量文字使用主题正文色；兼容旧标签页仍保有 muted 类时加载到这份样式。 */
 .context-usage-value{color:var(--text);font-weight:600;font-variant-numeric:tabular-nums}
 @media(pointer:coarse){.context-info{flex-basis:32px;width:32px;height:36px}}

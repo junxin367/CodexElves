@@ -91,6 +91,11 @@ function claudeUsageAccount(value) {
   // 用户要求弹窗顶部显示对应 Claude 实例已登录的邮箱；缓存或旧客户端返回异常值时不直接展示。
   return email && email.length <= 320 && email.includes("@") && !/[\s\u0000-\u001f\u007f]/u.test(email) ? email : "";
 }
+function claudeUsageMaskAccount(account) {
+  const at = account.lastIndexOf("@");
+  // 用户指定默认脱敏：@ 前仅保留前 3 个字符并固定追加 3 个 *，域名保持完整。
+  return at < 0 ? account : `${[...account.slice(0, at)].slice(0, 3).join("")}***${account.slice(at)}`;
+}
 function claudeUsageResetText(resetAt, now = Date.now()) {
   if (resetAt == null) return "时间未知";
   const minutes = Math.ceil(Math.max(0, resetAt - now) / 60000);
@@ -278,19 +283,41 @@ function renderClaudeUsageTip(windows) {
   const subscription = claudeUsageSubscription(claudeUsageState.value);
   const account = claudeUsageAccount(claudeUsageState.value);
   const title = element("div", "claude-usage-title");
-  // 用户要求弹窗顶部优先显示当前实例已登录账号；没有邮箱时继续显示“账号信息”。
-  const titleText = element("span", "claude-usage-title-text", account || "账号信息");
-  if (account) {
-    titleText.title = account;
-    titleText.setAttribute("aria-label", `登录账号：${account}`);
-  }
+  // 用户要求邮箱默认脱敏；同次弹层刷新保留眼睛状态，账号变化或重新打开时恢复脱敏。
+  if (tip.account !== account) { tip.account = account; tip.accountVisible = false; }
+  // 没有邮箱时继续显示“账号信息”，不增加无作用的大眼睛按钮。
+  const titleText = element("span", "claude-usage-title-text", account ? "" : "账号信息");
   title.append(titleText);
+  let reveal = null;
+  if (account) {
+    titleText.id = "claude-usage-account-email";
+    reveal = element("button", "claude-usage-account-toggle");
+    reveal.type = "button";
+    reveal.setAttribute("aria-controls", titleText.id);
+    const updateAccount = () => {
+      const visible = tip.accountVisible === true;
+      const displayed = visible ? account : claudeUsageMaskAccount(account);
+      const action = visible ? "隐藏完整邮箱" : "显示完整邮箱";
+      titleText.textContent = displayed; titleText.title = displayed;
+      titleText.setAttribute("aria-label", `登录账号：${displayed}`);
+      reveal.title = action; reveal.setAttribute("aria-label", action);
+      reveal.setAttribute("aria-pressed", visible ? "true" : "false");
+      reveal.replaceChildren(icon(visible ? "eyeOff" : "eye"));
+    };
+    reveal.onclick = () => {
+      if (claudeUsageState?.tip !== tip) return;
+      tip.accountVisible = !tip.accountVisible; updateAccount();
+    };
+    updateAccount();
+  }
   // 用户确认缺少等级时直接不显示，不添加未知标签、占位或说明，也不使用效果图里的示例等级补齐。
   if (subscription.type) {
     const badge = element("span", "claude-usage-subscription", subscription.label);
     badge.title = `所属 WSL Claude CLI 返回的订阅类型：${subscription.type}`;
     badge.setAttribute("aria-label", `订阅等级：${subscription.label}`); title.append(badge);
   }
+  // 眼睛固定在账号行最右侧，位于订阅等级之后；邮箱文本继续占用可收缩空间。
+  if (reveal) title.append(reveal);
   const content = [title];
   for (const window of windows) {
     const section = element("section", "claude-usage-section");
@@ -348,7 +375,8 @@ function renderClaudeUsage() {
     }
     trigger.replaceChildren(...nodes);
     const account = claudeUsageAccount(claudeUsageState.value);
-    trigger.setAttribute("aria-label", `Claude ${account ? `登录账号 ${account}，` : "账号信息，"}${isDefault ? "真实额度读取中，当前按满额显示，" : ""}${windows.map(window => `${window.label}剩余 ${window.remaining}%`).join("，")}，查看重置时间`);
+    // 用户要求默认脱敏同时覆盖底部按钮的读屏文本，不能只在弹层视觉上隐藏完整邮箱。
+    trigger.setAttribute("aria-label", `Claude ${account ? `登录账号 ${claudeUsageMaskAccount(account)}，` : "账号信息，"}${isDefault ? "真实额度读取中，当前按满额显示，" : ""}${windows.map(window => `${window.label}剩余 ${window.remaining}%`).join("，")}，查看重置时间`);
   }
   renderClaudeUsageTip(windows);
   fitComposerMetrics();
@@ -448,7 +476,7 @@ function showClaudeUsageTip() {
   const node = element("div", "ui-popup claude-usage-tooltip");
   node.id = "claude-usage-tooltip"; node.setAttribute("role", "tooltip");
   if (typeof node.showPopover === "function") node.setAttribute("popover", "manual");
-  state.tip = { trigger, node };
+  state.tip = { trigger, node, account: "", accountVisible: false };
   trigger.setAttribute("aria-expanded", "true"); trigger.setAttribute("aria-describedby", node.id);
   document.body.append(node);
   // 用户要求缓存优先：先构造完整额度与已缓存数字，再展示弹层，刷新在后台进行。

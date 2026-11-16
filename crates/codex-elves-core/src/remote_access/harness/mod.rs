@@ -284,6 +284,14 @@ impl Harness {
         }
     }
 
+    pub async fn session_first_token(&self, thread_id: &str) -> Option<(String, u64)> {
+        self.projection.lock().await.session_first_token(thread_id)
+    }
+
+    pub async fn side_session_metrics(&self, thread_id: &str) -> Option<Value> {
+        self.projection.lock().await.side_session_metrics(thread_id)
+    }
+
     pub async fn idle(&self) -> bool {
         if !self.runtime.can_release().await {
             // 连接已经异常断开时，Projection 会清空 active；此时不能把未知执行当成空闲释放引擎。

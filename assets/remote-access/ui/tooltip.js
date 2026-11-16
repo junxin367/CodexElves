@@ -55,7 +55,9 @@ export function installComposerTooltips() {
     // 原生 Codex 普通提示默认延迟 200ms，避免移动鼠标经过工具栏时连续闪烁。
     timer = setTimeout(() => {
       if (!trigger.isConnected || trigger.closest("[hidden],[inert]")) { close(); return; }
-      node = element("div", "composer-tooltip", pending.title);
+      // 用户确认 Token 统计使用单行摘要；其他编辑区提示仍保留原有自动换行。
+      const className = trigger.id === "session-metrics" ? "composer-tooltip composer-metrics-tooltip" : "composer-tooltip";
+      node = element("div", className, pending.title);
       node.id = "composer-hover-tooltip"; node.setAttribute("role", "tooltip");
       const descriptions = (trigger.getAttribute("aria-describedby") || "").split(/\s+/).filter(Boolean);
       trigger.setAttribute("aria-describedby", [...new Set([...descriptions, node.id])].join(" "));

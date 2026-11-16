@@ -292,6 +292,7 @@ impl Conversation {
         project_claude_message_timestamps(&mut value);
         if let Some(fields) = value.as_object_mut() {
             fields.remove("_metricsRequests");
+            fields.remove("_metricsFirstTokenObservedAtMs");
             fields.remove("_metricsVersion");
             // 任务清单的原始调用与跨轮次状态只用于合成 plan，不发给网页。
             fields.remove("_claudePlanCalls");
@@ -1424,7 +1425,7 @@ impl Claude {
                 .get(id)
                 .filter(|c| !c.deleted)
                 .ok_or_else(|| error(404, "Claude 会话不存在"))?;
-            if !c.shared || c.turns.iter().all(|turn| turn["_metricsVersion"] == 1) {
+            if !c.shared || c.turns.iter().all(|turn| turn["_metricsVersion"] == 2) {
                 return Ok(c.metrics());
             }
             (
@@ -1463,14 +1464,14 @@ impl Claude {
             .filter(|c| !c.deleted && c.native_id == backfill.1)
             .ok_or_else(|| error(404, "Claude 会话不存在"))?;
         // 补读期间原生快照或另一页可能已补齐数字，不能让较早的只读结果覆盖新统计。
-        if c.turns.iter().all(|turn| turn["_metricsVersion"] == 1) {
+        if c.turns.iter().all(|turn| turn["_metricsVersion"] == 2) {
             return Ok(c.metrics());
         }
         for turn in &mut c.turns {
             if let Some(requests) = turn["id"].as_str().and_then(|id| by_id.get(id)) {
                 turn["_metricsRequests"] = requests.clone();
             }
-            turn["_metricsVersion"] = json!(1);
+            turn["_metricsVersion"] = json!(2);
         }
         // 只补内存数字，不持久化整份正文、不发布历史更新，也不改变未读、执行或回执状态。
         Ok(c.metrics())
@@ -2584,7 +2585,7 @@ impl Claude {
         )
     }
 
-    async fn ingest(&self, id: &str, generation: &str, frame: Value) -> anyhow::Result<()> {
+    async fn ingest(&self, id: &str, generation: &str, mut frame: Value) -> anyhow::Result<()> {
         if id.is_empty() {
             return Ok(());
         } // 模型能力探测没有用户会话，不产生列表记录。
@@ -2727,6 +2728,13 @@ impl Claude {
         let Some(turn) = c.turns.last_mut().filter(|t| t["status"] == "inProgress") else {
             return Ok(());
         };
+        if frame["type"] == "stream_event"
+            && frame["event"]["type"] == "content_block_delta"
+            && frame["timestampMs"].is_null()
+        {
+            // 原生流式片段没有时间戳时，以独立服务实际收到片段的毫秒时间记录首 Token；不用完整回复时间替代。
+            frame["timestampMs"] = json!(now_ms());
+        }
         let turn_id = turn["id"].clone();
         let previous_plan = turn["plan"].clone();
         let changed = project_frame(turn, &frame);
@@ -4231,7 +4239,7 @@ fn project_shared_history(frame: &Value, generation: &str) -> Vec<Value> {
     tools::settle_background(&mut turns, &frame["native_status"]);
     let latest = turns.len().checked_sub(1);
     for (index, turn) in turns.iter_mut().enumerate() {
-        turn["_metricsVersion"] = json!(1);
+        turn["_metricsVersion"] = json!(2);
         if turn["nativeInterruption"]["source"] == "claude"
             || Some(index) == latest && turn["status"] != "inProgress"
         {
@@ -4565,7 +4573,7 @@ fn permission_request(thread: &str, id: &str, request: &Value) -> anyhow::Result
 }
 
 fn project_frame(turn: &mut Value, frame: &Value) -> Vec<Value> {
-    turn["_metricsVersion"] = json!(1);
+    turn["_metricsVersion"] = json!(2);
     super::session_metrics::observe_claude(turn, frame);
     if !turn["items"].is_array() {
         return vec![];

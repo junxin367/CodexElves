@@ -1397,15 +1397,18 @@ impl RemoteAccessController {
             authorization.check().await?;
             let metrics = if claude_thread {
                 self.claude.session_metrics(id).await?
+            } else if let Some(metrics) = self.harness.side_session_metrics(&id).await {
+                metrics
             } else {
                 let settings_path = self.state_dir.join("settings.json");
+                let first_token = self.harness.session_first_token(&id).await;
                 let id = id.to_owned();
                 tokio::task::spawn_blocking(move || {
                     let Ok(settings) = SettingsStore::new(settings_path).load() else {
                         return Value::Null;
                     };
                     let home = crate::codex_home::codex_home_dir_for_settings(&settings);
-                    session_metrics::codex(&home, &id)
+                    session_metrics::codex(&home, &id, first_token)
                 })
                 .await
                 .unwrap_or(Value::Null)

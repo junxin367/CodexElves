@@ -147,6 +147,36 @@ mod tests {
     }
 
     #[test]
+    fn harness_service_side_metrics_are_independent_and_retained_after_expiry() {
+        let mut side = side();
+        side.observe(&json!({"method":"turn/started","params":{"turn":{
+            "id":"turn","startedAt":1,"status":"inProgress","items":[
+                {"id":"input","type":"userMessage","content":[{"type":"text","text":"侧边输入"}]}]}}}));
+        let response = json!({"method":"rawResponse/completed","emittedAtMs":3000,
+            "params":{"turnId":"turn","responseId":"response","usage":{
+                "inputTokens":100,"cachedInputTokens":20,"outputTokens":40,"totalTokens":140}}});
+        side.observe(&response);
+        side.observe(&response);
+        side.observe(
+            &json!({"method":"thread/tokenUsage/updated","params":{"turnId":"turn",
+            "tokenUsage":{"total":{"totalTokens":999999}}}}),
+        );
+        let metrics = super::super::super::session_metrics::codex_side(&side.turns, None);
+        assert_eq!(metrics["source"], "codex-side");
+        assert_eq!(metrics["totalTokens"], 140);
+        assert_eq!(metrics["steps"], 1);
+        assert!(
+            side.history(&json!({"threadId":"side"})).unwrap()["data"][0]
+                .get("_metricsResponses")
+                .is_none()
+        );
+        side.expire();
+        let retained = super::super::super::session_metrics::codex_side(&side.turns, None);
+        assert_eq!(retained["totalTokens"], 140);
+        assert_eq!(retained["turnTokens"], 140);
+    }
+
+    #[test]
     fn harness_service_side_history_keeps_input_and_tools_when_completion_only_has_summary() {
         let mut side = side();
         side.observe(&json!({"method":"turn/started","params":{"turn":{"id":"turn","status":"inProgress","items":[]}}}));
@@ -384,6 +414,18 @@ impl SideThread {
 
     fn observe(&mut self, frame: &Value) {
         let params = &frame["params"];
+        if frame["method"] == "rawResponse/completed" {
+            let Some(turn) = self
+                .turns
+                .iter_mut()
+                .find(|turn| turn["id"] == params["turnId"])
+            else {
+                return;
+            };
+            let observed_at = frame["emittedAtMs"].as_u64().unwrap_or_else(now_ms);
+            super::super::session_metrics::observe_codex_side(turn, frame, observed_at);
+            return;
+        }
         match frame["method"].as_str().unwrap_or("") {
             "thread/closed" | "thread/unloaded" => {
                 if self.closing {
@@ -496,6 +538,12 @@ impl SideThread {
             ));
         }
         let mut turns: Vec<_> = self.turns.iter().rev().cloned().collect();
+        // 侧边统计只经 sessionMetrics 返回，原始 responseId 汇总表不混入历史正文协议。
+        for turn in &mut turns {
+            if let Some(fields) = turn.as_object_mut() {
+                fields.remove("_metricsResponses");
+            }
+        }
         // 只展示创建之后的侧边输入；模型继承的主会话上下文不混入侧边聊天区。
         if let Some(id) = payload["turnId"].as_str() {
             let turn = turns

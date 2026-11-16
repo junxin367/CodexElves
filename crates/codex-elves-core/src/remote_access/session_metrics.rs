@@ -33,18 +33,42 @@ fn summary(
     total: Option<u64>,
     usage: Option<(u64, u64, u64, u64)>,
     duration: Option<u64>,
+    first_token: Option<u64>,
+    cached_input: Option<u64>,
 ) -> Value {
     let speed = usage
         .zip(duration)
         .and_then(|((_, output, _, _), ms)| (ms > 0).then_some(output as f64 * 1000.0 / ms as f64));
+    // 用户要求缓存命中率只使用原生实测值：本轮缓存读取量除以本轮输入总量，分母无效或字段不完整时不输出。
+    let cache_hit_rate = usage
+        .zip(cached_input)
+        .and_then(|((input, _, _, _), cached)| {
+            (input > 0 && cached <= input).then_some(cached as f64 / input as f64)
+        });
     json!({"source":source,"turnId":turn_id,"totalTokens":total,
         "inputTokens":usage.map(|usage| usage.0),"outputTokens":usage.map(|usage| usage.1),
         "turnTokens":usage.map(|usage| usage.2),"steps":usage.map(|usage| usage.3),
-        "durationMs":duration,"tokensPerSecond":speed})
+        "durationMs":duration,"tokensPerSecond":speed,"firstTokenMs":first_token,
+        "cacheHitRate":cache_hit_rate})
 }
 
 /// 同一 assistant 的多段内容共用请求身份；重复快照和流式中间值只接替，不累计成多步。
 pub(super) fn observe_claude(turn: &mut Value, frame: &Value) {
+    if frame["type"] == "stream_event" {
+        let event = &frame["event"];
+        let delta = &event["delta"];
+        // 用户要求首 Token 使用真实流式输出；正文、思考和工具参数均可作为首个模型输出，完整回复不能倒推首 Token。
+        if event["type"] == "content_block_delta"
+            && ["text", "thinking", "partial_json"]
+                .iter()
+                .any(|key| delta[*key].as_str().is_some_and(|text| !text.is_empty()))
+            && turn["_metricsFirstTokenObservedAtMs"].is_null()
+            && let Some(at) = timestamp(&frame["timestampMs"])
+        {
+            turn["_metricsFirstTokenObservedAtMs"] = json!(at);
+        }
+        return;
+    }
     if frame["type"] != "assistant"
         || frame["isApiErrorMessage"] == true
         || frame["message"]["model"] == "<synthetic>"
@@ -64,6 +88,8 @@ pub(super) fn observe_claude(turn: &mut Value, frame: &Value) {
     let mut input = 0_u64;
     let mut output = 0_u64;
     let mut steps = 0_u64;
+    let mut cached_input = 0_u64;
+    let mut cache_known = true;
     for part in parts {
         if part["type"].as_str().is_some_and(|kind| {
             !matches!(
@@ -85,6 +111,11 @@ pub(super) fn observe_claude(turn: &mut Value, frame: &Value) {
         let (Some(cached), Some(created)) = (cached, created) else {
             return;
         };
+        if part.get("cache_read_input_tokens").is_some() {
+            cached_input = cached_input.saturating_add(cached);
+        } else {
+            cache_known = false;
+        }
         input = input
             .saturating_add(tokens)
             .saturating_add(cached)
@@ -99,11 +130,16 @@ pub(super) fn observe_claude(turn: &mut Value, frame: &Value) {
     input = input.max(count(&current["inputTokens"]).unwrap_or(0));
     output = output.max(count(&current["outputTokens"]).unwrap_or(0));
     steps = steps.max(count(&current["steps"]).unwrap_or(0));
+    let cached_input = if cache_known {
+        Some(cached_input.max(count(&current["cachedInputTokens"]).unwrap_or(0)))
+    } else {
+        count(&current["cachedInputTokens"])
+    };
     if input.saturating_add(output) > SAFE_INTEGER {
         return;
     }
     turn["_metricsRequests"][id] = json!({"inputTokens":input,"outputTokens":output,
-        "steps":steps,"observedAtMs":frame["timestampMs"]});
+        "cachedInputTokens":cached_input,"steps":steps,"observedAtMs":frame["timestampMs"]});
 }
 
 pub(super) fn claude(turns: &[Value]) -> Value {
@@ -130,6 +166,8 @@ pub(super) fn claude(turns: &[Value]) -> Value {
     let mut output = 0_u64;
     let mut steps = 0_u64;
     let mut observed = None;
+    let mut cached_input = 0_u64;
+    let mut cache_known = true;
     for usage in latest
         .into_iter()
         .flat_map(|turn| turn["_metricsRequests"].as_object())
@@ -138,6 +176,11 @@ pub(super) fn claude(turns: &[Value]) -> Value {
         input = input.saturating_add(count(&usage["inputTokens"]).unwrap_or(0));
         output = output.saturating_add(count(&usage["outputTokens"]).unwrap_or(0));
         steps = steps.saturating_add(count(&usage["steps"]).unwrap_or(0));
+        if let Some(cached) = count(&usage["cachedInputTokens"]) {
+            cached_input = cached_input.saturating_add(cached);
+        } else {
+            cache_known = false;
+        }
         observed = observed.max(timestamp(&usage["observedAtMs"]));
     }
     let duration = latest.and_then(|turn| {
@@ -157,6 +200,108 @@ pub(super) fn claude(turns: &[Value]) -> Value {
         (any_usage && total <= SAFE_INTEGER).then_some(total),
         (steps > 0).then_some((input, output, input.saturating_add(output), steps)),
         duration,
+        latest.and_then(|turn| {
+            let start =
+                timestamp(&turn["turnStartedAtMs"]).or_else(|| timestamp(&turn["startedAt"]))?;
+            timestamp(&turn["_metricsFirstTokenObservedAtMs"])?.checked_sub(start)
+        }),
+        (steps > 0 && cache_known).then_some(cached_input),
+    )
+}
+
+fn codex_side_time(value: &Value) -> Option<u64> {
+    timestamp(value).map(|value| {
+        if value < 100_000_000_000 {
+            value.saturating_mul(1000)
+        } else {
+            value
+        }
+    })
+}
+
+// 用户要求侧边 Token 单独计算：只接收本侧边创建后的 rawResponse/completed，按 responseId 接替去重，不读取父会话累计值。
+pub(super) fn observe_codex_side(turn: &mut Value, frame: &Value, observed_at: u64) {
+    let params = &frame["params"];
+    let Some(response_id) = params["responseId"].as_str().filter(|id| !id.is_empty()) else {
+        return;
+    };
+    let usage = &params["usage"];
+    let (Some(input), Some(output), Some(total)) = (
+        count(&usage["inputTokens"]),
+        count(&usage["outputTokens"]),
+        count(&usage["totalTokens"]),
+    ) else {
+        return;
+    };
+    if total == 0 || input.saturating_add(output) > SAFE_INTEGER {
+        return;
+    }
+    let cached = count(&usage["cachedInputTokens"])
+        .or_else(|| count(&turn["_metricsResponses"][response_id]["cachedInputTokens"]));
+    turn["_metricsResponses"][response_id] = json!({"inputTokens":input,"outputTokens":output,
+        "turnTokens":total,"cachedInputTokens":cached,"observedAtMs":observed_at});
+}
+
+pub(super) fn codex_side(turns: &[Value], first_token: Option<(String, u64)>) -> Value {
+    let Some(latest) = turns.last() else {
+        return Value::Null;
+    };
+    let latest_id = latest["id"].as_str().unwrap_or("");
+    let mut total = 0_u64;
+    let mut seen = HashSet::new();
+    let mut any_usage = false;
+    for turn in turns {
+        for (id, usage) in turn["_metricsResponses"].as_object().into_iter().flatten() {
+            if seen.insert(id)
+                && let Some(tokens) = count(&usage["turnTokens"])
+            {
+                total = total.saturating_add(tokens);
+                any_usage = true;
+            }
+        }
+    }
+    let mut input = 0_u64;
+    let mut output = 0_u64;
+    let mut tokens = 0_u64;
+    let mut cached_input = 0_u64;
+    let mut cache_known = true;
+    let mut observed = None;
+    let mut steps = 0_u64;
+    for usage in latest["_metricsResponses"]
+        .as_object()
+        .into_iter()
+        .flat_map(|responses| responses.values())
+    {
+        input = input.saturating_add(count(&usage["inputTokens"]).unwrap_or(0));
+        output = output.saturating_add(count(&usage["outputTokens"]).unwrap_or(0));
+        tokens = tokens.saturating_add(count(&usage["turnTokens"]).unwrap_or(0));
+        steps += 1;
+        if let Some(cached) = count(&usage["cachedInputTokens"]) {
+            cached_input = cached_input.saturating_add(cached);
+        } else {
+            cache_known = false;
+        }
+        observed = observed.max(timestamp(&usage["observedAtMs"]));
+    }
+    let start = codex_side_time(&latest["turnStartedAtMs"])
+        .or_else(|| codex_side_time(&latest["startedAt"]));
+    let duration = count(&latest["durationMs"]).or_else(|| {
+        let end = codex_side_time(&latest["turnCompletedAtMs"])
+            .or_else(|| codex_side_time(&latest["completedAt"]))
+            .or(observed)?;
+        end.checked_sub(start?)
+    });
+    let first_token = first_token
+        .filter(|(turn_id, _)| turn_id == latest_id)
+        .and_then(|(_, observed)| start.and_then(|start| observed.checked_sub(start)));
+    summary(
+        "codex-side",
+        latest_id,
+        (any_usage && total <= SAFE_INTEGER).then_some(total),
+        (steps > 0 && tokens <= SAFE_INTEGER).then_some((input, output, tokens, steps)),
+        duration,
+        first_token,
+        (steps > 0 && cache_known).then_some(cached_input),
     )
 }
 
@@ -170,6 +315,7 @@ struct CodexMetrics {
     previous_total: Option<u64>,
     input: u64,
     output: u64,
+    cached_input: Option<u64>,
     tokens: u64,
     steps: u64,
 }
@@ -210,6 +356,7 @@ impl CodexMetrics {
                     self.observed = None;
                     self.input = 0;
                     self.output = 0;
+                    self.cached_input = Some(0);
                     self.tokens = 0;
                     self.steps = 0;
                 }
@@ -245,6 +392,10 @@ impl CodexMetrics {
                 {
                     self.input = self.input.saturating_add(input);
                     self.output = self.output.saturating_add(output);
+                    self.cached_input = self
+                        .cached_input
+                        .zip(count(&last["cached_input_tokens"]))
+                        .map(|(total, cached)| total.saturating_add(cached));
                     self.tokens = self.tokens.saturating_add(tokens);
                     self.steps += 1;
                     self.observed = at;
@@ -254,11 +405,19 @@ impl CodexMetrics {
         }
     }
 
+    #[cfg(test)]
     fn value(&self) -> Value {
+        self.value_with_first_token(None)
+    }
+
+    fn value_with_first_token(&self, first_token: Option<(String, u64)>) -> Value {
         let duration = self
             .started
             .zip(self.ended.or(self.observed))
             .and_then(|(start, end)| end.checked_sub(start));
+        let first_token = first_token
+            .filter(|(turn_id, _)| turn_id == &self.turn_id)
+            .and_then(|(_, observed)| self.started.and_then(|start| observed.checked_sub(start)));
         summary(
             "codex-rollout",
             &self.turn_id,
@@ -270,6 +429,8 @@ impl CodexMetrics {
                 self.steps,
             )),
             duration,
+            first_token,
+            self.cached_input,
         )
     }
 }
@@ -283,14 +444,22 @@ struct Cached {
     parser: CodexMetrics,
 }
 
-pub(super) fn codex(home: &Path, id: &str) -> Value {
+pub(super) fn codex(home: &Path, id: &str, first_token: Option<(String, u64)>) -> Value {
     let Some(path) = super::context_usage::rollout_path(home, id) else {
         return Value::Null;
     };
-    read_codex(&path).unwrap_or(Value::Null)
+    read_codex_with_first_token(&path, first_token).unwrap_or(Value::Null)
 }
 
+#[cfg(test)]
 fn read_codex(path: &Path) -> std::io::Result<Value> {
+    read_codex_with_first_token(path, None)
+}
+
+fn read_codex_with_first_token(
+    path: &Path,
+    first_token: Option<(String, u64)>,
+) -> std::io::Result<Value> {
     static CACHE: OnceLock<Mutex<HashMap<PathBuf, Cached>>> = OnceLock::new();
     let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
     let mut file = File::open(path)?;
@@ -305,7 +474,7 @@ fn read_codex(path: &Path) -> std::io::Result<Value> {
         && entry.len == len
         && entry.modified == modified
     {
-        return Ok(entry.parser.value());
+        return Ok(entry.parser.value_with_first_token(first_token));
     }
     let mut parser = CodexMetrics::default();
     let mut offset = len.saturating_sub(MAX_READ_BYTES);
@@ -351,7 +520,7 @@ fn read_codex(path: &Path) -> std::io::Result<Value> {
     }
     let parsed = offset + end as u64;
     let tail = bytes[end.saturating_sub(128)..end].to_vec();
-    let result = parser.value();
+    let result = parser.value_with_first_token(first_token);
     let mut cache = cache.lock().unwrap_or_else(|error| error.into_inner());
     if cache.len() >= CACHE_CAPACITY && !cache.contains_key(path) {
         cache.clear();
@@ -397,8 +566,51 @@ mod tests {
             "token_count",
             "2026-11-13T00:00:02Z",
             json!({"info":{"total_token_usage":{"total_tokens":total},
-                "last_token_usage":{"total_tokens":last,"input_tokens":last-20,"output_tokens":20}}}),
+                "last_token_usage":{"total_tokens":last,"input_tokens":last-20,"output_tokens":20,
+                    "cached_input_tokens":(last-20)/2}}}),
         )
+    }
+
+    #[test]
+    fn session_metrics_codex_side_uses_only_own_responses_and_deduplicates_response_ids() {
+        let mut current = json!({"id":"side-turn","startedAt":1,"completedAt":5,
+            "tokenUsage":{"total":{"totalTokens":999999}},"items":[{"type":"userMessage"}]});
+        for (response_id, input, cached, output) in [
+            ("response-a", 100, 20, 40),
+            ("response-a", 100, 20, 40),
+            ("response-b", 200, 100, 60),
+        ] {
+            observe_codex_side(
+                &mut current,
+                &json!({"params":{"turnId":"side-turn","responseId":response_id,
+                "usage":{"inputTokens":input,"cachedInputTokens":cached,"outputTokens":output,
+                    "totalTokens":input+output}}}),
+                3000,
+            );
+        }
+        let value = codex_side(&[current], Some(("side-turn".into(), 2000)));
+        assert_eq!(value["source"], "codex-side");
+        assert_eq!(value["totalTokens"], 400);
+        assert_eq!(value["turnTokens"], 400);
+        assert_eq!(value["steps"], 2);
+        assert_eq!(value["tokensPerSecond"], 25.0);
+        assert_eq!(value["firstTokenMs"], 1000);
+        assert_eq!(value["cacheHitRate"], 0.4);
+    }
+
+    #[test]
+    fn session_metrics_codex_side_missing_cache_does_not_hide_other_usage() {
+        let mut current = json!({"id":"side-turn","startedAt":1,"items":[{"type":"userMessage"}]});
+        observe_codex_side(
+            &mut current,
+            &json!({"params":{"turnId":"side-turn","responseId":"response",
+            "usage":{"inputTokens":100,"outputTokens":40,"totalTokens":140}}}),
+            3000,
+        );
+        let value = codex_side(&[current], None);
+        assert_eq!(value["turnTokens"], 140);
+        assert_eq!(value["durationMs"], 2000);
+        assert!(value["cacheHitRate"].is_null());
     }
 
     #[test]
@@ -412,6 +624,41 @@ mod tests {
         assert_eq!(value["steps"], 1);
         assert_eq!(value["turnTokens"], 190);
         assert_eq!(value["tokensPerSecond"], 20.0);
+        assert_eq!(value["cacheHitRate"], 20.0 / 150.0);
+    }
+
+    #[test]
+    fn session_metrics_claude_first_token_uses_only_real_stream_delta() {
+        let mut current = turn("stream");
+        for (at, text) in [(1240, "首"), (1300, "个")] {
+            observe_claude(
+                &mut current,
+                &json!({"type":"stream_event","timestampMs":at,
+                "event":{"type":"content_block_delta","delta":{"type":"text_delta","text":text}}}),
+            );
+        }
+        observe_claude(&mut current, &request("request", 100, 40));
+        let value = claude(&[current.clone()]);
+        assert_eq!(value["firstTokenMs"], 240);
+        assert_eq!(value["cacheHitRate"], 20.0 / 150.0);
+
+        let mut historical = turn("historical");
+        observe_claude(&mut historical, &request("complete-only", 100, 40));
+        assert!(claude(&[historical])["firstTokenMs"].is_null());
+    }
+
+    #[test]
+    fn session_metrics_claude_missing_cache_field_hides_only_the_rate() {
+        let mut current = turn("missing-cache");
+        let mut row = request("request", 100, 40);
+        row["message"]["usage"]
+            .as_object_mut()
+            .unwrap()
+            .remove("cache_read_input_tokens");
+        observe_claude(&mut current, &row);
+        let value = claude(&[current]);
+        assert_eq!(value["turnTokens"], 170);
+        assert!(value["cacheHitRate"].is_null());
     }
 
     #[test]
@@ -485,6 +732,34 @@ mod tests {
         assert_eq!(value["totalTokens"], 1500);
         assert_eq!(value["steps"], 2);
         assert_eq!(value["tokensPerSecond"], 10.0);
+        assert_eq!(value["cacheHitRate"], 0.5);
+        let first_token_at = timestamp(&json!("2026-11-13T00:00:01.240Z")).unwrap();
+        let live = parser.value_with_first_token(Some(("turn".into(), first_token_at)));
+        assert_eq!(live["firstTokenMs"], 1240);
+        assert!(parser
+            .value_with_first_token(Some(("other-turn".into(), first_token_at)))["firstTokenMs"]
+            .is_null());
+    }
+
+    #[test]
+    fn session_metrics_codex_missing_cache_field_does_not_invent_zero_rate() {
+        let mut parser = CodexMetrics::default();
+        let started = event(
+            "task_started",
+            "2026-11-13T00:00:00Z",
+            json!({"turn_id":"turn"}),
+        );
+        let mut missing = usage(1200, 200);
+        missing["payload"]["info"]["last_token_usage"]
+            .as_object_mut()
+            .unwrap()
+            .remove("cached_input_tokens");
+        for row in [started, missing] {
+            parser.consume(&serde_json::to_vec(&row).unwrap());
+        }
+        let value = parser.value();
+        assert_eq!(value["turnTokens"], 200);
+        assert!(value["cacheHitRate"].is_null());
     }
 
     #[test]

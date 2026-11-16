@@ -28,6 +28,8 @@ pub(super) struct Projection {
     pub active: HashMap<String, String>,
     pub queue_turn_outcomes: HashMap<String, Value>,
     pub compactions: HashMap<String, Value>,
+    // 每个主会话仅保留当前轮次的首个原生模型输出时间；服务重启或旧历史缺失时不估算。
+    first_token_observations: HashMap<String, (String, Option<u64>)>,
     compaction_records: VecDeque<CompactionRecord>,
     completed: VecDeque<String>,
     events: VecDeque<(u64, Value)>,
@@ -52,6 +54,7 @@ impl Default for Projection {
             active: HashMap::new(),
             queue_turn_outcomes: HashMap::new(),
             compactions: HashMap::new(),
+            first_token_observations: HashMap::new(),
             compaction_records: VecDeque::new(),
             completed: VecDeque::new(),
             events: VecDeque::new(),
@@ -72,6 +75,7 @@ impl Projection {
         self.deleted_threads.insert(id.to_owned());
         self.clear_side_runtime(id);
         self.queue_turn_outcomes.remove(id);
+        self.first_token_observations.remove(id);
         self.notifications.retain(|entry| entry["threadId"] != id);
         self.pending_notifications
             .retain(|_, entry| entry["threadId"] != id);
@@ -484,6 +488,26 @@ impl Projection {
             );
             return;
         }
+        // 用户要求首 Token 只统计真实模型输出；工具输出不计入，同一轮次仅记录第一次非空文本/思考/计划片段。
+        if matches!(
+            method.as_str(),
+            "item/agentMessage/delta"
+                | "item/plan/delta"
+                | "item/reasoning/summaryTextDelta"
+                | "item/reasoning/textDelta"
+        ) && frame["params"]["delta"]
+            .as_str()
+            .is_some_and(|delta| !delta.is_empty())
+            && let Some(turn_id) = frame["params"]["turnId"].as_str()
+        {
+            let observation = self
+                .first_token_observations
+                .entry(id.clone())
+                .or_insert_with(|| (turn_id.to_owned(), None));
+            if observation.0 == turn_id && observation.1.is_none() {
+                observation.1 = Some(now_ms());
+            }
+        }
         match method.as_str() {
             "thread/started" => {
                 if side {
@@ -534,6 +558,13 @@ impl Projection {
             }
             "turn/started" => {
                 if let Some(turn_id) = frame["params"]["turn"]["id"].as_str() {
+                    let observation = self
+                        .first_token_observations
+                        .entry(id.clone())
+                        .or_insert_with(|| (turn_id.to_owned(), None));
+                    if observation.0 != turn_id {
+                        *observation = (turn_id.to_owned(), None);
+                    }
                     self.started(&id, turn_id);
                 }
             }
@@ -667,6 +698,21 @@ impl Projection {
         }
     }
 
+    pub fn session_first_token(&self, thread_id: &str) -> Option<(String, u64)> {
+        self.first_token_observations
+            .get(thread_id)
+            .and_then(|(turn_id, observed)| observed.map(|observed| (turn_id.clone(), observed)))
+    }
+
+    pub fn side_session_metrics(&self, thread_id: &str) -> Option<Value> {
+        let side = self.sides.threads.get(thread_id)?;
+        // 用户要求侧边统计只使用侧边自己的响应和首 Token，不能回退到父会话 rollout。
+        Some(super::super::session_metrics::codex_side(
+            &side.turns,
+            self.session_first_token(thread_id),
+        ))
+    }
+
     pub fn resolve(&mut self, key: &str) {
         let request = self.requests.remove(key);
         if let Some(previous) = self.pending_notifications.remove(key) {
@@ -778,6 +824,38 @@ fn turn_started_ms(turn: &Value) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn harness_first_token_uses_first_model_delta_and_resets_for_new_turn() {
+        let mut projection = Projection::default();
+        projection.ingest(json!({"method":"turn/started","params":{
+            "threadId":"main","turn":{"id":"turn-a"}}}));
+        projection.ingest(
+            json!({"method":"item/commandExecution/outputDelta","params":{
+            "threadId":"main","turnId":"turn-a","delta":"工具输出"}}),
+        );
+        assert!(projection.session_first_token("main").is_none());
+        projection.ingest(json!({"method":"item/agentMessage/delta","params":{
+            "threadId":"main","turnId":"turn-a","delta":""}}));
+        assert!(projection.session_first_token("main").is_none());
+        projection.ingest(json!({"method":"item/agentMessage/delta","params":{
+            "threadId":"main","turnId":"turn-a","delta":"首个回复片段"}}));
+        let first = projection.session_first_token("main").unwrap();
+        assert_eq!(first.0, "turn-a");
+        projection.ingest(json!({"method":"item/reasoning/summaryTextDelta","params":{
+            "threadId":"main","turnId":"turn-a","delta":"后续思考"}}));
+        assert_eq!(projection.session_first_token("main"), Some(first));
+
+        projection.ingest(json!({"method":"turn/started","params":{
+            "threadId":"main","turn":{"id":"turn-b"}}}));
+        assert!(projection.session_first_token("main").is_none());
+        projection.ingest(json!({"method":"item/agentMessage/delta","params":{
+            "threadId":"main","turnId":"turn-a","delta":"旧轮次迟到片段"}}));
+        assert!(projection.session_first_token("main").is_none());
+        projection.ingest(json!({"method":"item/plan/delta","params":{
+            "threadId":"main","turnId":"turn-b","delta":"新轮次"}}));
+        assert_eq!(projection.session_first_token("main").unwrap().0, "turn-b");
+    }
 
     #[test]
     fn harness_deleted_projection_rejects_late_activity_and_approvals_across_reconnect() {

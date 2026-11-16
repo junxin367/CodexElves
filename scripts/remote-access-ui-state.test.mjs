@@ -1513,15 +1513,33 @@ test("Claude 订阅等级按效果图紧随标题，缺失和非法值不渲染�
 
 test("Claude 额度弹窗顶部显示当前实例的登录邮箱", async () => {
   const h = claudeUsageHarness(), value = h.usage();
-  value.accountEmail = "xxxz@example.com";
+  value.accountEmail = "sarahconnor@meiguoup.com";
   h.context.mountClaudeUsage(); h.context.syncClaudeUsage();
   h.requests[0].resolve({ ok: true, backend: "claude", instanceId: h.context.instance, usage: value });
   await new Promise(resolve => setImmediate(resolve));
   h.trigger.onclick();
   const header = h.nodes[0].children[0];
-  assert.equal(header.children[0].textContent, "xxxz@example.com");
-  assert.equal(header.children[0].title, "xxxz@example.com");
-  assert.match(h.trigger.attributes["aria-label"], /登录账号 xxxz@example\.com/);
+  assert.equal(header.children[0].textContent, "sar***@meiguoup.com");
+  assert.equal(header.children[0].title, "sar***@meiguoup.com");
+  assert.match(h.trigger.attributes["aria-label"], /登录账号 sar\*\*\*@meiguoup\.com/);
+  assert.doesNotMatch(h.trigger.attributes["aria-label"], /sarahconnor/);
+  assert.equal(h.context.claudeUsageMaskAccount("ab@example.com"), "ab***@example.com");
+  const reveal = header.children[2];
+  assert.equal(reveal.className, "claude-usage-account-toggle");
+  assert.equal(reveal.children[0].className, "ui-icon eye");
+  assert.equal(reveal.attributes["aria-label"], "显示完整邮箱");
+  assert.equal(reveal.attributes["aria-pressed"], "false");
+  reveal.onclick();
+  assert.equal(header.children[0].textContent, "sarahconnor@meiguoup.com");
+  assert.equal(header.children[0].title, "sarahconnor@meiguoup.com");
+  assert.equal(reveal.children[0].className, "ui-icon eyeOff");
+  assert.equal(reveal.attributes["aria-label"], "隐藏完整邮箱");
+  assert.equal(reveal.attributes["aria-pressed"], "true");
+  reveal.onclick();
+  assert.equal(header.children[0].textContent, "sar***@meiguoup.com");
+  h.trigger.onclick(); h.trigger.onclick();
+  assert.equal(h.nodes.at(-1).children[0].children[0].textContent, "sar***@meiguoup.com",
+    "关闭再打开必须恢复默认脱敏");
 
   const invalidHarness = claudeUsageHarness(), invalid = invalidHarness.usage();
   invalid.accountEmail = "<b>invalid</b>";
@@ -1531,6 +1549,7 @@ test("Claude 额度弹窗顶部显示当前实例的登录邮箱", async () => {
   invalidHarness.trigger.onclick();
   assert.equal(invalidHarness.nodes.at(-1).children[0].children[0].textContent, "账号信息",
     "异常邮箱不能直接进入标题");
+  assert.equal(invalidHarness.nodes.at(-1).children[0].children.some(child => child.className === "claude-usage-account-toggle"), false);
 });
 
 test("Claude 等级随实例缓存恢复并跟随新响应更新，未返回时不沿用旧等级", async () => {
@@ -13137,6 +13156,10 @@ test("编辑区主题提示接管并恢复 title，保留无障碍说明，触�
   assert.equal(nodes[0].textContent, "本会话 Fast 已开启，点击关闭", "保持悬停时及时接替旧提示");
   listeners.get("pointerout")({ target: trigger, relatedTarget: null });
   assert.equal(trigger.getAttribute("title"), "本会话 Fast 已开启，点击关闭");
+  const metrics = element("span");
+  metrics.id = "session-metrics"; metrics.setAttribute("title", "首 Token 时间 1.24 秒 · 缓存命中率 96.8%");
+  listeners.get("pointerover")({ target: metrics, pointerType: "mouse" }); flush();
+  assert.equal(nodes[0].className, "composer-tooltip composer-metrics-tooltip");
 });
 
 function composerMetricsHarness({ animate = false, reducedMotion = false } = {}) {
@@ -13175,6 +13198,7 @@ function composerMetricsHarness({ animate = false, reducedMotion = false } = {})
     setAttribute(key, value) { this.attributes[key] = value; } };
   const quota = { hidden: false, getBoundingClientRect: () => ({ width: 118 }) };
   const context = nodeVm.createContext({ nativeConnectionVersion: 1,
+    composerTooltips: null,
     composerMetricsState: null, session: { device: { id: "metrics-device", createdAtMs: 1 },
       capabilities: { sessionMetrics: true }, runtime: { revision: 1 } },
     thread: { id: "thread-a" }, selectedId: "thread-a", selectionVersion: 1, messageVersion: 0,
@@ -13200,7 +13224,7 @@ function composerMetricsHarness({ animate = false, reducedMotion = false } = {})
   nodeVm.runInContext((sourceSection("function composerMet", "function tok") + "\n" + sourceSection("function syncCom")), context);
   const value = overrides => ({ source: "codex-rollout", turnId: "turn-current",
     inputTokens: 999952, outputTokens: 48, turnTokens: 1000000, steps: 20, totalTokens: 5000000,
-    durationMs: 1000, tokensPerSecond: 48, ...overrides });
+    durationMs: 18620, tokensPerSecond: 48, firstTokenMs: 1240, cacheHitRate: 0.968, ...overrides });
   return { context, requests, timers, node, quota, properties, remembered, value, animations,
     text: () => node.children.map(child => child.textContent).join("  "),
     advance: amount => { now += amount; },
@@ -13225,7 +13249,40 @@ test("会话底栏统计按步数在前展示，百万与千单位一致，未�
   for (const invalid of [-1, NaN, Infinity, "20", true, Number.MAX_SAFE_INTEGER + 1])
     assert.equal(c.normalizeComposerMetrics(h.value({ steps: invalid })).steps, null);
   assert.equal(c.normalizeComposerMetrics(h.value({ steps: 0 })).steps, 0);
+  assert.equal(c.normalizeComposerMetrics(h.value({ cacheHitRate: 0 })).cacheHitRate, 0);
+  assert.equal(c.normalizeComposerMetrics(h.value({ source: "codex-side" })).source, "codex-side");
+  for (const invalid of [-0.1, 1.1, NaN, Infinity, "0.5", true])
+    assert.equal(c.normalizeComposerMetrics(h.value({ cacheHitRate: invalid })).cacheHitRate, null);
   assert.equal(c.normalizeComposerMetrics(h.value({ source: "estimated" })), null);
+});
+
+test("Token hover 按当前轮次单行展示实测字段，未返回字段整项隐藏", async () => {
+  const h = composerMetricsHarness(), c = h.context;
+  c.syncComposerMetrics(); h.complete(); await h.flush();
+  assert.equal(h.node.title, "首 Token 时间 1.24 秒 · 本轮耗时 18.62 秒 · 缓存命中率 96.8%");
+  assert.doesNotMatch(h.node.title, /输入：|输出：|模型调用|会话累计/);
+  h.advance(2001); c.syncComposerMetrics();
+  h.complete(1, { firstTokenMs: 1, durationMs: null, cacheHitRate: null }); await h.flush();
+  assert.equal(h.node.title, "首 Token 时间 1 毫秒");
+  h.advance(2001); c.syncComposerMetrics();
+  h.complete(2, { firstTokenMs: null, durationMs: null, cacheHitRate: null }); await h.flush();
+  assert.equal(h.node.title, "");
+});
+
+test("侧边会话按自身身份读取 Token 统计，主会话迟到回执不能覆盖", async () => {
+  const h = composerMetricsHarness(), c = h.context;
+  c.syncComposerMetrics();
+  c.selectedId = "side-session"; c.thread = { id: "side-session", viewKind: "side" };
+  c.turns = new Map([["side-turn", { id: "side-turn", status: "completed" }]]); ++c.selectionVersion;
+  c.syncComposerMetrics();
+  assert.equal(h.requests.length, 2);
+  assert.equal(h.requests[1].payload.threadId, "side-session");
+  h.complete(0); await h.flush();
+  assert.equal(c.composerMetricsState.value, null);
+  h.complete(1, { source: "codex-side", turnId: "side-turn", steps: 2, turnTokens: 400, totalTokens: 400,
+    tokensPerSecond: 25, firstTokenMs: 1000, durationMs: 4000, cacheHitRate: 0.4 }); await h.flush();
+  assert.equal(h.text(), "25tk/s  本轮 2步 400  总 400");
+  assert.equal(h.node.title, "首 Token 时间 1 秒 · 本轮耗时 4 秒 · 缓存命中率 40%");
 });
 
 test("会话底栏统计重复输入不增加读取，后台优先级且与发送状态无依赖", async () => {
@@ -13266,7 +13323,7 @@ test("会话底栏统计新轮次保留上一轮数据，拒绝错会话响应�
   c.turns.set("next", { id: "next", status: "inProgress" }); ++c.messageVersion;
   c.syncComposerMetrics();
   assert.equal(h.text(), "48tk/s  本轮 20步 1m  总 5m");
-  assert.match(h.node.title, /当前显示上一轮数据/);
+  assert.equal(h.node.title, "", "新轮次尚未返回时不把上一轮摘要标成本轮");
   h.requests[1].resolve({ ok: true, backend: "codex", threadId: "other-thread", metrics: h.value({ turnId: "next" }) });
   await h.flush();
   assert.equal(c.composerMetricsState.value.turnId, "turn-current");
@@ -13283,7 +13340,7 @@ test("会话底栏统计新轮次保留上一轮数据，拒绝错会话响应�
   await h.flush();
   assert.equal(c.composerMetricsState.value.turnId, "next");
   assert.equal(h.text(), "100tk/s  本轮 1步 1.3k  总 5m");
-  assert.doesNotMatch(h.node.title, /当前显示上一轮数据/);
+  assert.equal(h.node.title, "首 Token 时间 1.24 秒 · 本轮耗时 18.62 秒 · 缓存命中率 96.8%");
 });
 
 test("会话底栏统计空数据保持隐藏，部分数据仅展示已知项且保留真实零值", async () => {

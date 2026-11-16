@@ -1,6 +1,7 @@
 // 输入区统计：会话 Token 统计与上下文用量提示。
 
 import { $, element } from "../../ui/dom.js";
+import { composerTooltips } from "../../ui/tooltip.js";
 import { closePopup } from "../../ui/popup.js";
 import { closeComposerMenus } from "../../core/actions.js";
 import {
@@ -22,12 +23,13 @@ export function composerMetricsHasTurn(value) {
   return ["tokensPerSecond", "steps", "turnTokens"].some(key => composerMetricsNumber(value?.[key]));
 }
 export function normalizeComposerMetrics(value) {
-  if (!value || !["codex-rollout", "claude-native"].includes(value.source)
+  if (!value || !["codex-rollout", "codex-side", "claude-native"].includes(value.source)
       || typeof value.turnId !== "string" || value.turnId.length > 120) return null;
   const result = { source: value.source, turnId: value.turnId };
-  for (const key of ["inputTokens", "outputTokens", "turnTokens", "steps", "totalTokens", "durationMs", "tokensPerSecond"])
+  for (const key of ["inputTokens", "outputTokens", "turnTokens", "steps", "totalTokens", "durationMs", "tokensPerSecond", "firstTokenMs"])
     result[key] = composerMetricsNumber(value[key])
       && (key === "tokensPerSecond" || Number.isSafeInteger(value[key])) ? value[key] : null;
+  result.cacheHitRate = composerMetricsNumber(value.cacheHitRate) && value.cacheHitRate <= 1 ? value.cacheHitRate : null;
   // 用户要求无数据时不显示；只有原生实际返回的可展示数值才算统计，零值仍是有效数据。
   return composerMetricsHasTurn(result) || composerMetricsNumber(result.totalTokens) ? result : null;
 }
@@ -35,6 +37,10 @@ function composerMetricsCompact(value) {
   if (!composerMetricsNumber(value)) return "—";
   const divisor = value >= 1e6 ? 1e6 : value >= 1e3 ? 1e3 : 1;
   return `${Number((value / divisor).toFixed(divisor === 1 ? 0 : 1))}${divisor === 1e6 ? "m" : divisor === 1e3 ? "k" : ""}`;
+}
+function composerMetricsDuration(value) {
+  if (!composerMetricsNumber(value)) return "";
+  return value < 1000 ? `${value} 毫秒` : `${Number((value / 1000).toFixed(2))} 秒`;
 }
 function composerMetricNumber(state, key, value, format = String) {
   state.metricNumbers ||= new Map();
@@ -207,15 +213,16 @@ export function renderComposerMetrics() {
     }
     node.replaceChildren(...groups);
   }
-  const exact = number => composerMetricsNumber(number) ? number.toLocaleString("zh-CN") : "尚未提供";
-  const description = (sameTurn ? "" : "新轮次统计尚未返回，当前显示上一轮数据。")
-    + `${sameTurn ? "本轮" : "上一轮"}输入：${exact(metrics?.inputTokens)} Token；输出：${exact(metrics?.outputTokens)} Token；`
-    + `合计：${exact(metrics?.turnTokens)} Token；模型调用：${exact(metrics?.steps)} 次；`
-    + `当前会话累计：${exact(value?.totalTokens)} Token。`
-    + "速度为本轮输出 Token 除以原生执行时长的平均值，包含思考、工具与等待。m 表示百万 Token，k 表示千 Token。";
+  // 用户确认 hover 只保留当前轮次的一行实测摘要；未返回字段整项省略，三项均缺失或等待新轮次统计时不显示。
+  const details = [];
+  if (sameTurn && composerMetricsNumber(metrics?.firstTokenMs)) details.push(`首 Token 时间 ${composerMetricsDuration(metrics.firstTokenMs)}`);
+  if (sameTurn && composerMetricsNumber(metrics?.durationMs)) details.push(`本轮耗时 ${composerMetricsDuration(metrics.durationMs)}`);
+  if (sameTurn && composerMetricsNumber(metrics?.cacheHitRate)) details.push(`缓存命中率 ${Number((metrics.cacheHitRate * 100).toFixed(1))}%`);
+  const description = details.join(" · ");
   // 复用编辑区现有主题提示组件，不再创建一套 hover 配色或监听器。
   node.title = description;
-  node.setAttribute("aria-label", `${labels.join("，")}。${description}`);
+  node.setAttribute("aria-label", [labels.join("，"), description].filter(Boolean).join("。"));
+  composerTooltips?.update?.(node, description);
   fitComposerMetrics();
 }
 export function tokenCount(value) { return value >= 1000 ? `${Number((value / 1000).toFixed(1))}k` : String(Math.round(value)); }
