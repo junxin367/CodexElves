@@ -3816,6 +3816,7 @@ test("Claude 权限待生效时说明实际权限和原因，不阻断消息或�
   assert.equal(h.button.disabled, false);
   assert.match(h.button.title, /待生效/);
   assert.match(h.button.title, /接受编辑/);
+  assert.match(h.button.title, /已选择“计划”，待生效；当前原生权限为“接受编辑”/);
   assert.match(h.button.popupNote, /原生正在等待审批/);
   assert.equal(h.context.permissionWrites.size, 0);
   h.context.thread.nativeSettings = { permissionMode: "plan",
@@ -3823,6 +3824,25 @@ test("Claude 权限待生效时说明实际权限和原因，不阻断消息或�
   h.context.updateComposerPermissions();
   assert.equal(h.button.dataset.permissionPending, "false");
   assert.doesNotMatch(h.button.popupNote, /待生效/);
+});
+
+test("Claude 未切换权限或原生已应用时不显示待生效说明", () => {
+  const h = composerPermissionHarness({ backend: "claude" });
+  h.context.thread.permissionMode = "bypassPermissions";
+  // 只有目标值和原生值不同，但没有实际切换记录时不显示待生效。
+  h.context.thread.nativeSettings = { permissionMode: "acceptEdits" };
+  h.context.updateComposerPermissions();
+  assert.equal(h.button.dataset.permissionPending, "false");
+  assert.equal(h.button.popupNote, "“绕过权限”仅在该实例 CLI 支持且已允许时显示");
+  assert.doesNotMatch(h.button.title, /待生效/);
+  // 即使残留 pending 记录，原生已经达到目标时也不能继续显示等待说明。
+  h.context.thread.nativeSettings = { permissionMode: "bypassPermissions",
+    changes: { permissionMode: { requested: "bypassPermissions", state: "pending",
+      reason: "当前轮次尚未结束，绕过权限将在会话空闲后自动应用" } } };
+  h.context.updateComposerPermissions();
+  assert.equal(h.button.dataset.permissionPending, "false");
+  assert.equal(h.button.popupNote, "“绕过权限”仅在该实例 CLI 支持且已允许时显示");
+  assert.doesNotMatch(h.button.title, /待生效/);
 });
 
 test("Claude 权限保存分别提示立即生效与等待原生安全切换", async () => {

@@ -134,12 +134,12 @@ export function updateComposerPermissions() {
   const desiredPermission = mode === "configured" ? catalog?.defaultMode : effectiveMode;
   const samePermission = nativePermission === desiredPermission
     || ["default", "manual"].includes(nativePermission) && ["default", "manual"].includes(desiredPermission);
-  const permissionPending = !codex && !creating && (permissionChange?.state === "pending"
-    || !!mode && !!desiredPermission && !!nativePermission && !samePermission);
+  // 用户要求未主动切换时不显示待生效；只有对应切换仍在等待且原生值尚未达到目标才说明。
+  const permissionPending = !codex && !creating && permissionChange?.state === "pending" && !samePermission;
   const selectedLabel = permissionLabel(activeBackend(), mode || effectiveMode, creating);
-  const pendingDescription = `已选${selectedLabel}，待生效；当前原生权限：${nativePermission
-    ? permissionLabel(activeBackend(), nativePermission, false) : "尚未确认"}。${permissionChange?.reason
-    || "原生允许时自动切换，不中断任务或阻断消息。"}`;
+  const pendingDescription = `已选择“${selectedLabel}”，待生效；${nativePermission
+    ? `当前原生权限为“${permissionLabel(activeBackend(), nativePermission, false)}”` : "当前原生权限尚未确认"}。${permissionChange?.reason
+    || "将在原生会话允许时自动应用，不影响当前任务。"}`;
   control.dataset.permissionPending = String(permissionPending);
   if (permissionPending) control.popupNote = pendingDescription;
   control.setAttribute("aria-label", permissionPending ? `选择会话权限，已选${selectedLabel}，待生效` : `选择会话权限，当前为${label}`);
