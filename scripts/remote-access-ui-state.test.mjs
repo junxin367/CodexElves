@@ -1262,8 +1262,13 @@ test("Claude 额度弹层的重置时间使用目标 WSL 时区，不退回浏�
   h.requests[0].resolve({ ok: true, backend: "claude", instanceId: h.context.instance, usage: value });
   await new Promise(resolve => setImmediate(resolve));
   h.trigger.onclick();
-  assert.match(h.nodes[0].children[1].children[2].children[1].title, /America\/Los_Angeles/);
-  assert.match(h.nodes[0].children[1].children[2].children[1].attributes["aria-label"], /重置时间：/);
+  for (const section of h.nodes[0].children.slice(1, 3)) {
+    const reset = section.children[2].children[1];
+    assert.match(reset.title, /America\/Los_Angeles/);
+    assert.match(reset.title, /\d{4}\/\d{2}\/\d{2}/, "hover 必须显示完整年月日");
+    assert.match(reset.title, /\d{2}:\d{2}/, "5 小时和 7 天窗口都必须显示具体时分");
+    assert.match(reset.attributes["aria-label"], /重置时间：/);
+  }
 
   const invalidHarness = claudeUsageHarness(), invalid = invalidHarness.usage();
   invalid.timeZone = "PST8PDT";

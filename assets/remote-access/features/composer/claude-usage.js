@@ -119,7 +119,9 @@ function claudeUsageResetTitle(value, resetAt) {
   const timeZone = claudeUsageTimeZone(value);
   if (!timeZone) return "";
   try {
+    // 用户要求两个额度窗口的 hover 同时显示完整日期和具体时分；使用 24 小时制，不显示秒。
     const formatted = new Intl.DateTimeFormat("zh-CN", {
+      year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit",
       hour12: false, timeZone, timeZoneName: "short"
     }).format(new Date(resetAt));
     // 用户要求网页账号弹层与原生 Claude 使用同一目标 WSL 时区；明确显示 IANA 名称，避免浏览器本地时区误读。
