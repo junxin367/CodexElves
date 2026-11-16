@@ -85,8 +85,11 @@ export function updateComposerPermissions() {
   control.popupWidth = 340;
   // Claude 五行模式连同标题、说明约需 400px；预留到 440px，矮屏仍由 fitPopup 限高并滚动列表。
   control.popupMaxHeight = codex ? 360 : 440;
-  control.popupTitle = codex ? "应如何批准 Codex 操作？" : "模式";
+  // 用户要求 Codex 标题后显示“了解更多”；Claude 移除“模式”标题并把说明放到选项上方。
+  control.popupTitle = codex ? "应如何批准 Codex 操作？" : "";
   control.popupHelp = codex ? { label: "了解更多", href: "https://developers.openai.com/codex/agent-approvals-security" } : null;
+  control.popupHelpAfterTitle = codex;
+  control.popupNotePosition = codex ? "bottom" : "top";
   control.popupNote = codex ? "" : "“绕过权限”仅在该实例 CLI 支持且已允许时显示";
   if (!codex && !catalog && connected && session?.capabilities?.sessionPermissions === true
       && sessionInstanceEnabled(activeInstanceId())) void loadInstancePermissionCatalog(activeInstanceId());

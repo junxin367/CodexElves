@@ -451,14 +451,17 @@ input:focus,textarea:focus,.prompt-editor:focus,button:focus-visible{outline:1px
 .popup-option-label small{font-size:.78571rem;line-height:1.5}
 /* Codex 四项、Claude 五项沿用 App 模式：菜单图标 20px 对齐标题约 21px 的首行行高，当前项勾选。
  * 入口仍为 16px 图标；同步核对下方手机 28×36px 点击区，标题和帮助链接不能占用底部工具栏宽度。 */
-.composer-permissions-popup .popup-title{flex-shrink:0;padding:9px 12px 8px;color:var(--muted);font-size:.78571rem;line-height:1.5}
-.composer-permissions-popup .popup-option{align-items:flex-start;gap:10px;padding:10px 12px}
+/* 用户要求权限菜单全部文字与当前设置字号一致；标题、说明、选项及链接均继承 --font-size。 */
+.composer-permissions-popup{font-size:var(--font-size)}
+.composer-permissions-popup .popup-title{flex-shrink:0;padding:9px 12px 8px;color:var(--muted);font-size:inherit;line-height:1.5}
+.composer-permissions-popup .popup-option{align-items:flex-start;gap:10px;padding:10px 12px;font-size:inherit}
 .composer-permissions-popup .popup-option>.ui-icon{flex:0 0 20px;width:20px;height:20px;margin-top:1px}
-.composer-permissions-popup .popup-option-label small{text-wrap:pretty}
+.composer-permissions-popup .popup-option-label small{text-wrap:pretty;font-size:inherit}
 .composer-permissions-popup .popup-option[aria-selected=true]{background:var(--control-hover,var(--hover))}
 .composer-codex-permissions-popup .popup-option[data-value=full-access]>.ui-icon,.composer-codex-permissions-popup .popup-option[data-value=full-access]>.popup-option-label>span,.composer-claude-permissions-popup .popup-option[data-value=bypassPermissions]>.ui-icon,.composer-claude-permissions-popup .popup-option[data-value=bypassPermissions]>.popup-option-label>span{color:var(--permission-elevated-color)}
-.composer-permissions-popup .popup-note{flex-shrink:0;margin:4px 8px 0;padding:10px 4px 6px;border-top:1px solid var(--menu-divider,var(--line));color:var(--muted);font-size:.71429rem;line-height:1.5}
-.composer-codex-permissions-popup .popup-help{display:flex;flex-shrink:0;align-items:center;gap:6px;margin-top:4px;padding:10px 12px;border-top:1px solid var(--menu-divider,var(--line));color:var(--muted);font-size:.78571rem;text-decoration:none}
+.composer-permissions-popup .popup-note{flex-shrink:0;margin:4px 8px 0;padding:10px 4px 6px;border-top:1px solid var(--menu-divider,var(--line));color:var(--muted);font-size:inherit;line-height:1.5}
+.composer-claude-permissions-popup .popup-note{margin:0 8px 4px;border-top:0;border-bottom:1px solid var(--menu-divider,var(--line))}
+.composer-codex-permissions-popup .popup-help{display:flex;flex-shrink:0;align-items:center;gap:6px;margin-top:0;padding:0 12px 10px;border-top:0;border-bottom:1px solid var(--menu-divider,var(--line));color:var(--muted);font-size:inherit;text-decoration:none}
 .composer-codex-permissions-popup .popup-help>.ui-icon{width:13px;height:13px}
 .composer-add-popup .popup-option:is([data-value=compact],[data-value=goal]){font-size:calc(var(--font-size)*.9)}
 .composer-add-popup .popup-option:is([data-value=compact],[data-value=goal])>.ui-icon{width:18px;height:18px;color:var(--muted)}

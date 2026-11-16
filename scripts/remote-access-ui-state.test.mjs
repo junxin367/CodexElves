@@ -3755,6 +3755,49 @@ test("Codex 权限只展示 App 四项，旧只读归类展示但不修改已保
   assert.equal(h.button.popupTitle, "应如何批准 Codex 操作？");
   assert.equal(h.button.popupWidth, 340);
   assert.equal(h.button.popupHelp.label, "了解更多");
+  assert.equal(h.button.popupHelpAfterTitle, true);
+  assert.equal(h.button.popupNotePosition, "bottom");
+});
+
+test("弹层帮助与说明移动到列表上方且只出现一次", () => {
+  const h = sessionFilterPopupHarness();
+  Object.assign(h.trigger, {
+    popupTitle: "标题", popupHelp: { label: "了解更多", href: "https://example.com" },
+    popupHelpAfterTitle: true, popupNote: "顶部说明", popupNotePosition: "top",
+  });
+  h.open();
+  const children = h.context.activePopup.node.children;
+  assert.deepEqual(children.map(node => node.className), ["popup-title", "popup-help", "popup-note", "popup-list"]);
+  assert.equal(children.filter(node => node.className === "popup-help").length, 1);
+  assert.equal(children.filter(node => node.className === "popup-note").length, 1);
+  const bottom = sessionFilterPopupHarness();
+  Object.assign(bottom.trigger, { popupTitle: "标题", popupNote: "底部说明",
+    popupHelp: { label: "了解更多", href: "https://example.com" } });
+  bottom.open();
+  assert.deepEqual(bottom.context.activePopup.node.children.map(node => node.className),
+    ["popup-title", "popup-list", "popup-note", "popup-help"], "未启用顶部定位的普通弹层保持原布局");
+});
+
+test("会话权限菜单文字继承当前设置字号，顶部信息与链接使用下边界", async () => {
+  const css = await readFile(new URL("../assets/remote-access/style.css", import.meta.url), "utf8");
+  const start = css.indexOf(".composer-permissions-popup{"), end = css.indexOf(".composer-add-popup", start);
+  const block = css.slice(start, end);
+  assert.ok(start >= 0 && end > start);
+  assert.match(block, /^\.composer-permissions-popup\{font-size:var\(--font-size\)\}/);
+  const rule = selector => {
+    const from = block.indexOf(`${selector}{`);
+    assert.ok(from >= 0, `缺少 ${selector}`);
+    return block.slice(from, block.indexOf("}", from));
+  };
+  for (const selector of [
+    ".composer-permissions-popup .popup-title", ".composer-permissions-popup .popup-option",
+    ".composer-permissions-popup .popup-option-label small", ".composer-permissions-popup .popup-note",
+    ".composer-codex-permissions-popup .popup-help",
+  ]) assert.match(rule(selector), /font-size:inherit/);
+  assert.match(rule(".composer-codex-permissions-popup .popup-help"), /border-top:0/);
+  assert.match(rule(".composer-codex-permissions-popup .popup-help"), /border-bottom:1px solid/);
+  assert.match(rule(".composer-claude-permissions-popup .popup-note"), /border-top:0/);
+  assert.match(rule(".composer-claude-permissions-popup .popup-note"), /border-bottom:1px solid/);
 });
 
 test("Claude 权限待生效时说明实际权限和原因，不阻断消息或继续选择", () => {
@@ -3890,8 +3933,9 @@ test("Claude 菜单按 CLI 和原生会话开放能力筛选模式", () => {
   h.context.thread.permissionModes = ["default", "acceptEdits", "plan"];
   h.context.updateComposerPermissions();
   assert.equal(h.button.popupWidth, 340);
-  assert.equal(h.button.popupTitle, "模式");
+  assert.equal(h.button.popupTitle, "");
   assert.equal(h.button.popupHelp, null);
+  assert.equal(h.button.popupNotePosition, "top");
   assert.deepEqual(Array.from(h.button.options, option => option.value),
     ["manual", "acceptEdits", "plan"]);
   h.context.creating = true;

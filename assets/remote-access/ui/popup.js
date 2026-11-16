@@ -37,6 +37,14 @@ export function openPopup(trigger, { query = "", edge = null, focus = true, posi
   const selecting = !!trigger.selectOptions;
   node.setAttribute("aria-label", trigger.getAttribute("aria-label"));
   if (trigger.popupTitle) node.append(element("div", "popup-title", trigger.popupTitle));
+  let help = null;
+  if (trigger.popupHelp) {
+    help = element("a", "popup-help", trigger.popupHelp.label);
+    help.href = trigger.popupHelp.href; help.target = "_blank"; help.rel = "noopener noreferrer";
+    help.append(icon("window"));
+    // 用户要求 Codex 权限菜单的“了解更多”紧随标题，不在列表底部重复出现。
+    if (trigger.popupHelpAfterTitle) node.append(help);
+  }
   const list = element("div", "popup-list");
   list.setAttribute("role", selecting ? "listbox" : "menu");
   list.setAttribute("aria-label", trigger.getAttribute("aria-label"));
@@ -48,15 +56,12 @@ export function openPopup(trigger, { query = "", edge = null, focus = true, posi
     input.oninput = () => { if (activePopup) { activePopup.query = input.value; activePopup.index = 0; renderPopup(); } };
     node.append(input);
   }
+  const note = trigger.popupNote ? element("div", "popup-note", trigger.popupNote) : null;
+  // 用户要求 Claude 权限菜单的说明位于选项上方；其他弹层继续沿用底部说明。
+  if (note && trigger.popupNotePosition === "top") node.append(note);
   node.append(list);
-  if (trigger.popupNote) node.append(element("div", "popup-note", trigger.popupNote));
-  let help = null;
-  if (trigger.popupHelp) {
-    help = element("a", "popup-help", trigger.popupHelp.label);
-    help.href = trigger.popupHelp.href; help.target = "_blank"; help.rel = "noopener noreferrer";
-    help.append(icon("window"));
-    node.append(help);
-  }
+  if (note && trigger.popupNotePosition !== "top") node.append(note);
+  if (help && !trigger.popupHelpAfterTitle) node.append(help);
   const choices = selecting ? trigger.selectOptions : trigger.menuOptions;
   activePopup = { node, trigger, list, input, query, position, index: Math.max(0, choices.findIndex(option => option.value === trigger.value)), choices: [] };
   trigger.setAttribute("aria-expanded", "true"); trigger.setAttribute("aria-controls", node.id);
