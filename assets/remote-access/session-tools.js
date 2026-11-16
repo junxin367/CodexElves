@@ -134,7 +134,7 @@ export function mountSessionTools(options) {
   const dock = node("aside", "workspace-reader");
   dock.id = `${owner}-panel`;
   dock.hidden = true; dock.inert = true;
-  dock.setAttribute("aria-label", "文件、变更与侧边会话");
+  dock.setAttribute("aria-label", "文件、变更、子智能体与侧边会话");
   const separator = node("div", "workspace-reader-resize");
   separator.tabIndex = 0;
   separator.setAttribute("role", "separator");
@@ -143,7 +143,7 @@ export function mountSessionTools(options) {
   const toolbar = node("header", "workspace-reader-toolbar");
   const tablist = node("div", "workspace-reader-tabs");
   tablist.setAttribute("role", "tablist");
-  tablist.setAttribute("aria-label", "文件、变更与侧边会话标签页");
+  tablist.setAttribute("aria-label", "文件、变更、子智能体与侧边会话标签页");
   const toggle = control("", "打开标签页", () => {
     if (disposed || !desktop()) return;
     updateContext(); beforeOpen?.();
@@ -154,7 +154,7 @@ export function mountSessionTools(options) {
   toggle.setAttribute("aria-controls", dock.id);
   toggle.innerHTML = '<svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round" aria-hidden="true"><rect x="4" y="4" width="16" height="16" rx="3"/><path class="workspace-reader-toggle-pane" d="M14 4h3a3 3 0 0 1 3 3v10a3 3 0 0 1-3 3h-3z"/><path d="M14 4v16"/></svg>';
   const views = node("div", "workspace-reader-views");
-  const empty = node("div", "workspace-reader-empty", "从会话菜单打开文件、变更或侧边会话");
+  const empty = node("div", "workspace-reader-empty", "从会话菜单打开文件、变更、子智能体或侧边会话");
   toolbar.append(tablist); dock.append(separator, toolbar, views, empty); workspace.append(dock);
   trigger.after(toggle);
 
@@ -225,7 +225,7 @@ export function mountSessionTools(options) {
     toggle.focus({ preventScroll: true });
   }
   function tabKey(item) {
-    if (item.kind === "side") return JSON.stringify(["side", item.threadId]);
+    if (item.kind === "side" || item.kind === "subagent") return JSON.stringify([item.kind, item.threadId]);
     if (item.kind === "side-creation") return JSON.stringify(["side-creation", item.requestId]);
     if (item.kind === "file") return JSON.stringify(["file", item.path.replaceAll("\\", "/")]);
     if (item.kind === "change") return JSON.stringify(["change", detailKey(item.file)]);
@@ -302,7 +302,8 @@ export function mountSessionTools(options) {
       return existing;
     }
     const id = `${owner}-${++sequence}`;
-    const side = item.kind === "side" || item.kind === "side-creation";
+    const threadTab = item.kind === "side" || item.kind === "subagent";
+    const side = threadTab || item.kind === "side-creation";
     const label = side ? item.title : item.kind === "changes" ? "变更" : item.kind === "files" ? "打开文件"
       : `${displayWorkspaceName((item.path || item.file.path).split(/[\\/]/).at(-1))}${item.kind === "change" ? " · 变更" : ""}`;
     const title = item.kind === "change" ? `${sections.find(([name]) => name === item.file.section)?.[1] || "变更"}：${displayedPath(item.file)}`
@@ -326,7 +327,7 @@ export function mountSessionTools(options) {
       button.title = running ? `${title}，正在执行` : title;
       button.setAttribute("aria-label", button.title);
     };
-    if (item.kind === "side") updateRunning(item.running === true);
+    if (threadTab) updateRunning(item.running === true);
     button.append(symbol, node("span", "workspace-reader-tab-label", label));
     const remove = control("×", `关闭${label}`, () => { if (ownsTab()) closeTab(key); }, "workspace-reader-tab-close");
     tab.append(button, remove);
@@ -351,9 +352,10 @@ export function mountSessionTools(options) {
     const rendererOptions = { ...options, workspace: view, beforeOpen: undefined, embedded,
       getContext: () => authorizationIdentity(context.value) === authorizationIdentity() ? context.value : {} };
     // 每个标签保留自己的阅读 DOM、滚动和请求；详情不重复写变更列表的持久缓存。
-    const renderer = item.kind === "side" ? mountWorkspaceSideThread(view, item, () => {
-      // 侧边 iframe 中的快捷键仍从当前主会话创建；只接受当前可见标签，不允许嵌套创建。
-      if (ownsTab() && desktop() && context.active === key) options.createSideThread?.();
+    // 用户要求子会话参照侧边会话在右侧标签显示，复用独立 iframe 和保留状态；子智能体仍由原生元数据约束为只读。
+    const renderer = threadTab ? mountWorkspaceSideThread(view, item, () => {
+      // 仅可写侧边 iframe 的快捷键可从当前主会话创建；子智能体复用标签不能获得新建会话写入能力。
+      if (item.kind === "side" && ownsTab() && desktop() && context.active === key) options.createSideThread?.();
     }, running => {
       if (retainsTab()) updateRunning(running);
     }, (trigger, resource) => {
@@ -387,15 +389,19 @@ export function mountSessionTools(options) {
     if (desktop()) openTab({ kind: "file", path, line });
     else mobilePages().openFile(path, line);
   }
-  function openSideThread(item, { reveal = true } = {}) {
+  function openThreadTab(item, kind, { reveal = true } = {}) {
     if (!desktop() || disposed || typeof item?.id !== "string" || !/^[A-Za-z0-9_-]{1,120}$/.test(item.id)) return false;
     const parentThreadId = getContext()?.threadId;
     if (!parentThreadId || item.id === parentThreadId) return false;
-    // 用户要求 PC 侧边会话与主聊天并排，共用文件/变更标签栏；重复点击只选中已有标签，不重载或重发。
-    openTab({ kind: "side", threadId: item.id, title: String(item.title || item.name || "侧边会话"),
-      running: item.running }, { reveal });
+    // 用户要求 PC 子会话与侧边会话一样和主聊天并排，共用文件/变更标签栏；
+    // 按会话类型和 ID 复用已有标签，不切换主会话、不重载或重发，手机和 Android 继续走整页。
+    const title = kind === "subagent" ? item.name || item.title || "子智能体" : item.title || item.name || "侧边会话";
+    openTab({ kind, threadId: item.id, title: String(title),
+      running: item.running === true || kind === "subagent" && item.status === "active" }, { reveal });
     return true;
   }
+  function openSideThread(item, options) { return openThreadTab(item, "side", options); }
+  function openSubagent(item, options) { return openThreadTab(item, "subagent", options); }
   function openSideCreation({ requestId, onClose }) {
     if (!desktop() || disposed || !getContext()?.threadId) return null;
     // 用户要求 PC 新建也直接进入右侧标签：这里只展示原操作的等待状态，不另发创建请求、不禁用主聊天。
@@ -474,7 +480,7 @@ export function mountSessionTools(options) {
   desktopMedia.addEventListener("change", syncLayout);
   updateContext();
   return {
-    open, openFile, openSideThread, openSideCreation, updateContext,
+    open, openFile, openSideThread, openSubagent, openSideCreation, updateContext,
     close: () => desktop() ? hidePanel() : mobile?.close(),
     dispose() {
       if (disposed) return;
@@ -502,7 +508,8 @@ function mountWorkspaceSideCreation(workspace) {
 }
 
 function mountWorkspaceSideThread(workspace, item, createSideThread, updateRunning, openMediaPreview) {
-  // 每个侧边会话使用独立页面上下文，隔离输入、选中会话、滚动和实时连接，不能借用主聊天的全局发送状态。
+  // 每个侧边会话/子智能体使用独立页面上下文，隔离输入、选中会话、滚动和实时连接，不能借用主聊天的全局发送状态。
+  // 子智能体沿用原生读取返回的只读身份，不创建会话副本或开放发送。
   // 专用入口仅允许同源嵌入，不修改普通首页的禁止嵌入策略；关闭标签只卸载页面，不关闭服务端会话。
   const frame = node("iframe", "workspace-side-thread");
   const address = new URL("/side-thread", window.location.href);

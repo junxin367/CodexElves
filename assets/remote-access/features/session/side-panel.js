@@ -1,10 +1,11 @@
-// PC 侧边会话面板与独立会话窗口的页面模式，以及向外层标签同步执行状态。
+// PC 侧边会话/子智能体面板与独立会话窗口的页面模式，以及向外层标签同步执行状态。
 
 import { connected, creating, pageLeaving, selectedId, thread } from "../../core/state.js";
 import { markVisibleThreadRead } from "../messages/user-content.js";
 import { sidebarAttentionState } from "../sidebar/list-state.js";
 
-// PC 右侧侧边会话使用独立页面；外层标签已提供名称，因此面板内隐藏整段顶部信息、主侧栏与返回入口。
+// 用户要求 PC 子会话参照侧边会话使用右侧标签内的独立页面；外层标签已提供名称，
+// 因此面板内隐藏整段顶部信息、主侧栏与返回入口，子智能体仍沿用原生只读限制。
 // 文件工具在本面板内打开，避免嵌套第二个标签面板；手机普通关联会话页不使用此标记。
 export const workspaceSidePanel = location.pathname === "/side-thread";
 // 按页面地址标记独立会话窗口或 PC 侧边面板模式，样式据此隐藏侧栏等区域。

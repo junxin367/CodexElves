@@ -391,7 +391,11 @@ export async function openRelatedThread(item, kind, parentThreadId = selectedId,
 } = {}) {
   if (kind === "subagent" ? !subagentsEnabled() : !sideThreadsEnabled()) return;
   if (relatedSessionView || !validRelatedThreadId(item?.id) || parentThreadId !== selectedId) return;
-  if (kind === "side" && sessionTools?.openSideThread?.(item, { reveal: revealSidePanel })) {
+  // 用户要求 PC 子会话也进入侧边标签；原生只读规则和手机/Android 整页导航保留，不改变主会话选中状态。
+  const openedInPanel = kind === "subagent"
+    ? sessionTools?.openSubagent?.(item, { reveal: revealSidePanel })
+    : sessionTools?.openSideThread?.(item, { reveal: revealSidePanel });
+  if (openedInPanel) {
     onViewReady?.();
     return;
   }

@@ -477,21 +477,35 @@ export function mountSessionMenu({
     }
     positionFrame = null; positionSignature = "";
   }
-  function anchorPositionSignature(box, view) {
+  function menuBounds(view) {
+    const conversation = trigger.closest(".conversation")?.getBoundingClientRect();
+    const header = trigger.closest(".conversation-header")?.getBoundingClientRect();
+    // 用户要求菜单在主会话区域内，与标题栏底部、会话右边缘各距 20px；
+    // 侧边标签开关只改变会话实际边界，不能改用整个窗口或按钮右边缘定位。
+    return {
+      left: Math.max(view.left, conversation?.left ?? view.left),
+      right: Math.min(view.left + view.width, conversation?.right ?? view.left + view.width),
+      top: Math.max(view.top, header?.bottom ?? conversation?.top ?? view.top),
+      bottom: Math.min(view.top + view.height, conversation?.bottom ?? view.top + view.height),
+    };
+  }
+  function anchorPositionSignature(box, view, bounds) {
     return [box.left, box.top, box.right, box.bottom, box.width, box.height,
-      view.left, view.top, view.width, view.height].join(",");
+      view.left, view.top, view.width, view.height,
+      bounds.left, bounds.top, bounds.right, bounds.bottom].join(",");
   }
   function startPositionTracking() {
     if (positionFrame != null || disposed || !opened || suspended || document.hidden) return;
-    // 用户要求会话菜单跟随触发按钮：侧栏和右侧面板移动、关联页动画不一定产生窗口 resize。
-    // 只在菜单可见时比较锚点坐标；位置不变不写样式，关闭、挂起和后台页面均取消逐帧跟踪。
+    // 用户要求主会话区域变化后仍保持 20px 间距；分栏、标题换行及动画不一定产生窗口 resize，
+    // 因此可见时同时跟踪按钮、主会话和标题栏边界；静止不写样式，关闭、挂起及后台时取消跟踪。
     const requestFrame = callback => window.requestAnimationFrame
       ? window.requestAnimationFrame(callback) : setTimeout(callback, 16);
     const follow = () => {
       positionFrame = null;
       if (disposed || !opened || suspended || document.hidden) return;
+      const view = viewport();
       if (!trigger.isConnected || trigger.disabled || trigger.hidden
-          || anchorPositionSignature(trigger.getBoundingClientRect(), viewport()) !== positionSignature) fit();
+          || anchorPositionSignature(trigger.getBoundingClientRect(), view, menuBounds(view)) !== positionSignature) fit();
       if (!disposed && opened && !suspended && !document.hidden) positionFrame = requestFrame(follow);
     };
     positionFrame = requestFrame(follow);
@@ -504,29 +518,27 @@ export function mountSessionMenu({
   function fit() {
     if (!opened || suspended) return;
     if (!trigger.isConnected || trigger.disabled || trigger.hidden) { close(false, true); return; }
-    const view = viewport(), box = trigger.getBoundingClientRect(), padding = 8;
+    const view = viewport(), box = trigger.getBoundingClientRect(), bounds = menuBounds(view), padding = 8;
     if (box.width === 0 && box.height === 0) {
       close(false, true); return;
     }
     if (box.bottom <= view.top || box.top >= view.top + view.height
         || box.right <= view.left || box.left >= view.left + view.width) { close(false, true); return; }
-    positionSignature = anchorPositionSignature(box, view);
+    positionSignature = anchorPositionSignature(box, view, bounds);
     // PC 沿用 300px 宽度，不能因窗口高度低于 600px 而改用手机比例；
-    // 手机短边低于 600px 时仍取视口宽度的 65%，两侧至少保留 8px。
+    // 手机短边低于 600px 时仍取视口宽度的 65%，两端均受主会话内侧 20px 留白约束。
+    const inset = 20, availableWidth = Math.max(0, bounds.right - bounds.left - inset * 2);
     const phoneViewport = !desktop() && Math.min(view.width, view.height) < 600;
     const width = phoneViewport
-      ? Math.max(0, Math.min(view.width * .65, view.width - padding * 2))
-      : Math.max(0, Math.min(300, view.width - padding * 2));
-    // 用户要求弹层与图标统一间隔 10px；PC 和手机共用，视口边缘仍保留 8px 安全留白。
-    const anchorGap = 10;
-    const top = Math.max(view.top + padding, Math.min(box.bottom + anchorGap, view.top + view.height - padding));
+      ? Math.min(view.width * .65, availableWidth)
+      : Math.min(300, availableWidth);
+    // 20px 从标题栏底边计算，右坐标从主会话右边缘减 20px；需与 menuBounds 和位置跟踪同步核对。
+    // 窄屏只缩小宽度，低窗口只缩小可滚动高度，不通过翻转或贴边破坏这两个间距。
+    const top = bounds.top + inset;
     menu.style.width = `${width}px`;
-    // 用户要求会话主菜单在 PC 和手机上固定向左展开，右边缘对齐图标右边缘，不参与通用 65% / 35% 方向判定。
-    // 左坐标为图标右边缘减菜单宽度；空间不足时只平移以保留两侧 8px 留白，不切换展开方向。
-    menu.style.left = `${Math.max(view.left + padding,
-      Math.min(box.right - width, view.left + view.width - width - padding))}px`;
+    menu.style.left = `${bounds.right - inset - width}px`;
     menu.style.top = `${top}px`;
-    menu.style.maxHeight = `${Math.max(0, Math.min(480, view.height * .8, view.top + view.height - top - padding))}px`;
+    menu.style.maxHeight = `${Math.max(0, Math.min(480, view.height * .8, bounds.bottom - top - inset))}px`;
     if (!actionMenu.hidden) {
       const source = contextSource.getBoundingClientRect();
       const x = contextPosition ? source.left + contextPosition.x : source.right;

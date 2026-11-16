@@ -2708,6 +2708,9 @@ test("手机点击普通页面隐藏会话菜单，侧边会话页面及菜单�
 
 function sessionMenuPositionHarness({ width = 1200, height = 800, related = false } = {}) {
   let anchor = { left: width - 62, top: 20, width: 32, height: 32 }, frameId = 0;
+  let conversation = { left: width > 760 && !related ? 280 : 0, top: 0, height };
+  conversation.width = width - conversation.left;
+  let header = { ...conversation, height: 64 };
   const frames = new Map(), listeners = new Map(), writes = [], attributes = new Map();
   const rectangle = box => ({ ...box, right: box.left + box.width, bottom: box.top + box.height });
   const menu = { style: new Proxy({}, { set(target, name, value) {
@@ -2725,7 +2728,9 @@ function sessionMenuPositionHarness({ width = 1200, height = 800, related = fals
       cancelAnimationFrame(id) { frames.delete(id); } },
     trigger: { isConnected: true, disabled: false, hidden: false,
       getBoundingClientRect: () => rectangle(anchor),
-      closest: selector => related && selector === ".related-session-view" ? {} : null,
+      closest: selector => selector === ".conversation" ? { getBoundingClientRect: () => rectangle(conversation) }
+        : selector === ".conversation-header" ? { getBoundingClientRect: () => rectangle(header) }
+        : related && selector === ".related-session-view" ? {} : null,
       setAttribute: (name, value) => attributes.set(name, value), focus() {} },
     layer: { hidden: false, hasAttribute: () => false, classList: { add() {}, remove() {} } },
     actionMenu: { hidden: true, style: {}, getBoundingClientRect: () => ({ width: 180, height: 40 }) },
@@ -2740,29 +2745,40 @@ function sessionMenuPositionHarness({ width = 1200, height = 800, related = fals
     + sessionMenuSource.slice(visibilityStart, sessionMenuSource.indexOf("  syncContext();", visibilityStart)), context);
   return { context, frames, writes, attributes,
     move(box) { anchor = { ...anchor, ...box }; },
+    moveConversation(box) { conversation = { ...conversation, ...box }; },
+    moveHeader(box) { header = { ...header, ...box }; },
     frame() { const pending = [...frames.values()]; frames.clear(); for (const callback of pending) callback(); },
     visibility(hidden) { context.document.hidden = hidden; listeners.get("visibilitychange")(); },
   };
 }
 
-test("会话菜单固定向左展开并跟随侧栏、右侧面板及关联页动画，静止时不重复写定位样式", () => {
+test("会话菜单始终距主会话标题栏和右边缘各 20px，分栏和标题变化无 resize 也更新", () => {
   for (const related of [false, true]) {
     const h = sessionMenuPositionHarness({ related }), { context, frames, writes } = h;
     context.fit(); context.startPositionTracking(); context.startPositionTracking();
-    assert.equal(context.menu.style.left, "870px");
-    assert.equal(context.menu.style.top, "62px");
+    assert.equal(context.menu.style.left, "880px");
+    assert.equal(context.menu.style.top, "84px");
     assert.equal(frames.size, 1, "重复启动不能累积跟踪任务");
     const initialWrites = writes.length;
     h.frame();
     assert.equal(writes.length, initialWrites, "布局不变时只读锚点，不反复写样式");
-    for (const [left, top, expectedLeft] of [[1000, 24, 732], [500, 28, 232],
-      [584, 28, 316], [763, 28, 495], [764, 28, 496], [765, 28, 497],
-      [850, 28, 582], [20, 28, 8], [1138, 20, 870]]) {
+    for (const [left, top] of [[1000, 24], [500, 28], [584, 28], [763, 28], [850, 28], [1138, 20]]) {
       h.move({ left, top }); h.frame();
-      assert.equal(context.menu.style.left, `${expectedLeft}px`);
-      assert.equal(context.menu.style.top, `${top + 32 + 10}px`);
+      assert.equal(context.menu.style.left, "880px", "按钮和标签开关的相对位置不能改变区域内间距");
+      assert.equal(context.menu.style.top, "84px");
       assert.equal(frames.size, 1, "没有 resize 或 scroll 事件也持续跟随");
     }
+    h.move({ left: 650 });
+    for (const [left, width, expectedLeft] of [[280, 440, 400], [0, 720, 400],
+      [280, 680, 640], [0, 1200, 880]]) {
+      h.moveConversation({ left, width }); h.frame();
+      assert.equal(context.menu.style.left, `${expectedLeft}px`, "只改变主会话边界、按钮不动时也必须跟随");
+      assert.equal(context.menu.style.top, "84px");
+    }
+    h.moveHeader({ height: 80 }); h.frame();
+    assert.equal(context.menu.style.top, "100px");
+    h.moveHeader({ top: 10 }); h.frame();
+    assert.equal(context.menu.style.top, "110px", "标题栏移动与高度变化均保持底部 20px");
     context.close(false, true);
     assert.equal(frames.size, 0);
   }
@@ -2775,24 +2791,29 @@ test("会话菜单保持 PC 短窗口宽度、手机比例及可视视口边界"
   const phone = sessionMenuPositionHarness({ width: 390, height: 844 });
   phone.context.fit();
   assert.equal(phone.context.menu.style.width, "253.5px");
-  assert.equal(phone.context.menu.style.left, "106.5px");
+  assert.equal(phone.context.menu.style.left, "116.5px");
   phone.move({ left: 230 }); phone.context.fit();
-  assert.equal(phone.context.menu.style.left, "8.5px", "手机入口位于 65% 分界之前仍固定向左展开");
-  assert.equal(phone.context.menu.style.width, "253.5px", "固定方向不改变手机菜单宽度");
+  assert.equal(phone.context.menu.style.left, "116.5px", "手机按钮移动不改变距会话右侧 20px 的规则");
+  assert.equal(phone.context.menu.style.width, "253.5px", "区域定位不改变手机默认菜单宽度");
   const h = sessionMenuPositionHarness(), { context } = h;
   context.fit(); context.startPositionTracking();
   context.window.visualViewport = { offsetLeft: 100, offsetTop: 40, width: 700, height: 400 };
   h.move({ left: 780, top: 50 }); h.frame();
-  assert.equal(context.menu.style.left, "492px", "右侧保留 8px");
-  assert.equal(context.menu.style.top, "92px");
+  assert.equal(context.menu.style.left, "480px", "可见主会话右侧保留 20px");
+  assert.equal(context.menu.style.top, "84px");
   assert.equal(context.menu.style.maxHeight, "320px");
   h.move({ left: 538, top: 50 }); h.frame();
-  assert.equal(context.menu.style.left, "270px", "带偏移视口中，65% 分界前仍固定向左展开");
+  assert.equal(context.menu.style.left, "480px", "带偏移视口仍使用可见主会话边界");
   h.move({ left: 539, top: 50 }); h.frame();
-  assert.equal(context.menu.style.left, "271px", "跨过 65% 分界后继续向左展开，不切换方向");
+  assert.equal(context.menu.style.left, "480px", "跨过 65% 分界不改变位置");
   h.move({ left: 104, top: 400 }); h.frame();
-  assert.equal(context.menu.style.left, "108px", "左侧保留 8px");
-  assert.equal(context.menu.style.top, "432px");
+  assert.equal(context.menu.style.left, "480px");
+  assert.equal(context.menu.style.top, "84px", "按钮下移不能覆盖主会话顶部定位");
+  h.moveConversation({ left: 650, width: 550 }); h.frame();
+  assert.equal(context.menu.style.width, "110px", "区域变窄时缩小菜单，左右各保留 20px");
+  assert.equal(context.menu.style.left, "670px");
+  h.moveHeader({ height: 430 }); h.frame();
+  assert.equal(context.menu.style.top, "450px");
   assert.equal(context.menu.style.maxHeight, "0px", "底边空间不足时不溢出视口");
   context.close(false, true);
 });
@@ -2804,16 +2825,16 @@ test("会话菜单挂起、后台和强制关闭会取消跟踪，恢复后重�
   assert.equal(frames.size, 1, "PC 普通关闭仍保留菜单及跟踪");
   context.suspend();
   assert.equal(frames.size, 0);
-  h.move({ left: 900 });
+  h.move({ left: 900 }); h.moveConversation({ width: 700 });
   context.resume(); h.frame();
-  assert.equal(context.menu.style.left, "632px");
+  assert.equal(context.menu.style.left, "660px");
   assert.equal(frames.size, 1);
   h.visibility(true);
   assert.equal(context.opened, true, "PC 菜单在后台保留打开状态");
   assert.equal(frames.size, 0);
-  h.move({ left: 800 });
+  h.move({ left: 800 }); h.moveConversation({ width: 600 });
   h.visibility(false);
-  assert.equal(context.menu.style.left, "532px");
+  assert.equal(context.menu.style.left, "560px");
   assert.equal(frames.size, 1);
   context.close(false, true);
   assert.equal(frames.size, 0);
@@ -2863,11 +2884,11 @@ test("侧边会话操作子菜单随所属菜单行移动，保留右键位置�
   } };
   const original = row.getBoundingClientRect();
   context.showContext(row, { id: "side" }, "owner", { x: original.left + 12, y: original.top + 8 });
-  assert.equal(context.actionMenu.style.left, "898px");
-  assert.equal(context.actionMenu.style.top, "310px");
-  h.move({ left: 900, top: 30 }); h.frame();
-  assert.equal(context.actionMenu.style.left, "660px");
-  assert.equal(context.actionMenu.style.top, "320px");
+  assert.equal(context.actionMenu.style.left, "908px");
+  assert.equal(context.actionMenu.style.top, "332px");
+  h.moveConversation({ width: 700 }); h.moveHeader({ top: 10 }); h.frame();
+  assert.equal(context.actionMenu.style.left, "688px");
+  assert.equal(context.actionMenu.style.top, "342px");
   context.close(false, true);
   assert.equal(context.actionMenu.hidden, true);
 });
@@ -9968,6 +9989,30 @@ test("PC 打开侧边会话交给右侧标签，不切换主会话、不改主�
   assert.equal(h.prompt.value, beforeDraft);
   assert.equal(JSON.stringify(h.historyEntries), beforeHistory);
   assert.equal(ready, true);
+});
+
+test("菜单及正文打开子智能体交给右侧只读标签，不切换主会话、草稿和历史", async () => {
+  const h = sideCreationNavigationHarness(), opened = [];
+  const beforeHistory = JSON.stringify(h.historyEntries), beforeDraft = h.prompt.value;
+  h.context.sessionTools = {
+    openSubagent: (item, options) => { opened.push({ item, options }); return true; },
+    openSideThread: () => assert.fail("子智能体不能被当成可写侧边会话"),
+  };
+  let ready = false;
+  await h.context.openRelatedThread({ id: "agent-one", name: "子智能体一", ephemeral: true }, "subagent", "main",
+    { onViewReady: () => { ready = true; } });
+  assert.equal(opened.length, 1);
+  assert.equal(opened[0].item.id, "agent-one");
+  assert.equal(opened[0].item.ephemeral, true);
+  assert.equal(opened[0].options.reveal, true);
+  assert.equal(h.context.selectedId, "main");
+  assert.equal(h.context.relatedSessionView, null);
+  assert.equal(h.prompt.value, beforeDraft);
+  assert.equal(JSON.stringify(h.historyEntries), beforeHistory);
+  assert.equal(ready, true);
+  h.context.subagentsEnabled = () => false;
+  await h.context.openRelatedThread({ id: "agent-two" }, "subagent", "main");
+  assert.equal(opened.length, 1, "能力关闭后不能打开子智能体标签");
 });
 
 test("新建侧边继承主会话尚未发送的模型和深度，创建后更改主会话不改原请求", async () => {

@@ -395,6 +395,57 @@ test("PC 侧边会话与文件共用标签，重复打开不重载，主聊天�
   assert.equal(frame.isConnected, false);
 });
 
+test("PC 子智能体与侧边会话共用标签，重复打开和切换主会话保留原页面及阅读位置", () => {
+  let created = 0;
+  const h = harness({ createSideThread: () => { created++; } });
+  h.api.openFile("notes.md");
+  h.api.openSideThread({ id: "side-a", title: "侧边 A" });
+  assert.equal(h.api.openSubagent({ id: "agent-a", name: "子智能体 A", status: "active" }), true);
+  const agentView = h.views.children[2], frame = agentView.children[0];
+  assert.equal(frame.tag, "iframe");
+  assert.equal(new URL(frame.src).pathname, "/side-thread");
+  assert.equal(new URL(frame.src).hash, "#thread=agent-a");
+  assert.equal(frame.title, "子智能体 A");
+  assert.equal(h.tablist.children[2].children[0].children[0].classList.contains("spinner"), true);
+  assert.equal(h.state.threadId, "thread-a");
+  assert.equal(h.conversation.inert, false);
+  frame.contentWindow = { postMessage() {} };
+  h.message({ source: frame.contentWindow, origin: "http://127.0.0.1:45222",
+    data: { type: "codex-elves-create-side-thread" } });
+  assert.equal(created, 0, "只读子智能体不能借用侧边快捷键创建会话");
+  frame.savedScrollTop = 456;
+  h.api.openSideThread({ id: "side-a" });
+  assert.equal(agentView.hidden, true);
+  h.api.openSubagent({ id: "agent-a", name: "子智能体 A" });
+  assert.equal(h.tablist.children.length, 3);
+  assert.equal(agentView.children[0], frame);
+  assert.equal(frame.savedScrollTop, 456);
+  assert.equal(agentView.hidden, false);
+  h.api.close();
+  assert.equal(frame.isConnected, true);
+  h.toggle.emit("click");
+  assert.equal(agentView.children[0], frame);
+  h.state.threadId = "thread-b"; h.api.updateContext();
+  assert.equal(agentView.hidden, true);
+  assert.equal(frame.isConnected, true);
+  h.state.threadId = "thread-a"; h.api.updateContext();
+  assert.equal(h.selected().children[0].getAttribute("aria-label"), "子智能体 A，正在执行");
+  assert.equal(agentView.children[0], frame);
+  assert.equal(frame.savedScrollTop, 456);
+  h.state.cacheScope = "scope-b"; h.api.updateContext();
+  assert.equal(frame.isConnected, false, "授权变化必须释放子智能体页面");
+  h.api.dispose();
+});
+
+test("手机、Android 和嵌入面板拒绝打开子智能体标签，保留关联会话整页入口", () => {
+  for (const options of [{ desktop: false }, { android: true }, { sidePanel: true }]) {
+    const h = harness(options);
+    assert.equal(h.api.openSubagent({ id: "agent-a" }), false);
+    assert.equal(h.tablist.children.length, 0);
+    h.api.dispose();
+  }
+});
+
 test("侧边标签向独立页面同步显示状态，隐藏标签不会继续作为可见页面", () => {
   const h = harness();
   h.api.openSideThread({ id: "side-a" });
