@@ -21,12 +21,14 @@ import {
   setPromptSelection, skillIdentity, skillVisibleName, syncPromptTrailingBreak,
   syncSelectedSkillsFromPrompt, writePromptContent
 } from "./prompt-editor.js";
+import { activatePromptOptimization } from "./prompt-optimization.js";
 import { selectSkill } from "./selected-skills.js";
 import {
   appliedGlobalSkills, appliedSkillCatalog, catalogCacheMs, catalogFallbackMs, catalogFresh,
   catalogNeedsRefresh, catalogRefreshAheadMs, catalogRetryMs, catalogUsable, compactCommandIcon,
   compactCommandMatches, globalSkillChoices, globalSkillEpoch, globalSkillsLoadedAt,
-  goalComposerIcon, normalizeSlashIndex, selectedSkills, setAppliedGlobalSkills,
+  goalComposerIcon, normalizeSlashIndex, promptOptimizationCommandIcon, promptOptimizationCommandMatches,
+  selectedSkills, setAppliedGlobalSkills,
   setAppliedSkillCatalog, setCatalogRefreshTimer, setGlobalSkillChoices, setGlobalSkillEpoch,
   setGlobalSkillsInvalidated, setGlobalSkillsLoadedAt, setMessageSkillLoadScope,
   setSkillCatalogRevision, setSkillChoices, setSkillIndex, setSkillLoadVersion, setSkillLoading,
@@ -64,6 +66,11 @@ export function slashMenuEntries(query = slashQuery()) {
     entries.push({ type: "compact", enabled: compactCommandAvailable() });
   if (goalCommandMatches(query.query) && (!isClaude() || claudeCommandSupported("goal")))
     entries.push({ type: "goal", enabled: !goalComposerReason() });
+  // 用户要求在 / 菜单提供提示词优化；独立优化服务不依赖 Claude 原生压缩或目标能力。
+  if (promptOptimizationCommandMatches(query.query)) {
+    const control = $("#prompt-optimize");
+    entries.push({ type: "promptOptimize", enabled: !!control && !control.disabled && !threadReadOnly() });
+  }
   return entries;
 }
 export function renderSkillMenu(message) {
@@ -85,20 +92,23 @@ export function renderSkillMenu(message) {
   const commands = entries.filter(entry => entry.type !== "skill");
   const skills = entries.filter(entry => entry.type === "skill");
   const appendOption = (entry, index, root) => {
-    if (entry.type === "compact" || entry.type === "goal") {
-      const goal = entry.type === "goal";
-      const usage = contextUsage(currentThreadDisplay()?.tokenUsage);
-      const label = goal ? "目标" : "压缩";
+    if (entry.type !== "skill") {
+      const goal = entry.type === "goal", optimize = entry.type === "promptOptimize";
+      const usage = entry.type === "compact" ? contextUsage(currentThreadDisplay()?.tokenUsage) : null;
+      const label = optimize ? "提示词优化" : goal ? "目标" : "压缩";
       const reason = goal ? goalComposerReason() : "";
-      const node = button("", reason || label, goal ? () => selectGoalCommand() : selectCompactCommand,
+      const action = optimize ? selectPromptOptimizationCommand : goal ? () => selectGoalCommand() : selectCompactCommand;
+      const node = button("", reason || label, action,
         `skill-option slash-command-option${index === active ? " active" : ""}${goal ? " slash-goal-option" : ""}`);
       node.id = `skill-option-${index}`; node.disabled = !entry.enabled;
       node.setAttribute("role", "option"); node.setAttribute("aria-selected", String(index === active));
       const copy = element("span", "slash-command-copy");
       copy.append(element("strong", "", label));
-      const description = goal ? reason || "设置要持续追求的目标" : compactUsageDescription(usage);
+      const description = optimize ? "使用已配置的模型改写当前输入"
+        : goal ? reason || "设置要持续追求的目标" : compactUsageDescription(usage);
       if (description) copy.append(element("small", "muted slash-command-usage", description));
-      node.append(goal ? goalComposerIcon() : compactCommandIcon(), copy);
+      const commandIcon = optimize ? promptOptimizationCommandIcon() : goal ? goalComposerIcon() : compactCommandIcon();
+      node.append(commandIcon, copy);
       node.onmousedown = event => event.preventDefault();
       root.append(node);
       return;
@@ -356,6 +366,15 @@ export function selectCompactCommand() {
   prompt.setRangeText("", query.start, query.end, "end");
   closeComposerMenus(); updateComposer(); prompt.focus();
   void compactContext();
+}
+export function selectPromptOptimizationCommand() {
+  const query = slashQuery(), control = $("#prompt-optimize");
+  if (!query || !control || control.disabled || threadReadOnly()) return;
+  const prompt = $("#prompt");
+  // 用户要求只移除 / 查询文本，保留其余提示词、Skill 和附件，再复用现有独立优化流程。
+  prompt.setRangeText("", query.start, query.end, "end");
+  rememberDraft(); closeComposerMenus(); updateComposer(); prompt.focus({ preventScroll: true });
+  void activatePromptOptimization();
 }
 export function handlePromptInput(event, { preserveCanonical = false } = {}) {
   if (!preserveCanonical) forgetPromptCanonicalText();

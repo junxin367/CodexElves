@@ -43,8 +43,16 @@ export function slashQuery() {
 export function compactCommandMatches(query) {
   return ["压缩", "compact", "context", "上下文"].some(value => value.includes(query));
 }
+export function promptOptimizationCommandMatches(query) {
+  return ["提示词优化", "优化提示词", "prompt-optimize", "optimize"].some(value => value.includes(query));
+}
 export function compactCommandIcon() {
   const node = icon("compactContext");
+  node.classList.add("slash-command-icon");
+  return node;
+}
+export function promptOptimizationCommandIcon() {
+  const node = icon("sparkles");
   node.classList.add("slash-command-icon");
   return node;
 }

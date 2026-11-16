@@ -63,6 +63,7 @@ export function icon(name) {
     model: '<path d="m12 3 7.5 4.3v8.7L12 20.3 4.5 16V7.3Z"/><path d="m4.5 7.3 7.5 4.4 7.5-4.4M12 11.7v8.6"/>',
     compaction: '<path d="M5 7h14M7 12h10M9 17h6"/>',
     compactContext: '<path d="m4 4 5 5m-4 0h4V5m11-1-5 5m4 0h-4V5M4 20l5-5m-4 0h4v4m11 1-5-5m4 0h-4v4"/>',
+    sparkles: '<path d="m12 3-1.9 5.8a2 2 0 0 1-1.3 1.3L3 12l5.8 1.9a2 2 0 0 1 1.3 1.3L12 21l1.9-5.8a2 2 0 0 1 1.3-1.3L21 12l-5.8-1.9a2 2 0 0 1-1.3-1.3L12 3Z"/><path d="M5 3v4M3 5h4M19 17v4M17 19h4"/>',
     info: '<circle cx="12" cy="12" r="9"/><path d="M12 11v6M12 7h.01"/>'
   };
   const node = element("span", "ui-icon");

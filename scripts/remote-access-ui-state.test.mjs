@@ -13640,7 +13640,8 @@ function claudeSlashMenuHarness() {
       this.selectionStart = this.selectionEnd = start + text.length;
     } });
   const menu = element("div"), project = { value: "project-a" };
-  const roots = { "#prompt": prompt, "#skill-menu": menu, "#project-select": project,
+  const optimize = Object.assign(element("button"), { disabled: false });
+  const roots = { "#prompt": prompt, "#skill-menu": menu, "#project-select": project, "#prompt-optimize": optimize,
     "#model-settings": element("div"), "#model-button": element("button") };
   const flatten = node => [node, ...(node.children || []).flatMap(flatten)];
   const $ = (selector, root) => roots[selector] || flatten(root || menu).find(node => selector.startsWith(".")
@@ -13669,6 +13670,7 @@ function claudeSlashMenuHarness() {
     skillIdentity: skill => `${skill.name}\0${skill.path}`, skillVisibleName: skill => skill.name,
     currentThreadDisplay: () => null, contextUsage: () => null, compactUsageDescription: () => "",
     compactCommandIcon: () => element("span"), goalComposerIcon: () => element("span"),
+    promptOptimizationCommandIcon: () => element("span"), activatePromptOptimization() {},
     selectCompactCommand() {}, selectGoalCommand() {},
     closePopup() {}, closeContextUsageTip() {}, fitComposerMenu() {},
     closeSkillMenu: () => { menu.hidden = true; },
@@ -13680,14 +13682,16 @@ function claudeSlashMenuHarness() {
     },
   });
   vm.runInContext(sourceSection("function slashQu", "function com")
+    + sourceSection("function promptOptimizationCommandMatches(", "function compactCommandIcon(")
     + sourceSection("function slashMe", "function ren")
     + (sourceSection("function normalizeSl", "function cat") + "\n" + sourceSection("function renderSkillMenu", "function act"))
-    + (sourceSection("function cat") + "\n" + sourceSection("function activeS", "function sel") + "\n" + sourceSection("function selectS", "function rem")), context);
+    + (sourceSection("function cat") + "\n" + sourceSection("function activeS", "function sel") + "\n" + sourceSection("function selectS", "function rem"))
+    + sourceSection("function selectPromptOptimizationCommand(", "function handlePromptInput("), context);
   const skill = name => ({ name, command: name, path: `claude-skill:${name}`, backend: "claude",
     scope: "native", description: `说明 ${name}`, argumentHint: "[参数]" });
   const response = (name, instanceId = "claude:wsl:test") => ({ ok: true, backend: "claude", instanceId,
     cwd: "E:/project-a", data: [skill(name)], nativeCapabilities: { compact: true, goal: true } });
-  return { context, prompt, menu, project, calls, writes, skill, response };
+  return { context, prompt, menu, project, optimize, calls, writes, skill, response };
 }
 
 test("Claude 斜杠菜单复用 Skill 列表与压缩目标底栏，支持搜索、键盘和原生命令插入", () => {
@@ -13697,8 +13701,8 @@ test("Claude 斜杠菜单复用 Skill 列表与压缩目标底栏，支持搜索
   assert.equal(h.menu.hidden, false);
   assert.equal(h.menu.children[0].children.length, 2);
   assert.equal(h.menu.children[1].className, "skill-menu-footer");
-  assert.equal(h.menu.children[1].children.length, 2);
-  assert.deepEqual(Array.from(c.slashMenuEntries(), entry => entry.type), ["skill", "skill", "compact", "goal"]);
+  assert.equal(h.menu.children[1].children.length, 3);
+  assert.deepEqual(Array.from(c.slashMenuEntries(), entry => entry.type), ["skill", "skill", "compact", "goal", "promptOptimize"]);
   c.moveSlashIndex(c.slashMenuEntries(), 1);
   assert.equal(c.skillIndex, 1);
   h.prompt.value = "/rev"; h.prompt.selectionStart = h.prompt.selectionEnd = 4;
@@ -13710,11 +13714,36 @@ test("Claude 斜杠菜单复用 Skill 列表与压缩目标底栏，支持搜索
   h.prompt.value = "解释 /"; h.prompt.selectionStart = h.prompt.selectionEnd = h.prompt.value.length;
   assert.ok(c.slashMenuEntries().every(entry => entry.type !== "skill"), "原生 Skill 仅在消息开头调用");
   c.modelDefaults.nativeCapabilities = { compact: false, goal: false };
-  assert.equal(c.slashMenuEntries().length, 0, "不声明原生能力时不显示管理入口");
+  assert.deepEqual(Array.from(c.slashMenuEntries(), entry => entry.type), ["promptOptimize"],
+    "原生压缩和目标能力不影响独立提示词优化");
   c.modelDefaults.nativeCapabilities = { compact: true, goal: true };
   h.prompt.value = "/"; h.prompt.selectionStart = h.prompt.selectionEnd = 1; c.skillChoices = [];
   c.renderSkillMenu("Skill 暂不可用");
-  assert.equal(h.menu.children[1].children.length, 2, "Skill 读取失败不能隐藏已经确认的压缩和目标能力");
+  assert.equal(h.menu.children[1].children.length, 3, "Skill 读取失败不能隐藏压缩、目标和提示词优化");
+});
+
+test("斜杠菜单提供提示词优化，支持搜索并保留命令外输入", () => {
+  const h = claudeSlashMenuHarness(), c = h.context;
+  for (const query of ["提示", "optimize", "prompt"]) {
+    h.prompt.value = `/${query}`; h.prompt.selectionStart = h.prompt.selectionEnd = h.prompt.value.length;
+    assert.deepEqual(Array.from(c.slashMenuEntries(), entry => entry.type), ["promptOptimize"]);
+  }
+  h.prompt.value = "请整理需求 /prompt"; h.prompt.selectionStart = h.prompt.selectionEnd = h.prompt.value.length;
+  let activated = 0, drafts = 0;
+  c.activatePromptOptimization = () => { activated += 1; }; c.rememberDraft = () => { drafts += 1; };
+  c.renderSkillMenu();
+  const option = h.menu.children[1].children[0];
+  assert.equal(option.children[1].children[0].textContent, "提示词优化");
+  option.onclick();
+  assert.equal(h.prompt.value, "请整理需求 ");
+  assert.equal(activated, 1);
+  assert.equal(drafts, 1);
+  h.prompt.value = "/optimize"; h.prompt.selectionStart = h.prompt.selectionEnd = h.prompt.value.length;
+  h.optimize.disabled = true;
+  assert.equal(c.slashMenuEntries()[0].enabled, false);
+  c.selectPromptOptimizationCommand();
+  assert.equal(activated, 1, "工具栏优化不可用时不从斜杠菜单绕过限制");
+  assert.match(app, /entry\?\.type === "promptOptimize"\) selectPromptOptimizationCommand\(\)/);
 });
 
 test("Claude Skill 目录与 Codex 全局目录隔离，同一实例项目复用缓存", async () => {
