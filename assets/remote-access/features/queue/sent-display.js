@@ -106,6 +106,33 @@ export function reconcileSentMessageDisplays(id, messages) {
   }
   return changed;
 }
+export function reconcileConfirmedInputOrder(turn, orderedItems) {
+  if (!turn || !Array.isArray(turn.items) || !Array.isArray(orderedItems)) return false;
+  let changed = false;
+  // 从后向前归位，确保连续多条引导使用的后续锚点已经处于原生位置。
+  for (let index = orderedItems.length - 1; index >= 0; index--) {
+    const nativeItem = orderedItems[index];
+    // 用户要求参考 Codex App 按原生位置接替引导；仅身份匹配的已确认输入可移动，成功标记本身不是排序依据。
+    if (nativeItem?.type !== "userMessage" || typeof nativeItem.id !== "string"
+        || !sentMessageDisplayFor(nativeItem)?.confirmed) continue;
+    const currentIndex = turn.items.findIndex(item => item.id === nativeItem.id);
+    if (currentIndex < 0) continue;
+    let nextId = null;
+    for (let next = index + 1; next < orderedItems.length; next++) {
+      const id = orderedItems[next]?.id;
+      if (typeof id === "string" && turn.items.some(item => item.id === id)) { nextId = id; break; }
+    }
+    // 没有后续原生锚点时不猜测位置；跨页缺项和普通实时消息仍由原合并规则处理。
+    if (!nextId) continue;
+    const nextIndex = turn.items.findIndex(item => item.id === nextId);
+    if (currentIndex < nextIndex) continue;
+    const [current] = turn.items.splice(currentIndex, 1);
+    turn.items.splice(turn.items.findIndex(item => item.id === nextId), 0, current);
+    changed = true;
+  }
+  return changed;
+}
+
 export function withSentMessageDisplays(source = [...turns.values()]) {
   if (!selectedId || !session) return source;
   const nativeIds = new Set(source.flatMap(turn => (turn.items || [])

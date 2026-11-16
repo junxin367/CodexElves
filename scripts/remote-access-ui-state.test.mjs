@@ -6180,7 +6180,8 @@ test("切回会话的迟到快照不能抹掉压缩完成事件或把它恢复�
 
 test("服务历史先补回继续消息，再翻页时保留顺序且不重复首条输入", () => {
   const context = { turns: new Map(), transcriptEvents: new Map(), itemVersions: new Map(),
-    turnVersions: new Map(), turnFieldVersions: new Map(), partialItems: new Set() };
+    turnVersions: new Map(), turnFieldVersions: new Map(), partialItems: new Set(),
+    reconcileConfirmedInputOrder: () => false };
   vm.createContext(context);
   context.nativeConnectionVersion ??= 1;
   vm.runInContext([
@@ -6541,6 +6542,7 @@ function messageImageRefreshHarness() {
 
 test("完成正文继续保护内容，新历史可恢复同源图片且旧缓存和迟到历史不能退回媒体 URL", () => {
   const h = messageImageRefreshHarness(), c = h.context;
+  c.reconcileConfirmedInputOrder = () => false;
   vm.runInContext((sourceSection("function mergeLi") + "\n" + sourceSection("function mergeRe") + "\n" + sourceSection("function mergeHi", "async functi")), c);
   const history = { id: h.turn.id, status: "completed", items: [{
     id: h.item.id, type: h.item.type, text: "较早的不完整正文", completed: true,
@@ -7290,6 +7292,7 @@ test("侧边引导在实时轮次、重进历史与迟到旧状态中只显示�
   const h = vm.createContext({ nativeConnectionVersion: 1,
     turns: new Map(), itemVersions: new Map(), turnVersions: new Map(), turnFieldVersions: new Map(),
     partialItems: new Map(), enrichTurnTranscriptEvents: value => value,
+    reconcileConfirmedInputOrder: () => false,
   });
   vm.runInContext((sourceSection("function normalizeDi") + "\n" + sourceSection("function mergeRe") + "\n" + sourceSection("function mergeHi", "async functi")), h);
   const steer = { id: "local", type: "steeringUserMessage", status: "accepted",
@@ -11373,6 +11376,89 @@ function claudeExecutionFeedbackHarness(turn) {
     + sourceSection("function renderMessa", "function res"), context);
   return { context, activities, root, render() { activities.length = 0; context.renderMessages(); return activities; } };
 }
+
+test("Codex 引导按有序原生快照纠正位置，无原生锚点时保持现状", () => {
+  const { context } = sentDisplayWindowHarness();
+  const turn = { id: "turn", status: "inProgress", items: [] };
+  context.turns.set(turn.id, turn);
+  for (const clientUserMessageId of ["first", "second"]) {
+    context.confirmSendDisplay({ threadId: "main", clientUserMessageId, prompt: `引导-${clientUserMessageId}` },
+      { ok: true, threadId: "main", turnId: turn.id }, { steering: true });
+  }
+  const records = [...context.sentMessageDisplays.values()];
+  const process = { id: "process", type: "commandExecution", status: "completed" };
+  const commentary = { id: "commentary", type: "agentMessage", text: "过程回复", phase: "commentary" };
+  const final = { id: "final", type: "agentMessage", text: "最终回复", phase: "final_answer" };
+  const native = records.map((record, index) => ({ id: `native-${index + 1}`, type: "userMessage",
+    clientId: record.clientId, content: record.item.content }));
+  // 用户要求参考 Codex App 的原生位置接替：同时覆盖多条引导、工具过程、commentary 和最终回复。
+  turn.items = [process, commentary, final, records[0].item, native[0], records[1].item, native[1]];
+  const ordered = [native[0], process, native[1], commentary, final];
+  assert.equal(context.reconcileConfirmedInputOrder(turn, ordered), true);
+  assert.deepEqual(Array.from(context.withSentMessageDisplays()[0].items, item => item.id),
+    ["native-1", "process", "native-2", "commentary", "final"]);
+  for (const items of [[commentary, native[0], native[1]], [commentary, native[1], native[0]]]) {
+    turn.items = [...items];
+    context.reconcileConfirmedInputOrder(turn, [native[0], native[1], commentary]);
+    assert.deepEqual(turn.items.map(item => item.id), ["native-1", "native-2", "commentary"],
+      "连续及逆序引导必须从后向前归位");
+  }
+  const before = turn.items.map(item => item.id);
+  assert.equal(context.reconcileConfirmedInputOrder(turn, []), false);
+  assert.deepEqual(turn.items.map(item => item.id), before, "没有有序原生快照时不得按成功标记猜位置");
+});
+
+test("Codex 历史合并实际执行确认输入的原生顺序纠正", () => {
+  const { context } = sentDisplayWindowHarness();
+  Object.assign(context, { transcriptEvents: new Map(), itemVersions: new Map(), turnVersions: new Map(),
+    turnFieldVersions: new Map(), partialItems: new Set(), enrichTurnTranscriptEvents: value => value });
+  vm.runInContext((sourceSection("function normalizeDi") + "\n" + sourceSection("function mergeRe")
+    + "\n" + sourceSection("function mergeHi", "async functi")), context);
+  const turn = { id: "turn", status: "completed", items: [] };
+  context.turns.set(turn.id, turn);
+  context.confirmSendDisplay({ threadId: "main", clientUserMessageId: "guide", prompt: "引导" },
+    { ok: true, threadId: "main", turnId: turn.id }, { steering: true });
+  const preview = [...context.sentMessageDisplays.values()][0].item;
+  const native = { id: "native", type: "userMessage", clientId: "guide", content: preview.content };
+  const reply = { id: "reply", type: "agentMessage", text: "回复", phase: "final_answer" };
+  turn.items = [reply, preview, native];
+  const reconcile = context.reconcileConfirmedInputOrder;
+  let calls = 0;
+  context.reconcileConfirmedInputOrder = (...args) => { calls++; return reconcile(...args); };
+  const merged = context.mergeHistoryTurn({ id: turn.id, status: "completed",
+    items: [native, reply], itemsPageComplete: true, itemsComplete: true }, 0);
+  assert.equal(calls, 1, "历史合并必须调用原生顺序纠正，而不是只定义孤立函数");
+  assert.deepEqual(Array.from(merged.items, item => item.id), ["native", "reply"]);
+});
+
+test("Codex turn/completed 通过真实事件入口纠正引导位置", () => {
+  const context = nodeVm.createContext({ nativeConnectionVersion: 1,
+    session: { device: { id: "device" } }, selectedId: "main", privateInputScope: () => "scope",
+    sessionMenu: { invalidate: () => null }, relatedSessionView: null, relatedMenuTimer: null, connected: true,
+    thread: { id: "main", status: { type: "active" } }, turns: new Map(), pending: null, sending: false,
+    messageVersion: 0, statusVersion: 0, itemVersions: new Map(), turnVersions: new Map(), turnFieldVersions: new Map(),
+    partialItems: new Set(), transcriptEventTypes: new Set(), sidebarReadRefreshSuppressions: new Set(),
+    recentPrioritySelectionSuppressions: new Set(), threadDeleted: () => false,
+    handleRemoteChannelEvent: () => false, scheduleRelatedMenuRefresh() {}, rememberBackgroundThreadDisplay() {},
+    receiveCompactionLifecycle() {}, mergeTranscriptEvents() {},
+    mergeItemProjection: (previous, incoming) => ({ ...previous, ...incoming }), enrichTurnTranscriptEvents: value => value,
+    updateComposer() {}, scheduleReload() {}, markVisibleThreadRead: async () => {},
+    scheduleMessages() {}, rememberTranscript() {}, scheduleSidebarRefresh() {},
+  });
+  installSentMessageDisplayHarness(context);
+  const turn = { id: "turn", status: "inProgress", items: [] };
+  context.turns.set(turn.id, turn);
+  context.confirmSendDisplay({ threadId: "main", clientUserMessageId: "guide", prompt: "引导" },
+    { ok: true, threadId: "main", turnId: turn.id }, { steering: true });
+  const preview = [...context.sentMessageDisplays.values()][0].item;
+  const native = { id: "native", type: "userMessage", clientId: "guide", content: preview.content };
+  const reply = { id: "reply", type: "agentMessage", text: "回复", phase: "final_answer" };
+  turn.items = [reply, preview];
+  nodeVm.runInContext(sourceSection("function normalizeDi") + "\n" + sourceSection("function receive(event) {"), context);
+  context.receive({ method: "turn/completed", params: { threadId: "main",
+    turn: { id: turn.id, status: "completed", items: [native, reply] } } });
+  assert.deepEqual(Array.from(context.withSentMessageDisplays()[0].items, item => item.id), ["native", "reply"]);
+});
 
 test("Claude 恢复后单独压缩的状态行始终位于已经完成的回复之后", () => {
   const turn = { id: "restored", _nativeUserId: "native-restored", _nativeDone: true,

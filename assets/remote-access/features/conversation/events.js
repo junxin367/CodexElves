@@ -41,7 +41,7 @@ import { goalVersion, notifiedGoal, setGoalVersion, setNotifiedGoal } from "../g
 import { isSubagentItem } from "../messages/subagents.js";
 import { markVisibleThreadRead } from "../messages/user-content.js";
 import { applyQueueSnapshot, reloadQueue } from "../queue/queue.js";
-import { clearSentMessageDisplays, reconcileSentMessageDisplays, retiredSendPayloads } from "../queue/sent-display.js";
+import { clearSentMessageDisplays, reconcileConfirmedInputOrder, reconcileSentMessageDisplays, retiredSendPayloads } from "../queue/sent-display.js";
 import { queueVersion, setNotifiedQueue, setNotifiedQueueEdits, setQueueVersion } from "../queue/state.js";
 import { backendAvailable, privateInputScope } from "../session/capabilities.js";
 import { stream, withRecoveryErrorSilence } from "../session/connection-state.js";
@@ -316,6 +316,7 @@ export function receive(event) {
           itemVersions.set(`${turnId}:${item.id}`, version); partialItems.delete(`${turnId}:${item.id}`);
         }
         Object.assign(turn, params.turn, { items: [...items.values()] });
+        reconcileConfirmedInputOrder(turn, params.turn?.items);
         for (const [field, value] of Object.entries(timing)) if (!Number.isFinite(turn[field])) turn[field] = value;
         if (Number.isFinite(params.startedAtMs)) turn.turnStartedAtMs = params.startedAtMs;
         if (Number.isFinite(params.completedAtMs)) turn.turnCompletedAtMs = params.completedAtMs;

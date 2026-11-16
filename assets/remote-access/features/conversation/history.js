@@ -38,6 +38,7 @@ import { goalVersion, notifiedGoal } from "../goal/state.js";
 import { messageImageReadSequence, setMessageImageReadSequence } from "../messages/media-state.js";
 import { markVisibleThreadRead } from "../messages/user-content.js";
 import { applyQueueRead } from "../queue/queue.js";
+import { reconcileConfirmedInputOrder } from "../queue/sent-display.js";
 import { notifiedQueue, notifiedQueueEdits, queueVersion, syncEditableMessageMetadata } from "../queue/state.js";
 import { claudeThreadId, normalizeRelatedView, privateInputScope } from "../session/capabilities.js";
 import {
@@ -396,10 +397,12 @@ function mergeHistoryTurn(snapshot, readVersion, { older = false, beforeId = nul
     const loaded = new Map(items.map(item => [item.id, item]));
     items = [...contextItems.map(item => loaded.get(item.id) || item), ...items.filter(item => !contextIds.has(item.id))];
   }
-  return enrichTurnTranscriptEvents(withImages({
+  const merged = enrichTurnTranscriptEvents(withImages({
     ...current, ...snapshot, ...pagination, ...timing, ...liveFields, items,
     ...(newer ? { status: current.status, error: current.error } : {})
   }));
+  reconcileConfirmedInputOrder(merged, snapshot.items);
+  return merged;
 }
 export async function reloadThread() {
   if (pageLeaving || document.hidden || !selectedId || threadDeleted(selectedId)) return;
