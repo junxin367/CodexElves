@@ -1539,12 +1539,17 @@ test("Claude 额度弹窗顶部显示当前实例的登录邮箱", async () => {
   await new Promise(resolve => setImmediate(resolve));
   h.trigger.onclick();
   const header = h.nodes[0].children[0];
+  assert.deepEqual(header.children.map(node => node.className),
+    ["claude-usage-title-text", "claude-usage-account-toggle", "claude-usage-subscription"]);
   assert.equal(header.children[0].textContent, "sar***@meiguoup.com");
   assert.equal(header.children[0].title, "sar***@meiguoup.com");
   assert.match(h.trigger.attributes["aria-label"], /登录账号 sar\*\*\*@meiguoup\.com/);
   assert.doesNotMatch(h.trigger.attributes["aria-label"], /sarahconnor/);
   assert.equal(h.context.claudeUsageMaskAccount("ab@example.com"), "ab***@example.com");
-  const reveal = header.children[2];
+  const reveal = header.children[1];
+  const css = await readFile(new URL("../assets/remote-access/style.css", import.meta.url), "utf8");
+  assert.match(css, /\.claude-usage-title-text\{[^}]*flex:0 1 auto/);
+  assert.match(css, /\.claude-usage-subscription\{[^}]*margin-left:auto/);
   assert.equal(reveal.className, "claude-usage-account-toggle");
   assert.equal(reveal.children[0].className, "ui-icon eye");
   assert.equal(reveal.attributes["aria-label"], "显示完整邮箱");

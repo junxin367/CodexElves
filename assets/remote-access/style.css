@@ -163,12 +163,12 @@ html{scrollbar-color:var(--muted) transparent}
 .claude-usage-percent{font-weight:400}
 .claude-usage-dot{color:var(--muted)}
 .claude-usage-tooltip.ui-popup{display:block;gap:0;padding:14px;border-color:var(--menu-divider,var(--line));border-radius:10px;background:var(--control-bg,var(--side));color:var(--text);font-size:12px;line-height:1.5;overflow:auto}
-/* 用户要求账号邮箱默认脱敏并与订阅等级、眼睛按钮单行展示；过长邮箱省略，title 只包含当前显示版本。 */
+/* 用户要求账号邮箱默认脱敏、眼睛紧跟账号；订阅等级固定在行右侧，过长邮箱省略，title 只包含当前显示版本。 */
 .claude-usage-title{display:flex;align-items:center;gap:8px;margin-bottom:12px;font-size:13px;font-weight:600;white-space:nowrap}
-.claude-usage-title-text{min-width:0;flex:1 1 auto;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-/* 用户确认等级紧贴标题右侧，沿用效果图的淡紫色圆角标签；320px 弹层和手机字号保持不变，长等级只省略标签。 */
-.claude-usage-subscription{display:inline-block;flex:0 1 auto;min-width:0;max-width:128px;height:20px;padding:0 6px;border:1px solid color-mix(in srgb,#ad83e7 45%,transparent);border-radius:6px;background:color-mix(in srgb,#ad83e7 15%,transparent);color:color-mix(in srgb,#ad83e7 65%,var(--text));font-size:11px;font-weight:600;line-height:18px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-/* 用户指定账号行右侧提供眼睛开关；使用现有 eye/eyeOff 图标，不增加文字按钮。 */
+.claude-usage-title-text{min-width:0;flex:0 1 auto;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+/* 等级通过自动左边距保持在行右侧，不再把紧跟账号的眼睛挤到末尾；320px 弹层和手机字号保持不变。 */
+.claude-usage-subscription{display:inline-block;flex:0 1 auto;min-width:0;max-width:128px;height:20px;margin-left:auto;padding:0 6px;border:1px solid color-mix(in srgb,#ad83e7 45%,transparent);border-radius:6px;background:color-mix(in srgb,#ad83e7 15%,transparent);color:color-mix(in srgb,#ad83e7 65%,var(--text));font-size:11px;font-weight:600;line-height:18px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+/* 用户指定眼睛开关紧跟账号文本；使用现有 eye/eyeOff 图标，不增加文字按钮。 */
 .claude-usage-account-toggle{display:inline-grid;place-items:center;flex:0 0 24px;width:24px;height:20px;padding:0;border:0;border-radius:4px;background:transparent;color:var(--muted);cursor:pointer}
 .claude-usage-account-toggle:is(:hover,:active){background:var(--control-hover);color:var(--text)}
 .claude-usage-account-toggle>.ui-icon{width:14px;height:14px}

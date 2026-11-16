@@ -310,14 +310,14 @@ function renderClaudeUsageTip(windows) {
     };
     updateAccount();
   }
+  // 用户要求眼睛紧跟账号文本；订阅等级继续显示在账号行右侧。
+  if (reveal) title.append(reveal);
   // 用户确认缺少等级时直接不显示，不添加未知标签、占位或说明，也不使用效果图里的示例等级补齐。
   if (subscription.type) {
     const badge = element("span", "claude-usage-subscription", subscription.label);
     badge.title = `所属 WSL Claude CLI 返回的订阅类型：${subscription.type}`;
     badge.setAttribute("aria-label", `订阅等级：${subscription.label}`); title.append(badge);
   }
-  // 眼睛固定在账号行最右侧，位于订阅等级之后；邮箱文本继续占用可收缩空间。
-  if (reveal) title.append(reveal);
   const content = [title];
   for (const window of windows) {
     const section = element("section", "claude-usage-section");
