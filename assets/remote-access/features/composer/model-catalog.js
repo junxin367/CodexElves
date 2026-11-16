@@ -12,6 +12,7 @@ import { activeInstanceId, sessionInstanceEnabled } from "../session/instances.j
 import { currentThreadDisplay, threadDisplayKey, threadDisplays } from "../session/thread-cache.js";
 import { rememberThreadDisplay } from "../session/thread-display.js";
 import { threadDeleted } from "../sidebar/deletion-state.js";
+export { modelForId, modelIdentityMatches } from "./model-identity.js";
 
 export function modelContext() {
   return { backend: activeBackend(), instanceId: activeInstanceId(),
@@ -30,18 +31,6 @@ export function syncBackendModels() {
   void loadModels().catch(error => {
     if (modelsScope === key) { setModelLoadError(error.message); updateComposer(); }
   });
-}
-export function modelForId(id) {
-  if (typeof id !== "string" || !id) return null;
-  // 用户要求 Claude 完整模型 ID 与原生目录别名共用推理等级；只采用显式 resolvedModel，Codex 仍按原值精确匹配。
-  return models.find(model => model.model === id)
-    || (isClaude() && models.find(model => model.resolvedModel === id)) || null;
-}
-export function modelIdentityMatches(left, right) {
-  if (!left || !right) return false;
-  if (left === right) return true;
-  const model = modelForId(left);
-  return !!model && model === modelForId(right);
 }
 export function claudePendingSetting(name) {
   if (!selectedId || !isClaude()) return null;

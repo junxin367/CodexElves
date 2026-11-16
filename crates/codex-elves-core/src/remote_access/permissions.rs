@@ -16,7 +16,7 @@ use tokio::sync::Mutex;
 use super::{ApiError, RemoteAuthorization, WebState};
 
 const MAX_CONFIG_BYTES: usize = 2 * 1024 * 1024;
-static CONFIG_WRITE: OnceLock<Mutex<()>> = OnceLock::new();
+pub(super) static CONFIG_WRITE: OnceLock<Mutex<()>> = OnceLock::new();
 type ModeCache = BTreeMap<String, (Instant, Vec<String>)>;
 static CLAUDE_MODE_CACHE: OnceLock<Mutex<ModeCache>> = OnceLock::new();
 
@@ -113,14 +113,15 @@ impl SessionPermissions {
     }
 }
 
-struct ConfigFile {
-    path: PathBuf,
-    display: String,
-    backend: String,
-    claude_config: Option<super::claude::WslConfig>,
+pub(super) struct ConfigFile {
+    pub path: PathBuf,
+    pub display: String,
+    pub backend: String,
+    pub claude_config: Option<super::claude::WslConfig>,
+    pub home: String,
 }
 
-fn config_target(
+pub(super) fn config_target(
     environments: &[super::preferences::Environment],
     instance_id: &str,
 ) -> Result<ConfigFile, ApiError> {
@@ -151,6 +152,7 @@ fn config_target(
         path: root.join(name),
         display: format!("{}/{name}", home.trim_end_matches(['/', '\\'])),
         backend: instance.backend.clone(),
+        home: environment.home.clone(),
         claude_config: (instance.backend == "claude").then(|| super::claude::WslConfig {
             distribution: environment.distribution.clone(),
             user: environment.user.clone(),
@@ -228,7 +230,7 @@ pub(super) async fn configured_claude_mode(
         .to_owned())
 }
 
-fn read_file(path: &Path) -> Result<(String, String), ApiError> {
+pub(super) fn read_file(path: &Path) -> Result<(String, String), ApiError> {
     let (bytes, exists) = match std::fs::symlink_metadata(path) {
         Ok(metadata) => {
             if metadata.file_type().is_symlink()
@@ -258,7 +260,7 @@ fn read_file(path: &Path) -> Result<(String, String), ApiError> {
     Ok((text, revision))
 }
 
-fn save_file(path: &Path, text: &str, expected: &str) -> anyhow::Result<()> {
+pub(super) fn save_file(path: &Path, text: &str, expected: &str) -> anyhow::Result<()> {
     use std::io::Write;
     if text.len() > MAX_CONFIG_BYTES {
         return Err(ApiError::new(413, "实例配置文件超过 2 MiB").into());
@@ -303,7 +305,7 @@ fn save_file(path: &Path, text: &str, expected: &str) -> anyhow::Result<()> {
     result
 }
 
-async fn save_settings_file(
+pub(super) async fn save_settings_file(
     target: &ConfigFile,
     text: &str,
     changes: &Value,

@@ -41,14 +41,26 @@ def revision(text, info):
 def update(path, changes, expected):
     if not path.is_absolute() or path.name != "settings.json":
         raise ConfigError(400, "Claude 配置路径无效")
-    if not isinstance(changes, dict) or len(changes) != 1:
-        raise ConfigError(400, "只允许修改一个已支持的 Claude 设置")
+    if not isinstance(changes, dict) or not 1 <= len(changes) <= 3:
+        raise ConfigError(400, "只允许修改已支持的 Claude 设置")
     if set(changes) == {"awaySummaryEnabled"}:
         if type(changes["awaySummaryEnabled"]) is not bool:
             raise ConfigError(400, "回顾开关必须为布尔值")
     elif set(changes) == {"permissionMode"}:
         if not isinstance(changes["permissionMode"], str) or changes["permissionMode"] not in MODES:
             raise ConfigError(400, "Claude 权限模式无效")
+    elif set(changes) <= {"awaySummaryEnabled", "promptSuggestionEnabled", "disableAllHooks", "model"}:
+        # 用户要求常规设置按所属实例保存；原生配置仅开放已核对的键，不能接收任意 JSON 配置写入。
+        for key, value in changes.items():
+            if key == "awaySummaryEnabled":
+                valid = type(value) is bool
+            elif key in ("promptSuggestionEnabled", "disableAllHooks"):
+                valid = value is None or type(value) is bool
+            else:
+                valid = value is None or (isinstance(value, str) and 0 < len(value) <= 200
+                                          and not any(ord(char) < 32 for char in value))
+            if not valid:
+                raise ConfigError(400, "Claude 实例设置值无效")
     else:
         raise ConfigError(400, "不支持的 Claude 设置")
     text, info = read_file(path)
@@ -62,11 +74,11 @@ def update(path, changes, expected):
         raise ConfigError(422, "Claude 配置格式无效，未覆盖原文件") from None
     if not isinstance(document, dict):
         raise ConfigError(422, "Claude 配置必须为 JSON 对象")
-    if "awaySummaryEnabled" in changes:
+    if set(changes) == {"awaySummaryEnabled"}:
         if "awaySummaryEnabled" in document and type(document["awaySummaryEnabled"]) is not bool:
             raise ConfigError(422, "Claude 离开期间回顾配置必须为布尔值")
         document["awaySummaryEnabled"] = changes["awaySummaryEnabled"]
-    else:
+    elif "permissionMode" in changes:
         permissions = document.setdefault("permissions", {})
         if not isinstance(permissions, dict):
             raise ConfigError(422, "Claude permissions 配置格式无效")
@@ -74,6 +86,12 @@ def update(path, changes, expected):
             permissions["defaultMode"] = changes["permissionMode"]
         else:
             permissions.pop("defaultMode", None)
+    else:
+        for key, value in changes.items():
+            if value is None:
+                document.pop(key, None)
+            else:
+                document[key] = value
     ending = "\r\n" if "\r\n" in text else "\n"
     output = json.dumps(document, ensure_ascii=False, indent=2).replace("\n", ending) + ending
     if text.startswith("\ufeff"):

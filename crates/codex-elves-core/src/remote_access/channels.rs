@@ -168,6 +168,8 @@ pub(super) fn request_path(method: &Method, path: &str) -> bool {
                 "/api/logout"
                     | "/api/diagnostics"
                     | "/api/settings/instructions"
+                    // 实例设置包含写操作，只能走提交通道，不能按只读请求自动重试。
+                    | "/api/settings/instance"
                     // 打开本机浏览器有副作用，不能归入允许自动重试的文件读取。
                     | "/api/workspace/open-browser"
                     // 打开工作区同样只提交一次；不能因超时或换线路再次启动应用。

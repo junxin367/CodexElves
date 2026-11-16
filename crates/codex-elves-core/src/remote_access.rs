@@ -45,6 +45,7 @@ mod frp_tunnel;
 mod harness;
 mod image_preview;
 mod input_files;
+mod instance_settings;
 mod instances;
 mod ngrok_tunnel;
 mod open_in;
@@ -1275,10 +1276,29 @@ impl RemoteAccessController {
             .as_str()
             .unwrap_or("codex:local")
             .to_owned();
+        let codex_request = payload["backend"] != "claude"
+            && !creation_instance.starts_with("claude:")
+            && !payload["threadId"]
+                .as_str()
+                .is_some_and(claude::Claude::owns_id);
+        if codex_request
+            && payload["reasoningEffort"] == "ultra"
+            && !instance_settings::ultra_enabled(&self.state_dir, &creation_instance)?
+        {
+            return Err(
+                ApiError::new(409, "当前实例未开放 Ultra 思考等级，请先在设置中开启").into(),
+            );
+        }
         let detail_id = (action == "thread")
             .then(|| payload["threadId"].as_str().map(str::to_owned))
             .flatten();
         let mut value = self.call_backend(action, payload, authorization).await?;
+        if codex_request && action == "models" {
+            instance_settings::filter_models(
+                &mut value,
+                instance_settings::ultra_enabled(&self.state_dir, &creation_instance)?,
+            );
+        }
         if let Some(mode) = creation_mode
             .or_else(|| codex_creation.then(|| value["permissionMode"].clone()))
             .and_then(|mode| mode.as_str().map(str::to_owned))
@@ -2390,6 +2410,7 @@ pub fn web_router(
             post(preferences::instructions),
         )
         .route("/api/settings/permissions", post(permissions::settings))
+        .route("/api/settings/instance", post(instance_settings::settings))
         .route(
             "/api/settings/claude-recap",
             post(permissions::claude_recap_settings),

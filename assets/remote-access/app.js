@@ -15,7 +15,7 @@ import { renderApprovals } from "./features/approvals.js";
 import { closeComposerMenus, installComposerMenuViewportListeners } from "./features/composer/composer-menus.js";
 import { updateComposer } from "./features/composer/composer.js";
 import { loadModels } from "./features/composer/models.js";
-import { loadSkillChoices } from "./features/composer/skills.js";
+import { loadSkillChoices, refreshSkillCatalog } from "./features/composer/skills.js";
 import { restoreCompactions } from "./features/conversation/compaction.js";
 import { receive } from "./features/conversation/events.js";
 import { renderMessages, scheduleMessages } from "./features/conversation/history-view.js";
@@ -51,7 +51,7 @@ import { loadSidebar, renderSidebar } from "./features/sidebar/list.js";
 
 // 上层动作须在任何安装函数运行前注册：下层模块经 core/actions.js 调用这些实现，见 docs/remote-access-web-architecture.md。
 registerActions({
-  applyQueuedSendResult, closeComposerMenus, loadModels, loadSidebar, loadSkillChoices,
+  applyQueuedSendResult, closeComposerMenus, loadModels, loadSidebar, loadSkillChoices, refreshSkillCatalog,
   messageEditor, mutate, receive, reconnectChangedAuthorization, reloadThread, renderApprovals,
   renderGoalStatus, renderItem, renderMessages, renderQueueArea, renderQueuedEditRecoveryControls,
   renderSidebar, requireAuthentication, resolvePending, retryConnectionRecovery, scheduleMessages,

@@ -33,8 +33,11 @@ import { setCreationBackend } from "../composer/new-chat.js";
 import { rememberInstancePermissionCatalog } from "../composer/options-state.js";
 import { privateInputScope } from "../session/capabilities.js";
 import { loadSessionInstances, renderSessionInstances } from "../session/instance-catalog.js";
-import { activeInstanceId, availableSessionInstances } from "../session/instances.js";
-import { mountClaudeRecapSettings, mountRemoteSettings } from "../settings/remote-settings.js";
+import { availableSessionInstances } from "../session/instances.js";
+import { mountRemoteSettings } from "../settings/remote-settings.js";
+import {
+  instanceSettingPages, mountInstanceSettingsPage, mountShortcuts, settingsNavigation
+} from "../settings/instance-settings.js";
 import { sessionMenu } from "../shell-state.js";
 import { projectVisibleThreadCounts } from "../sidebar/list-state.js";
 
@@ -241,42 +244,31 @@ export function openAppearance() {
   dialog.innerHTML = `<div class="appearance-heading"><h2 id="appearance-title">设置</h2><button type="button" class="icon-button" title="关闭设置" aria-label="关闭设置"></button></div>
     <div class="appearance-layout">
     <nav class="appearance-nav" aria-label="设置导航">
-      <!-- 用户确认设置导航按效果稿分组：“外观”仍紧随“会话”，保留全部入口的原相对顺序。 -->
-      <div class="appearance-nav-group" role="group" aria-labelledby="appearance-nav-personal-title">
-        <h3 id="appearance-nav-personal-title" class="appearance-nav-group-title">个人</h3>
-        <button type="button" id="appearance-general-entry" class="appearance-nav-item" aria-controls="appearance-general-page" aria-selected="true"><span class="appearance-nav-icon"></span><span>会话</span></button>
-        <button type="button" id="appearance-customization-entry" class="appearance-nav-item" title="打开外观" aria-label="打开外观" aria-controls="appearance-customization-page" aria-selected="false"><span class="appearance-nav-icon"></span><span>外观</span></button>
-      </div>
-      <div class="appearance-nav-group" role="group" aria-labelledby="appearance-nav-connections-title">
-        <h3 id="appearance-nav-connections-title" class="appearance-nav-group-title">会话与连接</h3>
-        <button type="button" id="appearance-types-entry" class="appearance-nav-item" aria-controls="appearance-types-page" aria-selected="false"><span class="appearance-nav-icon"></span><span>会话实例</span></button>
-        <button type="button" id="appearance-permissions-entry" class="appearance-nav-item" aria-controls="appearance-permissions-page" aria-selected="false"><span class="appearance-nav-icon"></span><span>权限</span></button>
-        <button type="button" id="appearance-instructions-entry" class="appearance-nav-item" aria-controls="appearance-instructions-page" aria-selected="false"><span class="appearance-nav-icon"></span><span>自定义指令</span></button>
-      </div>
-      <!-- 通知事件、诊断日志及其“工具”分组仅在 Android App 显示，PC 与手机浏览器不留空分组。 -->
-      <div id="appearance-nav-tools" class="appearance-nav-group" role="group" aria-labelledby="appearance-nav-tools-title" hidden>
-        <h3 id="appearance-nav-tools-title" class="appearance-nav-group-title">工具</h3>
-        <button type="button" id="appearance-notifications-entry" class="appearance-nav-item" title="打开通知事件" aria-label="打开通知事件" aria-controls="appearance-notifications-page" aria-selected="false" hidden><span class="appearance-nav-icon"></span><span>通知事件</span></button>
-        <button type="button" id="appearance-diagnostics-entry" class="appearance-nav-item" title="打开诊断日志" aria-label="打开诊断日志" aria-controls="appearance-diagnostics-page" aria-selected="false" hidden><span class="appearance-nav-icon"></span><span>诊断日志</span></button>
-      </div>
+      ${settingsNavigation.map(group => `<div id="appearance-nav-${group.id}" class="appearance-nav-group" role="group" aria-labelledby="appearance-nav-${group.id}-title"${group.androidOnly ? " hidden" : ""}>
+        <h3 id="appearance-nav-${group.id}-title" class="appearance-nav-group-title">${group.label}</h3>
+        ${group.items.map(item => `<button type="button" id="appearance-${item.id}-entry" class="appearance-nav-item" aria-label="打开${item.label}" aria-controls="appearance-${item.id}-page" aria-selected="${item.id === "general"}"${group.androidOnly ? " hidden" : ""}><span class="appearance-nav-icon"></span><span>${item.label}</span></button>`).join("")}
+      </div>`).join("")}
     </nav>
     <div class="appearance-panels">
     <section id="appearance-general-page" class="appearance-body appearance-settings-page">
-    <h3 class="appearance-panel-title">会话</h3>
-    <section class="appearance-section"><h4>显示</h4><div class="appearance-card">
+    <!-- 用户确认“个人 → 会话”改为“常规”；Claude 专属选项移入所选实例，不再混在设备显示偏好中。 -->
+    <h3 class="appearance-panel-title">常规</h3>
+    <p class="appearance-hint">当前设备的会话显示与使用偏好。</p>
+    <section class="appearance-section"><h4>会话显示</h4><div class="appearance-card">
     <label class="appearance-field appearance-width-field"><span class="appearance-field-copy"><span>会话正文宽度上限</span><small>默认 950px，仅在右侧可用空间不足时自动收窄。</small></span><span class="appearance-number"><input id="appearance-conversation-width" type="number" min="${conversationWidthMin}" max="${conversationWidthMax}" step="10" value="${appearance.conversationWidth}" aria-label="会话正文宽度上限"><span>px</span></span></label>
     <div class="appearance-field appearance-thread-limit-field"><span>每个项目显示会话数</span><div id="appearance-project-thread-limit-slot"></div></div>
     <div id="appearance-cache-state" class="appearance-field" role="status"></div>
     </div></section>
-    <section class="appearance-section"><h4>Claude</h4>
-    <!-- 用户要求通过设置开关控制离开期间回顾；按实例修改原生配置，历史回顾继续保留。 -->
-    <div id="appearance-claude-recap" class="appearance-card"></div></section>
+    <p class="appearance-hint">这些设置仅影响当前设备。</p>
     </section>
-    <section id="appearance-types-page" class="appearance-body appearance-settings-page" hidden>
-    <!-- 用户要求统一显示为“会话实例”：导航、页头与指令选择保持一致，逐实例开关与自动检测行为不变。 -->
-    <h3 class="appearance-panel-title">会话实例</h3>
-    <p class="appearance-hint">按实例启用会话，仅影响当前设备；关闭不会停止任务。</p>
-    <div id="appearance-session-instances"></div>
+    ${instanceSettingPages.map(page => `<section id="appearance-${page.id}-page" class="appearance-body appearance-settings-page" hidden>
+    <h3 class="appearance-panel-title">${page.label}</h3>
+    <p class="appearance-hint">${page.description}</p>
+    <div id="appearance-${page.id}-settings"></div>
+    </section>`).join("")}
+    <section id="appearance-shortcuts-page" class="appearance-body appearance-settings-page" hidden>
+    <h3 class="appearance-panel-title">快捷键</h3>
+    <div id="appearance-shortcuts-settings"></div>
     </section>
     <section id="appearance-permissions-page" class="appearance-body appearance-settings-page" hidden>
     <h3 class="appearance-panel-title">权限</h3>
@@ -417,13 +409,8 @@ export function openAppearance() {
     entryButton.hidden = false;
     diagnosticsEntry.hidden = false;
   }
-  generalEntry.querySelector(".appearance-nav-icon").append(icon("settings"));
-  customizationEntry.querySelector(".appearance-nav-icon").append(icon("sun"));
-  entryButton.querySelector(".appearance-nav-icon").append(icon("globe"));
-  diagnosticsEntry.querySelector(".appearance-nav-icon").append(icon("tools"));
-  $("#appearance-types-entry", dialog).querySelector(".appearance-nav-icon").append(icon("allSessions"));
-  $("#appearance-permissions-entry", dialog).querySelector(".appearance-nav-icon").append(icon("shield"));
-  $("#appearance-instructions-entry", dialog).querySelector(".appearance-nav-icon").append(icon("edit"));
+  for (const group of settingsNavigation) for (const item of group.items)
+    $(`#appearance-${item.id}-entry`, dialog).querySelector(".appearance-nav-icon").append(icon(item.icon));
   headingButton.append(icon("close"));
   renderPwaCacheState();
   const versionButton = notificationVersionButton;
@@ -515,13 +502,22 @@ export function openAppearance() {
     if (!dialog.isConnected || !dialog.open) return;
     showAppearancePage(customizationPage, "外观", customizationEntry);
   };
-  for (const [name, label] of [["types", "会话实例"], ["instructions", "自定义指令"]]) {
+  for (const [name, label] of [["instructions", "自定义指令"]]) {
     const entry = $(`#appearance-${name}-entry`, dialog);
     entry.onclick = () => {
       showAppearancePage($(`#appearance-${name}-page`, dialog), label, entry);
       void remoteSettings.show(name);
     };
   }
+  for (const page of instanceSettingPages) {
+    const entry = $(`#appearance-${page.id}-entry`, dialog);
+    entry.onclick = () => {
+      showAppearancePage($(`#appearance-${page.id}-page`, dialog), page.label, entry);
+      void instancePages.get(page.id).show();
+    };
+  }
+  $("#appearance-shortcuts-entry", dialog).onclick = () => showAppearancePage(
+    $("#appearance-shortcuts-page", dialog), "快捷键", $("#appearance-shortcuts-entry", dialog));
   $("#appearance-permissions-entry", dialog).onclick = async () => {
     showAppearancePage($("#appearance-permissions-page", dialog), "权限", $("#appearance-permissions-entry", dialog));
     try {
@@ -535,7 +531,6 @@ export function openAppearance() {
     if (!dialog.isConnected || !dialog.open) return;
     if (subpageEntry) restoreAppearanceRoot();
     else selectSettingsPage(primaryBody, generalEntry, { focus: true });
-    if (session) void claudeRecap.show();
   };
   diagnosticsEntry.onclick = () => {
     if (!dialog.isConnected || !dialog.open || diagnosticsEntry.hidden) return;
@@ -890,13 +885,11 @@ export function openAppearance() {
     onLoaded: rememberInstancePermissionCatalog,
     onSaved(id, result) { rememberInstancePermissionCatalog(id, result); updateComposer(); }
   });
-  const claudeRecap = mountClaudeRecapSettings({
-    page: $("#appearance-claude-recap", dialog), element, selectControl, setSelectOptions, api,
-    getInstances: availableSessionInstances, loadInstances: loadSessionInstances,
-    readOnly: () => !session || session.readOnly || !connected,
-    authorizationScope: () => privateInputScope(session)
-  });
-  if (session) void claudeRecap.show(activeInstanceId());
+  let settingsInstance = "";
+  const instancePages = new Map(instanceSettingPages.map(page => [page.id,
+    mountInstanceSettingsPage({ page: $(`#appearance-${page.id}-settings`, dialog), section: page.section,
+      getSelectedInstance: () => settingsInstance, setSelectedInstance: value => { settingsInstance = value; } })]));
+  mountShortcuts($("#appearance-shortcuts-settings", dialog));
   sync();
   bindAppearanceNumberValue($("#appearance-contrast", dialog), 0, 100,
     () => appearance.colors[appearance.theme].contrast,
@@ -1053,7 +1046,7 @@ export function openAppearance() {
     window.removeEventListener("resize", syncSettingsOffset);
     remoteSettings.dispose();
     instancePermissions.dispose();
-    claudeRecap.dispose();
+    for (const page of instancePages.values()) page.dispose();
     if (syncAppearanceThemeControls === sync) setSyncAppearanceThemeControls(null);
     dialog.classList.remove("appearance-screen-visible");
     dialog.classList.remove("appearance-subpage-open");

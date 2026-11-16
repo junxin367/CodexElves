@@ -19,6 +19,7 @@ export function closeComposerMenus(...args) { return run("closeComposerMenus", a
 export function loadModels(...args) { return run("loadModels", args); } // features/composer/models.js
 export function loadSidebar(...args) { return run("loadSidebar", args); } // features/sidebar/list.js
 export function loadSkillChoices(...args) { return run("loadSkillChoices", args); } // features/composer/skills.js
+export function refreshSkillCatalog(...args) { return run("refreshSkillCatalog", args); } // features/composer/skills.js
 export function messageEditor(...args) { return run("messageEditor", args); } // features/messages/message-edit.js
 export function mutate(...args) { return run("mutate", args); } // features/conversation/pending.js
 export function receive(...args) { return run("receive", args); } // features/conversation/events.js

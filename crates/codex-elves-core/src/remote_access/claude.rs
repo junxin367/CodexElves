@@ -102,7 +102,7 @@ impl WslConfig {
         super::instances::id("claude", &self.distribution, &self.user)
     }
 
-    fn validate(&self) -> anyhow::Result<()> {
+    pub(super) fn validate(&self) -> anyhow::Result<()> {
         // 所有发行版共用名称、用户和程序路径校验，不增加按名称区分的产品权限。
         anyhow::ensure!(
             super::preferences::valid_distribution_name(&self.distribution)
@@ -1563,6 +1563,15 @@ impl Claude {
         command.args(["--cd", &c.linux_cwd]);
         Self::wsl_login_exec(&mut command, "python3");
         command.args(["-u", &linux_path, "--cli", &c.config.executable]);
+        if !c.resumed
+            && let Some(window) = super::instance_settings::claude_auto_compact(
+                &self.directory,
+                &c.config.instance_id(),
+            )?
+        {
+            // 用户要求自动压缩窗口按实例设置；只给后续新建会话传原生 CLI 参数，不重启已有后台。
+            command.args(["--autocompact", &window]);
+        }
         if c.resumed {
             command.args(["--native-id", &c.native_id]);
             if !c.native_job_id.is_empty() {
@@ -1588,6 +1597,14 @@ impl Claude {
             "--permission-prompt-tool",
             "stdio",
         ]);
+        if !c.resumed
+            && let Some(window) = super::instance_settings::claude_auto_compact(
+                &self.directory,
+                &c.config.instance_id(),
+            )?
+        {
+            command.args(["--autocompact", &window]);
+        }
         if c.resumed {
             command.args(["--resume", &c.native_id]);
         } else {

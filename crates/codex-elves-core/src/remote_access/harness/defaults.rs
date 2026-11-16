@@ -132,7 +132,7 @@ impl Harness {
             Value::Null
         };
         // 模型目录仍由实例共享；项目只影响生效配置，不能因切换项目重建模型目录。
-        let (config, models, requirements) = tokio::try_join!(
+        let (config, mut models, requirements) = tokio::try_join!(
             self.runtime.request(
                 "config/read",
                 json!({"cwd":cwd,"includeLayers":false}),
@@ -157,6 +157,23 @@ impl Harness {
             return Err(error(503, "无法确认 Codex 新会话的生效配置"));
         }
         let mut effective = config["config"].clone();
+        let ultra = self
+            .controller
+            .get()
+            .and_then(std::sync::Weak::upgrade)
+            .map(|controller| {
+                super::super::instance_settings::ultra_enabled(
+                    &controller.state_dir,
+                    payload["instanceId"].as_str().unwrap_or("codex:local"),
+                )
+            })
+            .transpose()?
+            .unwrap_or(false);
+        // 用户要求关闭 Ultra 时新会话也不隐式采用该等级；仅调整远程新建默认值，不改写原生配置或已有会话。
+        super::super::instance_settings::filter_model_rows(&mut models, ultra);
+        if !ultra && effective["model_reasoning_effort"] == "ultra" {
+            effective["model_reasoning_effort"] = Value::Null;
+        }
         if let Some(model) = payload["model"].as_str().filter(|model| !model.is_empty())
             && effective["model"] != model
         {

@@ -7,7 +7,7 @@ import { reloadThread, updateComposer } from "../../core/actions.js";
 import { busy, connected, selectedId, session, stopping, thread } from "../../core/state.js";
 import { randomId } from "../../core/util.js";
 import { api } from "../api.js";
-import { modelIdentityMatches } from "../composer/model-catalog.js";
+import { modelIdentityMatches } from "../composer/model-identity.js";
 import {
   modelChoiceVersion, selectedEffort, selectedModel, setSelectedEffort, setSelectedModel
 } from "../composer/options-state.js";

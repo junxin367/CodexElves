@@ -146,6 +146,7 @@ function allowedApi(method, path) {
     || method === "POST" && (["/api/connect", "/api/logout", "/api/workspace/context", "/api/workspace/changes", "/api/workspace/change", "/api/workspace/files", "/api/workspace/file", "/api/workspace/open-browser",
       "/api/workspace/open-in-targets", "/api/workspace/open-in",
       "/api/settings/environments", "/api/settings/instructions", "/api/settings/permissions",
+      "/api/settings/instance", "/api/settings/claude-recap",
       "/api/settings/prompt-optimization"].includes(path)
       || /^\/api\/(?:read|action)\/[a-zA-Z][a-zA-Z0-9_-]*$/.test(path));
 }

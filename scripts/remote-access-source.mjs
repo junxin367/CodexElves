@@ -71,6 +71,9 @@ export async function loadRemoteAppSource(root = defaultRoot) {
     return module.text;
   }
   function wire(code, context, runInContext) {
+    // 实例设置新增的模型配置版本由入口模块初始化；源码片段测试只加载函数时也从同一初值开始。
+    if (!Object.hasOwn(context, "modelSettingsVersion") && /\bmodelSettingsVersion\b/.test(code))
+      context.modelSettingsVersion = 0;
     // 旧的局部函数用例默认没有独立客户端本机附件；专门验证该能力的用例必须注入真实附件状态。
     for (const [name, value] of Object.entries({
       composerLocalInputsPayload: () => [], composerLocalInputsSupported: () => false,

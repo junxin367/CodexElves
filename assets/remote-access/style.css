@@ -1713,6 +1713,30 @@ body{font-weight:var(--ui-font-weight,400)}
 @media(min-width:761px){.permission-instance-slot{flex-basis:240px}}
 .permission-settings-status{min-height:1.5em;white-space:pre-wrap}
 .permission-settings-actions{justify-content:flex-end;margin-top:14px}
+/* 用户确认的实例设置沿用 222px 单层导航、分组卡片和原有品牌 SVG；设备显示与原生配置分开，
+ * 761px 起选择器最长 360px，手机仍限制在行宽内；与设置页 760px 断点和现有卡片边距同步。 */
+.instance-settings-target{margin-bottom:10px}
+.instance-settings-target+.text-button{margin:0 0 26px;padding-inline:0;color:var(--muted)}
+.instance-settings-target .select-trigger,.instance-settings-content .select-trigger{display:flex;align-items:center;gap:8px;max-width:min(360px,65%);min-width:0}
+.instance-settings-target .select-label,.instance-settings-content .select-label{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.instance-settings-brand{flex:0 0 1.15em;width:1.15em;height:1.15em;color:var(--text)}
+.instance-settings-brand[data-backend=claude]{color:#d97757}
+.instance-settings-section-heading{display:flex;align-items:center;gap:8px}
+.instance-settings-content .appearance-section{margin-bottom:14px}
+.instance-settings-content .appearance-section:not(:first-child){margin-top:26px}
+.instance-settings-content .appearance-notification-switch:indeterminate::after{transform:translateX(6px);opacity:.5}
+.instance-settings-status:empty{display:none}
+.instance-settings-actions{justify-content:flex-end;margin-top:12px}
+.shortcut-setting-row>kbd{border:1px solid var(--line);border-radius:6px;padding:3px 8px;background:var(--side);font:inherit;font-size:.85714rem;white-space:normal;text-align:right}
+@media(max-width:760px){
+ /* 手机沿用 104px 导航，说明文字收缩换行，保留 32px 开关和选择器；不能被后面的通用卡片换行规则覆盖。 */
+ .instance-settings-target.appearance-card .appearance-field,.instance-settings-content .appearance-card .appearance-field{flex-wrap:nowrap}
+ .instance-settings-target .select-trigger,.instance-settings-content .select-trigger{max-width:58%;flex-shrink:0}
+ .instance-settings-target .appearance-field>.appearance-field-copy,.instance-settings-content .appearance-field>.appearance-field-copy{flex:1 1 0;overflow-wrap:anywhere}
+ .instance-settings-target .appearance-notification-switch,.instance-settings-content .appearance-notification-switch{flex-shrink:0}
+ .shortcut-setting-row{align-items:flex-start}
+ .shortcut-setting-row>kbd{max-width:60%}
+}
 /* 手机底栏可用宽度有限：权限与上下文按钮等宽，仅占 28px，隐藏文字和箭头；36px 高度对齐手机模型/Fast。
  * 原右侧图标及发送按钮保持宽度。
  * 回收原控制间距 2px 和外层间距 12px 的一部分，所有按钮强制单行；模型名称沿用原有省略行为。

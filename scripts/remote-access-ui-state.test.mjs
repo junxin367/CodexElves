@@ -1138,7 +1138,8 @@ test("Fast 换模型只读取同一目录，非支持模型不能改写真实会
   const h = remoteFastHarness(), { context, reads, writes, attributes } = h;
   context.rememberRemoteFastPreference("thread-fast-a", true);
   context.updateRemoteFast();
-  context.model = "gpt-6.1-unsupported"; context.updateRemoteFast();
+  // 当前服务按真实 GPT 身份开放 Fast；不支持场景使用非 GPT，不能再用“缺少档位的 GPT”代替。
+  context.model = "claude-opus"; context.updateRemoteFast();
   assert.equal(attributes.get("aria-pressed"), "false");
   context.model = "gpt-6.1-sol"; context.updateRemoteFast();
   assert.equal(attributes.get("aria-pressed"), "true");
@@ -1240,7 +1241,7 @@ test("Fast 目录不跨授权、实例或运行模式，迟到保存也不能串
   context.rememberThreadDisplay(delayed); context.updateRemoteFast();
   assert.equal(attributes.get("aria-pressed"), "true");
   context.updateRemoteFast();
-  assert.equal(h.control.hidden, true);
+  assert.equal(h.control.hidden, false, "同一实例支持的模型继续显示已确认 Fast 的关闭入口");
 });
 
 test("Fast 保存失败保留已确认开关，通过原模型目录和会话详情核对", async () => {
@@ -9567,7 +9568,7 @@ test("Claude 新建发送等待完整目录与同一权限读取，恢复 Max �
       return permissionRead.promise;
     };
     vm.runInContext((sourceSection("function rememberIns", "let modelQue") + "\n" + sourceSection("async function loadI", "function upd")), c);
-    vm.runInContext(((sourceSection("function rememberedN") + "\n" + sourceSection("function rememberNewChatMode")) + (sourceSection("function defaultMode") + "\n" + sourceSection("function currentMode") + "\n" + sourceSection("function modelFo") + "\n" + sourceSection("async function t")) + sourceSection("function renderModelMenu(", "function fitComposerMenu(")), c);
+    vm.runInContext(((sourceSection("function rememberedN") + "\n" + sourceSection("function rememberNewChatMode")) + (sourceSection("function defaultMode") + "\n" + sourceSection("function currentMode") + "\n" + (sourceSection("function modelFo") + "\n" + sourceSection("function claudePendingSetting(")) + "\n" + sourceSection("async function t")) + sourceSection("function renderModelMenu(", "function fitComposerMenu(")), c);
     c.rememberNewChatSettings({ model: "gpt-6.1-sol", reasoningEffort: "max",
       permissionMode: scenario === "unsupported-permission" ? "bypassPermissions" : "plan" });
     c.newChatModels.clear();
@@ -12274,7 +12275,7 @@ test("没有内存记录时先恢复本地展示缓存，再等待会话网络�
   assert.equal(context.currentThreadDisplay().queuedMessages.length, 0);
 });
 
-test("模型目录统一保存 Fast 档位、实例限制和缓存身份，Ultra 仍遵循原生配置", async () => {
+test("模型目录统一保存 Fast 档位、实例限制和缓存身份，Ultra 遵循实例开关", async () => {
   const writes = [];
   const context = {
     models: [], modelsPromise: null, modelsLoadedAt: 0, modelsRetryAt: 0,
@@ -12304,7 +12305,8 @@ test("模型目录统一保存 Fast 档位、实例限制和缓存身份，Ultra
   assert.equal(writes[0][2].models[0].requestModel, "gpt-6.1-sol");
   assert.equal(writes[0][2].defaults.fastModeAvailability.available, true);
   assert.equal(writes[0][2].defaults.fastModelAliases["API别名"], "gpt-6.1-sol");
-  assert.equal(writes[0][2].defaults.fastModeOwner, JSON.stringify(["device-a", "codex:local", 0]));
+  assert.equal(writes[0][2].defaults.fastModeOwner,
+    JSON.stringify(["device-a", "codex:local", context.nativeConnectionVersion]));
 });
 
 test("模型目录恢复保留 Fast 元数据，缺失 Fast 或 Ultra 过滤的旧目录重新读取", async () => {
@@ -13265,7 +13267,7 @@ function claudeAliasModelMenuHarness() {
       : selector === "#model-settings" ? menu : selector === "#prompt" ? prompt : null,
     updateComposer() {}, fitComposerMenu() {}, closeComposerMenus() { menu.hidden = true; },
   });
-  vm.runInContext(((sourceSection("function rememberedN") + "\n" + sourceSection("function rememberNewChatMode")) + (sourceSection("function defaultMode") + "\n" + sourceSection("function currentMode") + "\n" + sourceSection("function modelFo") + "\n" + sourceSection("async function t")) + sourceSection("function renderModelMenu(", "function fitComposerMenu(")), context);
+  vm.runInContext(((sourceSection("function rememberedN") + "\n" + sourceSection("function rememberNewChatMode")) + (sourceSection("function defaultMode") + "\n" + sourceSection("function currentMode") + "\n" + (sourceSection("function modelFo") + "\n" + sourceSection("function claudePendingSetting(")) + "\n" + sourceSection("async function t")) + sourceSection("function renderModelMenu(", "function fitComposerMenu(")), context);
   const choices = group => menu.querySelector(`.${group}`).children.filter(node => node.tag === "button");
   return { context, menu, choices };
 }
@@ -13381,7 +13383,7 @@ test("Claude 权限按钮恢复新建记忆，已有会话切换权限不覆盖�
   function open() {
     const h = composerPermissionHarness({ creating: true, backend: "claude" }), c = h.context;
     Object.assign(c, { localStorage: disk, newChatModels: new Map(), selectedId: null, thread: null });
-    nodeVm.runInContext(((sourceSection("function rememberedN") + "\n" + sourceSection("function rememberNewChatMode")) + (sourceSection("function defaultMode") + "\n" + sourceSection("function currentMode") + "\n" + sourceSection("function modelFo") + "\n" + sourceSection("async function t")) + sourceSection("function renderModelMenu(", "function fitComposerMenu(")), c);
+    nodeVm.runInContext(((sourceSection("function rememberedN") + "\n" + sourceSection("function rememberNewChatMode")) + (sourceSection("function defaultMode") + "\n" + sourceSection("function currentMode") + "\n" + (sourceSection("function modelFo") + "\n" + sourceSection("function claudePendingSetting(")) + "\n" + sourceSection("async function t")) + sourceSection("function renderModelMenu(", "function fitComposerMenu(")), c);
     c.instancePermissionCatalogs.get(c.activeInstanceId()).defaultMode = "acceptEdits";
     return h;
   }
@@ -13471,7 +13473,7 @@ test("Codex 新建权限优先显式草稿和有效记忆，再采用独立服�
     newChatModels: new Map(), localStorage: storage(), creationProject: "project-a", selectionVersion: 1,
     selectedModel: "", selectedEffort: "", models: [], modelDefaults: {},
   });
-  nodeVm.runInContext(((sourceSection("function rememberedN") + "\n" + sourceSection("function rememberNewChatMode")) + (sourceSection("function defaultMode") + "\n" + sourceSection("function currentMode") + "\n" + sourceSection("function modelFo") + "\n" + sourceSection("async function t")) + sourceSection("function renderModelMenu(", "function fitComposerMenu(")), c);
+  nodeVm.runInContext(((sourceSection("function rememberedN") + "\n" + sourceSection("function rememberNewChatMode")) + (sourceSection("function defaultMode") + "\n" + sourceSection("function currentMode") + "\n" + (sourceSection("function modelFo") + "\n" + sourceSection("function claudePendingSetting(")) + "\n" + sourceSection("async function t")) + sourceSection("function renderModelMenu(", "function fitComposerMenu(")), c);
   c.session.capabilities.codexSessionDefaults = true;
   c.codexCreationDefaultsState = { key: c.codexCreationDefaultsKey(), value: {
     model: "gpt-fixture", reasoningEffort: "medium", permissionMode: "full-access",

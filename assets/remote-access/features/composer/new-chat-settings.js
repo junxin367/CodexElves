@@ -16,7 +16,7 @@ import {
 } from "./creation-state.js";
 import { deleteDraft, draftKey, snapshotDraft, storeDraft } from "./drafts.js";
 import { modelForId } from "./model-catalog.js";
-import { instancePermissionCatalogs } from "./options-state.js";
+import { instancePermissionCatalogs, modelSettingsVersion } from "./options-state.js";
 import { activeBackend, isClaude, privateInputScope } from "../session/capabilities.js";
 import { activeInstanceId } from "../session/instances.js";
 
@@ -108,8 +108,9 @@ export function rememberNewChatSettings(patch) {
   } catch {}
 }
 export function codexCreationDefaultsKey() {
+  // 实例模型设置变更后，新建默认值和在途旧读取同时失效，不能继续显示旧模型或已关闭的 Ultra。
   return creating && session?.capabilities?.codexSessionDefaults === true && !isClaude()
-    ? JSON.stringify([privateInputScope(session), nativeConnectionVersion, creationProject, selectionVersion]) : "";
+    ? JSON.stringify([privateInputScope(session), nativeConnectionVersion, creationProject, selectionVersion, modelSettingsVersion]) : "";
 }
 export function codexCreationDefaults() {
   const key = codexCreationDefaultsKey();

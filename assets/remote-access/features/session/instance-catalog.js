@@ -54,6 +54,24 @@ export async function loadSessionInstances(force = false) {
   setSessionInstanceRequest(request);
   return request;
 }
+export function setInstanceDisplay(id, enabled) {
+  if (typeof enabled !== "boolean" || !availableSessionInstances().some(instance => instance.id === id)) return;
+  // 用户要求“在本设备显示”只管理当前设备入口；复用原有实例切换和筛选流程，不停止原生任务。
+  migrateSessionInstances(appearance, availableSessionInstances());
+  appearance.sessionInstances = { ...appearance.sessionInstances, [id]: enabled };
+  const filter = sessionFilterValue();
+  if (filter !== "all") {
+    const selected = filter.filter(value => sessionInstanceEnabled(value));
+    appearance.sessionFilter = selected.length ? selected : "all";
+  }
+  if (!sessionInstanceEnabled(creationInstanceId)) {
+    const next = newChatBackendOptions()[0];
+    if (next && creating) setCreationBackend(next.value);
+    else if (next) { setCreationInstanceId(next.value); assignCreationBackend(next.backend); }
+  }
+  applyAppearance(true); projectVisibleThreadCounts.clear(); renderSidebar(); updateComposer();
+  void loadSidebar(null, { fresh: true }).catch(error => notice(error.message, true));
+}
 export function renderSessionInstances() {
   const root = $("#appearance-session-instances");
   if (!root) return;
@@ -73,21 +91,7 @@ export function renderSessionInstances() {
       control.dataset.instanceId = instance.id; control.setAttribute("aria-label", `启用 ${instance.label}`);
       control.checked = sessionInstanceEnabled(instance.id);
       control.onchange = () => {
-        migrateSessionInstances(appearance, availableSessionInstances());
-        appearance.sessionInstances = { ...appearance.sessionInstances, [instance.id]: control.checked };
-        const filter = sessionFilterValue();
-        if (filter !== "all") {
-          // 关闭实例只移除该实例的筛选，保留其它多选项；全部移除后恢复“全部会话”。
-          const selected = filter.filter(id => sessionInstanceEnabled(id));
-          appearance.sessionFilter = selected.length ? selected : "all";
-        }
-        if (!sessionInstanceEnabled(creationInstanceId)) {
-          const next = newChatBackendOptions()[0];
-          if (next && creating) setCreationBackend(next.value);
-          else if (next) { setCreationInstanceId(next.value); assignCreationBackend(next.backend); }
-        }
-        applyAppearance(true); projectVisibleThreadCounts.clear(); renderSidebar(); updateComposer();
-        void loadSidebar(null, { fresh: true }).catch(error => notice(error.message, true));
+        setInstanceDisplay(instance.id, control.checked);
       };
       row.append(copy, control); group.append(row);
     }

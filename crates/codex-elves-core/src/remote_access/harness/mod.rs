@@ -12,6 +12,7 @@ mod queue_gate;
 mod read_cache;
 mod reads;
 mod runtime;
+mod settings;
 mod sides;
 mod store;
 mod subagents;

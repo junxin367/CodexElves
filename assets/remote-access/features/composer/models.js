@@ -9,7 +9,7 @@ import { renderModelMenu } from "./composer-menus.js";
 import { modelContext, modelContextKey, rememberRemoteFastPreference } from "./model-catalog.js";
 import { currentModelId, remoteFastContext, remoteFastKey } from "./model-choice.js";
 import {
-  modelCatalogCacheVersion, modelDefaults, models, modelsLoadedAt, modelsPromise, modelsRetryAt,
+  modelCatalogCacheVersion, modelDefaults, modelSettingsVersion, models, modelsLoadedAt, modelsPromise, modelsRetryAt,
   remoteFastState, remoteFastWrites, remoteFastWriting, selectedDraftFast, setModelDefaults,
   setModelLoadError, setModels, setModelsLoadedAt, setModelsPromise, setModelsRetryAt,
   setRemoteFastWriting, setSelectedDraftFast
@@ -25,8 +25,10 @@ export async function loadModels(force = false, { includeAvailable = false } = {
   const scope = privateInputScope(session);
   const context = modelContext(), contextKey = modelContextKey();
   const connectionGeneration = nativeConnectionVersion;
+  const settingsVersion = modelSettingsVersion;
   const current = () => scope && privateInputScope(session) === scope
-    && (nativeConnectionVersion) === connectionGeneration && modelContextKey() === contextKey;
+    && (nativeConnectionVersion) === connectionGeneration && modelContextKey() === contextKey
+    && modelSettingsVersion === settingsVersion;
   // 缓存只保存实例的完整目录；打开选择器复用新鲜目录，过期时才显式读取可用模型。
   if (!force && catalogUsable({ loadedAt: modelsLoadedAt })
       && (!includeAvailable || !catalogNeedsRefresh({ loadedAt: modelsLoadedAt }))
@@ -54,7 +56,7 @@ export async function loadModels(force = false, { includeAvailable = false } = {
       setModelsRetryAt(Date.now() + catalogRetryMs);
       return models;
     }
-    // 用户要求两条路径各自决定 Ultra 可见性，网页不能绕过注入路径返回的关闭状态。
+    // 用户要求由独立服务按实例决定 Ultra 可见性；网页不能绕过服务返回的关闭状态。
     const nextModels = result.data.map(model => ({
       ...model,
       supportedReasoningEfforts: (model.supportedReasoningEfforts || [])

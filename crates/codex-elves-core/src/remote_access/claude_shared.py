@@ -1659,6 +1659,7 @@ def native_history_updated_at(rows):
 class NativeSession:
     def __init__(self, cli, native_id, job_id=""):
         self.cli = cli
+        self.auto_compact_window = None
         self.root = Path(os.environ.get("CLAUDE_CONFIG_DIR", Path.home() / ".claude")).resolve()
         digest = hashlib.sha256(str(self.root).encode()).hexdigest()[:8]
         self.address = f"/tmp/cc-daemon-{os.getuid()}/{digest}/control.sock"
@@ -2583,6 +2584,9 @@ class NativeSession:
         # 必须经 CLI 原生的会话设置传递 TZ，不能只依赖外层 Python 的环境或强制重启其他会话。
         settings = {"worktree": {"bgIsolation": "none"}, "env": {"TZ": native_time_zone()}}
         arguments = [self.cli, "--bg", "--settings", json.dumps(settings, separators=(",", ":"))]
+        # 用户要求窗口只用于本实例后续新建的远程会话；恢复已有原生会话不替换其启动参数。
+        if not self.native_id and self.auto_compact_window is not None:
+            arguments += ["--autocompact", self.auto_compact_window]
         if self.permission_mode and self.permission_mode != "configured":
             mode = self.permission_mode
             if mode == "default" and "manual" in self.permission_catalog and "default" not in self.permission_catalog:
@@ -4009,10 +4013,17 @@ def main():
     arguments.add_argument("--cli", required=True)
     arguments.add_argument("--native-id", default="")
     arguments.add_argument("--job-id", default="")
+    arguments.add_argument("--autocompact", default=None)
     arguments.add_argument("--discover", action="store_true")
     arguments.add_argument("--cleanup", action="store_true")
     options = arguments.parse_args()
     native = NativeDiscovery() if options.discover else NativeSession(options.cli, options.native_id, options.job_id)
+    if not options.discover:
+        window = options.autocompact
+        if window is not None and window != "auto" and not (
+                window.isdigit() and 100000 <= int(window) <= 1000000):
+            raise RuntimeError("自动压缩窗口参数无效")
+        native.auto_compact_window = window
     if options.cleanup:
         # 启动补偿只检查保存的同一原生身份，不 initialize、不恢复会话、不发送模型消息。
         if (options.discover or not re.fullmatch(r"[0-9a-f]{8}", options.job_id)

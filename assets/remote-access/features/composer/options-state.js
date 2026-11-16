@@ -47,7 +47,14 @@ export function setModels(value) { return models = value; }
 export function setModelsPromise(value) { return modelsPromise = value; }
 export function setModelsLoadedAt(value) { return modelsLoadedAt = value; }
 // 服务模式改按实际 GPT 模型开放 Fast；旧缓存中的能力否定和缺失档位需重新读取。
-export const modelCatalogCacheVersion = 4;
+// 用户要求默认隐藏 Ultra；旧目录缓存不能在设置页尚未读取时继续开放该等级。
+export const modelCatalogCacheVersion = 5;
+export let modelSettingsVersion = 0;
+export function invalidateModelSettings() {
+  modelSettingsVersion++;
+  setModels([]); setModelsLoadedAt(0); setModelsPromise(null); setModelsRetryAt(0);
+  setModelDefaults({ model: "", reasoningEffort: "" }); setModelLoadError("");
+}
 export let modelDefaults = { model: "", reasoningEffort: "" };
 export function setModelDefaults(value) { return modelDefaults = value; }
 export let modelsScope = "codex", modelLoadError = "";

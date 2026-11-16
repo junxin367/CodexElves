@@ -326,8 +326,9 @@ function invalidateSkillCatalogs() {
   }, { maxAge: catalogFallbackMs });
   scheduleCatalogRefresh();
 }
-export async function refreshSkillCatalog() {
+export async function refreshSkillCatalog({ reload = true } = {}) {
   invalidateSkillCatalogs();
+  if (!reload) return;
   const context = activeSkillCatalogContext();
   if (context) await loadSkillChoices(context.scope, context.payload, { force: true });
 }
