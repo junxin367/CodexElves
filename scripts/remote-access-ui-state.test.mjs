@@ -70,6 +70,19 @@ test("存储事件只匹配当前授权范围", () => {
   assert.equal(store.ownsStorageEvent(null, { key }), false);
 });
 
+test("最近置顶分组显隐保存布尔值，与排序和设备授权分别隔离", () => {
+  const disk = storage(), store = createSidebarPreferenceStore({ storage: disk });
+  store.write("device-a", { showPinned: true, pinned: "manual" });
+  store.write("device-a", { mode: "list" });
+  assert.deepEqual(store.read("device-a"), { mode: "list", pinned: "manual", showPinned: true });
+  assert.deepEqual(store.read("device-b"), {});
+  store.write("device-a", { showPinned: false });
+  assert.deepEqual(createSidebarPreferenceStore({ storage: disk }).read("device-a"),
+    { mode: "list", pinned: "manual", showPinned: false });
+  store.write("device-a", { showPinned: "true" });
+  assert.equal(store.read("device-a").showPinned, false, "字符串不能被误当作已勾选");
+});
+
 // 远程网页已拆分为 app.js 入口与 ui/core/features 模块；app 为全部模块的合并文本，仅用于整体检索。
 const remoteSource = await loadRemoteAppSource();
 const nodeVm = remoteSource.wireVm(rawVm);
@@ -3037,6 +3050,33 @@ test("实例多选菜单连续选择并显示勾选，全部会话同步清除�
   h.click("claude:wsl:b");
   assert.deepEqual(h.checked(), ["all"], "取消最后一个实例后恢复全部");
   h.outside(); assert.equal(h.context.activePopup, null);
+});
+
+test("优先事项菜单连续切换置顶并显示用户指定的√，不关闭或改动实际会话置顶", () => {
+  const h = sessionFilterPopupHarness();
+  vm.runInContext(sourceSection("function recentPriorityMenuOptions(", "function renderSidebar("), h.context);
+  let selected = false;
+  const update = () => {
+    h.trigger.menuOptions = h.context.recentPriorityMenuOptions(selected, () => {
+      selected = !selected; update(); h.context.renderPopup();
+    });
+  };
+  update(); h.context.openPopup(h.trigger);
+  const popup = h.context.activePopup, before = popup.list.querySelector("button");
+  assert.equal(before.dataset.value, "pinned");
+  assert.equal(before.getAttribute("role"), "menuitemcheckbox");
+  assert.equal(before.getAttribute("aria-checked"), "false");
+  before.click();
+  const checked = popup.list.querySelector("button");
+  assert.equal(h.context.activePopup, popup);
+  assert.equal(checked.getAttribute("aria-checked"), "true");
+  assert.equal(checked.children.find(node => node.className === "choice-check").textContent, "√");
+  before.click();
+  assert.equal(selected, true, "重绘前选项的迟到点击不重复切换");
+  checked.click();
+  assert.equal(selected, false);
+  assert.equal(popup.list.querySelector("button").getAttribute("aria-checked"), "false");
+  assert.equal(popup.list.querySelector("button").children.find(node => node.className === "choice-check").textContent, "");
 });
 
 test("只有一个已开启实例时点击关闭菜单，多个实例时留到点击或聚焦外部再关闭", () => {
@@ -7328,6 +7368,210 @@ test("更换设备授权不继承旧偏好，旧设备重新打开仍能恢复",
   current.session = { device: { id: "device-a", createdAtMs: 1 } };
   current.restoreSidebarPreferences();
   assert.equal(current.sidebarFilters.mode, "project");
+});
+
+test("最近置顶分组开关在只读离线时仍保存，刷新及更换授权按本客户端恢复", () => {
+  const disk = storage(), current = client(disk);
+  current.restoreSidebarPreferences();
+  assert.equal(current.sidebarFilters.showPinned, false);
+  current.session.readOnly = true;
+  current.setRecentPinnedVisible(true);
+  assert.equal(current.sidebarFilters.showPinned, true);
+  const reopened = client(disk); reopened.restoreSidebarPreferences();
+  assert.equal(reopened.sidebarFilters.showPinned, true);
+  reopened.session = { device: { id: "device-b", createdAtMs: 1 } };
+  reopened.restoreSidebarPreferences();
+  assert.equal(reopened.sidebarFilters.showPinned, false);
+  reopened.setRecentPinnedVisible(false);
+  assert.equal(current.bridgeCalls + reopened.bridgeCalls, 0);
+  assert.equal(current.notices.length, 0);
+});
+
+function recentSidebarHarness({ disk = storage(), showPinned = false } = {}) {
+  let document, context;
+  class Node {
+    constructor(tag, className = "", text = "") {
+      Object.assign(this, { tag, className, ownText: text ?? "", children: [], attributes: new Map(),
+        dataset: {}, style: {}, disabled: false, hidden: false, isConnected: true, scrollTop: 0 });
+      this.classList = {
+        contains: name => this.className.split(/\s+/).includes(name),
+        add: (...names) => { this.className = [...new Set([...this.className.split(/\s+/).filter(Boolean), ...names])].join(" "); },
+      };
+    }
+    get textContent() { return this.ownText + this.children.map(child => child.textContent).join(""); }
+    set textContent(value) { this.ownText = value ?? ""; this.children = []; }
+    append(...children) { for (const child of children) { child.parentElement = this; this.children.push(child); } }
+    prepend(...children) { for (const child of children) child.parentElement = this; this.children.unshift(...children); }
+    replaceChildren(...children) {
+      for (const child of this.children) child.parentElement = null;
+      this.children = []; this.ownText = ""; this.append(...children);
+    }
+    setAttribute(name, value) { this.attributes.set(name, String(value)); }
+    getAttribute(name) { return this.attributes.get(name) ?? null; }
+    removeAttribute(name) { this.attributes.delete(name); }
+    contains(node) { return this === node || this.children.some(child => child.contains(node)); }
+    matches(selector) {
+      if (selector === "*") return true;
+      if (selector.startsWith(".")) return selector.slice(1).split(".").every(name => this.classList.contains(name));
+      if (selector.startsWith("#")) return this.id === selector.slice(1);
+      return this.tag === selector;
+    }
+    closest(selector) { return this.matches(selector) ? this : this.parentElement?.closest(selector) || null; }
+    querySelectorAll(selector) {
+      const result = [];
+      for (const child of this.children) {
+        if (selector.split(",").some(part => child.matches(part.trim()))) result.push(child);
+        result.push(...child.querySelectorAll(selector));
+      }
+      return result;
+    }
+    querySelector(selector) { return this.querySelectorAll(selector)[0] || null; }
+    focus() { document.activeElement = this; }
+    getBoundingClientRect() { return { left: 240, top: 80, right: 268, bottom: 108, width: 28, height: 28 }; }
+  }
+  const element = (tag, className, text) => new Node(tag, className, text);
+  const root = element("div", "sidebar-content"); root.id = "sidebar-content";
+  const controls = new Map([["#sidebar-content", root], ["#sidebar-view-toggle", element("button")],
+    ["#project-select", element("select")]]);
+  document = { body: element("body"), getElementById: id =>
+    [document.body, ...document.body.querySelectorAll("*")].find(node => node.id === id) || null };
+  document.body.append(root); document.activeElement = document.body;
+  const now = Date.now();
+  const item = (id, title, extra = {}) => ({
+    id, title, backend: "codex", instanceId: "codex:local", cwd: "/work/project",
+    createdAt: now - 60_000, updatedAt: now - 1_000, ...extra
+  });
+  const running = item("running", "执行中的会话", { priority: { attentionState: "active", active: true } });
+  const pinned = item("pinned", "置顶文件任务", { pinned: true });
+  const unread = item("pinned-unread", "置顶未读会话", {
+    pinned: true, hasUnreadTurn: true, priority: { attentionState: "unread", active: false } });
+  const regular = item("regular", "普通会话");
+  const selected = [], renders = [];
+  context = vm.createContext({
+    document, element, Date, Set, Map, selectedId: "running", thread: { id: "running" },
+    session: { device: { id: "device-a", createdAtMs: 1 }, readOnly: true },
+    sidebar: { recent: [running, pinned, unread, regular], pinnedThreads: [pinned, unread], projects: [],
+      preferences: { mode: "list", chats: "updated_at", pinned: "manual", projects: "manual" } },
+    sidebarFilters: { mode: null, chats: null, pinned: null, projects: null, showPinned },
+    sidebarPreferenceScope: '["device-a",1]',
+    sidebarPreferenceStore: createSidebarPreferenceStore({ storage: disk }), connected: false,
+    privateInputScope: value => value?.device ? JSON.stringify([value.device.id, value.device.createdAtMs]) : null,
+    $: selector => controls.get(selector),
+    icon: name => { const node = element("span", "ui-icon"); node.dataset.icon = name; return node; },
+    button: (text, label, action, className) => {
+      const node = element("button", className, text);
+      node.title = label; node.setAttribute("aria-label", label); node.onclick = action; return node;
+    },
+    renderSessionFilter() {}, syncSideThreadUnread() {}, syncClientUnreadBadge() {}, filterDeletedSidebar() {},
+    filterSideThreadSidebar() {}, setSelectOptions() {}, changeCreationProject() {}, newChatProjectOptions: () => [],
+    restoreSidebarPreferences() {}, appearance: { projectThreadLimit: 5 }, search: "", enabled: null,
+    sessionTypeVisible: item => !context.enabled || context.enabled.has(item.instanceId),
+    projectTypeVisible: () => true, collapsed: new Set(), collapsedSidebarSections: new Set(),
+    projectVisibleThreadCounts: new Map(), recentLimit: 40, recentPriorityIds: null,
+    recentPriorityKnownIds: new Set(), recentPriorityOpenedAt: 0, recentPrioritySelectionSuppressions: new Set(),
+    activePopup: null, fitPopup() {}, renderPopup: () => renders.push(context.activePopup),
+    closePopup: () => { context.activePopup = null; },
+    togglePopup: trigger => { context.activePopup = { trigger, node: { id: "active-popup" } }; },
+    openPopup: trigger => { context.activePopup = { trigger, node: { id: "active-popup" } }; },
+    claudeThreadId: id => id.startsWith("claude-"), threadReadOnly: () => true,
+    selectThread: async id => { selected.push(id); context.selectedId = id; context.thread = { id }; },
+    notice() {}, markVisibleThreadRead() {},
+  });
+  vm.runInContext([
+    sidebarPreferenceSource,
+    sourceSection("function sidebarThreadActive(", "function clientUnreadThreadCount("),
+    sourceSection("function sidebarTimestamp(", "function markSidebarThreadReadLocally("),
+    sourceSection("function sidebarAttentionState("),
+    sourceSection("function captureSidebarPopup(", "function renderSidebar("),
+    sourceSection("function renderSidebar("),
+  ].join("\n"), context);
+  const sections = () => root.children.filter(node => node.classList.contains("section-label"))
+    .map(heading => ({ heading, label: heading.querySelector(".section-label-text").textContent,
+      body: document.getElementById(heading.querySelector(".section-toggle").getAttribute("aria-controls")) }));
+  const section = label => sections().find(section => section.label === label);
+  const ids = section => section?.body.querySelectorAll(".thread-row").map(node => node.dataset.threadId) || [];
+  const node = id => document.getElementById(id);
+  context.renderSidebar();
+  return { context, root, sections, section, ids, node, selected, renders, running, pinned, unread, regular, disk };
+}
+
+test("最近会话更名优先事项，双滑杆固定为最后一个操作，清除已读位于其左侧", async () => {
+  const h = recentSidebarHarness();
+  assert.equal(h.sections()[0].label, "优先事项");
+  assert.equal(h.sections().some(section => section.label === "优先级"), false);
+  assert.equal(h.node("recent-priority-options").children[0].dataset.icon, "slidersHorizontal");
+  h.context.sidebar.recent[0].priority = { attentionState: "idle", active: false };
+  h.context.renderSidebar();
+  assert.deepEqual(h.section("优先事项").heading.querySelector(".priority-section-actions").children.map(node => node.id),
+    ["clear-recent-priority", "recent-priority-options"]);
+  h.node("clear-recent-priority").onclick();
+  assert.equal(h.node("clear-recent-priority"), null);
+  assert.equal(h.section("优先事项").heading.querySelector(".priority-section-actions").children.at(-1).id,
+    "recent-priority-options");
+  assert.equal(h.context.selectedId, "running");
+  assert.deepEqual(h.selected, []);
+  const css = await readFile(new URL("../assets/remote-access/style.css", import.meta.url), "utf8");
+  assert.match(css, /\.priority-section-actions\{[^}]*flex:0 0 auto[^}]*margin-left:auto/);
+});
+
+test("置顶选项开启后在优先事项下方列出会话，日期分组去重且刷新保持同一菜单", () => {
+  const h = recentSidebarHarness();
+  assert.equal(h.section("置顶"), undefined);
+  h.node("recent-priority-options").onclick();
+  const popup = h.context.activePopup;
+  h.node("recent-priority-options").menuOptions[0].action();
+  assert.deepEqual(h.sections().slice(0, 2).map(section => section.label), ["优先事项", "置顶"]);
+  assert.deepEqual(h.ids(h.section("置顶")), ["pinned", "pinned-unread"]);
+  assert.ok(h.ids(h.section("优先事项")).includes("pinned-unread"), "保留未读置顶会话的原有优先显示");
+  assert.equal(h.ids(h.section("今天")).includes("pinned"), false);
+  assert.equal(h.node("recent-priority-options").menuOptions[0].selected, true);
+  assert.equal(h.context.activePopup, popup);
+  assert.equal(popup.trigger, h.node("recent-priority-options"));
+  assert.equal(h.renders.length, 1);
+  assert.equal(h.context.sidebarFilters.showPinned, true);
+  h.node("recent-priority-options").menuOptions[0].action();
+  assert.equal(h.section("置顶"), undefined);
+  assert.ok(h.ids(h.section("今天")).includes("pinned"));
+  assert.equal(h.context.sidebar.pinnedThreads.length, 2, "显隐不修改真实置顶会话");
+  assert.deepEqual(h.selected, []);
+});
+
+test("最近置顶分组遵循实例与搜索筛选，取消置顶后同步移回日期分组", () => {
+  const h = recentSidebarHarness({ showPinned: true });
+  h.unread.instanceId = "claude:wsl:test"; h.unread.backend = "claude";
+  h.context.enabled = new Set(["codex:local"]);
+  h.context.renderSidebar();
+  assert.deepEqual(h.ids(h.section("置顶")), ["pinned"]);
+  h.context.search = "普通";
+  h.context.renderSidebar();
+  assert.deepEqual(h.ids(h.section("置顶")), []);
+  assert.ok(h.ids(h.section("今天")).includes("regular"));
+  h.context.search = "";
+  h.context.sidebar.pinnedThreads = [h.unread]; h.pinned.pinned = false;
+  h.context.renderSidebar();
+  assert.deepEqual(h.ids(h.section("置顶")), []);
+  assert.ok(h.ids(h.section("今天")).includes("pinned"));
+});
+
+test("空优先事项仍可开启置顶分组，折叠和切换项目视图不遗失显示偏好", () => {
+  const h = recentSidebarHarness();
+  h.context.sidebar.recent = [h.pinned, h.regular]; h.context.sidebar.pinnedThreads = [h.pinned];
+  h.context.recentPriorityIds = null;
+  h.context.renderSidebar();
+  assert.equal(h.ids(h.section("优先事项")).length, 0);
+  h.node("recent-priority-options").menuOptions[0].action();
+  h.section("置顶").heading.querySelector(".section-toggle").onclick();
+  assert.equal(h.section("置顶").body.hidden, true);
+  h.context.changeSidebarView("project");
+  assert.equal(h.node("recent-priority-options"), null);
+  assert.equal(h.context.sidebarFilters.showPinned, true);
+  h.context.changeSidebarView("list");
+  assert.equal(h.section("置顶").body.hidden, true, "返回最近视图仍保留原折叠");
+  const stale = h.node("recent-priority-options").menuOptions[0];
+  h.context.session.device.id = "device-b";
+  h.context.renderSidebar();
+  stale.action();
+  assert.equal(h.context.sidebarFilters.showPinned, false, "旧授权菜单不能修改新授权偏好");
 });
 
 // 在单个模块内截取源码片段；省略 end 表示截取到该模块末尾。跨模块片段须分段截取。

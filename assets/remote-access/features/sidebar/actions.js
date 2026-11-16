@@ -17,7 +17,7 @@ import { threadDeleted, threadDeletionLocked } from "./deletion-state.js";
 
 export let sidebarBusy = false;
 export function setSidebarBusy(value) { return sidebarBusy = value; }
-export let sidebarFilters = { mode: null, chats: null, projects: null, pinned: null };
+export let sidebarFilters = { mode: null, chats: null, projects: null, pinned: null, showPinned: false };
 const sidebarPreferenceStore = createSidebarPreferenceStore();
 export let sidebarPreferenceScope = null;
 export function setSidebarPreferenceScope(value) { return sidebarPreferenceScope = value; }
@@ -126,7 +126,7 @@ export function restoreSidebarPreferences() {
   const scope = privateInputScope(session);
   if (scope === sidebarPreferenceScope) return;
   sidebarPreferenceScope = scope;
-  sidebarFilters = { mode: null, chats: null, projects: null, pinned: null };
+  sidebarFilters = { mode: null, chats: null, projects: null, pinned: null, showPinned: false };
   if (!scope) return;
   try { Object.assign(sidebarFilters, sidebarPreferenceStore.read(scope)); }
   catch { /* 存储不可读时仍显示可用的会话数据，用户修改时说明保存失败。 */ }
@@ -145,6 +145,11 @@ function saveSidebarPreferences(patch) {
 function changeSidebarView(mode) {
   if (!["project", "list"].includes(mode)) return;
   saveSidebarPreferences({ mode });
+}
+export function setRecentPinnedVisible(value) {
+  if (typeof value !== "boolean") return;
+  // 用户要求“置顶”勾选控制分组显隐；只改设备偏好，只读和离线状态也可切换，不派发会话置顶操作。
+  saveSidebarPreferences({ showPinned: value });
 }
 export async function changeSidebar(payload) {
   if (payload.target === "grouping") return changeSidebarView(payload.grouping);

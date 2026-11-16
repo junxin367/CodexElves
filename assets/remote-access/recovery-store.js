@@ -9,6 +9,8 @@ export function createSidebarPreferenceStore({ storage, prefix = "codex-elves-si
     if (["project", "list"].includes(value.mode)) result.mode = value.mode;
     for (const key of ["chats", "projects", "pinned"])
       if (["manual", "updated_at"].includes(value[key])) result[key] = value[key];
+    // 用户要求最近视图可勾选显示“置顶”分组；仅保存本客户端选择，不改变会话实际置顶状态。
+    if (typeof value.showPinned === "boolean") result.showPinned = value.showPinned;
     return result;
   };
   const keyFor = scope => {

@@ -76,7 +76,7 @@ export function clientUnreadThreadCount(value) {
   }
   return unread.size;
 }
-// 用户要求服务模式会话按优先级、今天、昨天、前天、近四个星期日历日和历史分组；
+// 用户要求最近视图按优先事项、可选置顶、今天、昨天、前天、近四个星期日历日和历史分组；
 // 服务端已统一输出毫秒，
 // 这里兼容旧缓存中的 Unix 秒。阈值 1e11 与服务时间戳转换及
 // codex_service.rs UNIX_SECONDS_LIMIT 同步。
@@ -111,8 +111,8 @@ export function sidebarRecentDateGroups(items, now = Date.now()) {
       && (offset === 0 || timestamp < starts[offset - 1].getTime()));
     (index >= 0 ? groups[index] : history).items.push(item);
   }
-  // 用户要求最近会话依次显示优先级、今天、昨天、前天、近四个星期日历日和历史；
-  // 空分组由 appendSection 跳过，但固定返回顺序，避免跨周、跨月时改变位置。
+  // 用户要求最近会话先显示优先事项和可选置顶，再显示以下日期分组；
+  // 空日期分组由 appendSection 跳过，但固定返回顺序，避免跨周、跨月时改变位置。
   return [...groups, history];
 }
 export function markSidebarThreadReadLocally(id, value = sidebar) {

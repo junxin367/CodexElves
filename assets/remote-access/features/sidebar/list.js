@@ -4,7 +4,7 @@ import { $, button, element } from "../../ui/dom.js";
 import { copyText } from "../../ui/clipboard.js";
 import { icon } from "../../ui/icons.js";
 import { notice } from "../../ui/notice.js";
-import { activePopup, closePopup, fitPopup, renderPopup } from "../../ui/popup.js";
+import { activePopup, closePopup, fitPopup, openPopup, renderPopup, togglePopup } from "../../ui/popup.js";
 import { setSelectOptions } from "../../ui/select.js";
 import { selectThread } from "../../core/actions.js";
 import { connected, pageLeaving, selectedId, session, setSidebar, sidebar, thread } from "../../core/state.js";
@@ -24,7 +24,7 @@ import { cacheDisplayData, sidebarSnapshot } from "../session/thread-cache.js";
 import {
   bindSidebarRowMenu, changeSidebar, filterSideThreadSidebar, independentThreadWindowAvailable,
   openIndependentThreadWindow, renameSidebarThread, restoreSidebarPreferences, rowMenu,
-  sidebarFilters
+  setRecentPinnedVisible, sidebarFilters
 } from "./actions.js";
 import { filterDeletedSidebar, threadDeletionChecks, threadDeletionKey, threadDeletions } from "./deletion-state.js";
 import { projectTypeVisible, renderSessionFilter, sessionTypeVisible } from "./filters.js";
@@ -232,6 +232,11 @@ function restoreSidebarPopup(state) {
   trigger.setAttribute("aria-controls", popup.node.id);
   renderPopup();
 }
+export function recentPriorityMenuOptions(showPinned, togglePinnedSection) {
+  // 用户要求勾选后显示“√”，表示显示置顶分组，不是把优先事项中的全部会话设为置顶。
+  return [{ value: "pinned", label: "置顶", icon: "pin", checkable: true,
+    selected: showPinned === true, checkmark: "√", keepOpen: true, action: togglePinnedSection }];
+}
 export function renderSidebar() {
   renderSessionFilter();
   syncSideThreadUnread();
@@ -253,7 +258,8 @@ export function renderSidebar() {
     mode: sidebarFilters.mode ?? sidebar.preferences.mode,
     chats: sidebarFilters.chats ?? sidebar.preferences.chats,
     projects: sidebarFilters.projects ?? sidebar.preferences.projects,
-    pinned: sidebarFilters.pinned ?? sidebar.preferences.pinned
+    pinned: sidebarFilters.pinned ?? sidebar.preferences.pinned,
+    showPinned: sidebarFilters.showPinned === true
   };
   const viewToggle = $("#sidebar-view-toggle");
   const viewLabel = preferences.mode === "project" ? "切换到最近会话" : "切换到项目视图";
@@ -345,8 +351,8 @@ export function renderSidebar() {
     }
     return container;
   }
-  function appendSection(key, label, children, action = null) {
-    if (!children.length) return;
+  function appendSection(key, label, children, action = null, { keepEmpty = false } = {}) {
+    if (!children.length && !keepEmpty) return;
     const bodyId = domId("sidebar-section", key);
     const expanded = !!search || !collapsedSidebarSections.has(key);
     const heading = element("div", `section-label${key === "list:priority" ? " priority-section-label" : ""}`);
@@ -448,17 +454,41 @@ export function renderSidebar() {
     const recent = sortThreads(mergedRecent.filter(matches), "updated_at");
     const recentById = new Map(recent.map(item => [item.id, item]));
     const priority = [...recentPriorityIds].flatMap(id => recentById.has(id) ? [recentById.get(id)] : []);
-    if (priority.length) {
-      const clear = priority.some(item => sidebarAttentionState(item) === "idle")
-        ? button("", "清除已读会话", () => {
-          for (const item of mergedRecent)
-            if (!needsPriority(item)) recentPriorityIds.delete(item.id);
-          renderSidebar();
-        }, "priority-clear-button") : null;
-      if (clear) { clear.id = "clear-recent-priority"; clear.append(icon("eraser")); }
-      appendSection("list:priority", "优先级", priority.map(item => row(item, "recent", true)), clear);
+    const actions = element("span", "priority-section-actions");
+    const clear = priority.some(item => sidebarAttentionState(item) === "idle")
+      ? button("", "清除已读会话", () => {
+        for (const item of mergedRecent)
+          if (!needsPriority(item)) recentPriorityIds.delete(item.id);
+        renderSidebar();
+      }, "priority-clear-button") : null;
+    if (clear) { clear.id = "clear-recent-priority"; clear.append(icon("eraser")); actions.append(clear); }
+    const scope = privateInputScope(session);
+    const options = button("", "优先事项设置", () => togglePopup(options), "icon-button priority-options-button");
+    options.id = "recent-priority-options";
+    options.setAttribute("aria-haspopup", "menu"); options.setAttribute("aria-expanded", "false");
+    options.append(icon("slidersHorizontal"));
+    options.menuOptions = recentPriorityMenuOptions(preferences.showPinned, () => {
+      if (!scope || scope !== privateInputScope(session)) return;
+      setRecentPinnedVisible(!preferences.showPinned);
+    });
+    options.popupWidth = 160;
+    options.onkeydown = event => {
+      if (["ArrowDown", "ArrowUp"].includes(event.key)) {
+        event.preventDefault(); openPopup(options, { edge: event.key === "ArrowUp" ? "last" : "first" });
+      }
+    };
+    // 用户要求设置图标固定在最右侧，清除已读在其左侧；空优先事项也保留标题和入口。
+    // 内部分组键沿用 list:priority，改名不清除已有折叠及优先事项状态。
+    actions.append(options);
+    appendSection("list:priority", "优先事项", priority.map(item => row(item, "recent", true)), actions, { keepEmpty: true });
+    if (preferences.showPinned) {
+      appendSection("list:pinned", "置顶",
+        sortThreads(sidebar.pinnedThreads.filter(matches), preferences.pinned).map(item => row(item, "pinned", true)),
+        null, { keepEmpty: true });
     }
-    const dated = recent.filter(item => !recentPriorityIds.has(item.id));
+    // 置顶分组开启时不在日期分组重复显示；有未读/执行状态的置顶会话仍保留原有优先事项提升。
+    const dated = recent.filter(item => !recentPriorityIds.has(item.id)
+      && (!preferences.showPinned || !pinnedIds.has(item.id)));
     const visible = search ? dated : dated.slice(0, recentLimit);
     for (const group of sidebarRecentDateGroups(visible)) {
       const children = group.items.map(item => row(item, "recent", true));

@@ -399,6 +399,13 @@ input:focus,textarea:focus,.prompt-editor:focus,button:focus-visible{outline:1px
 .section-toggle[aria-expanded=false]>.ui-icon{transform:rotate(-90deg)}
 .priority-clear-button{display:grid;place-items:center;flex-shrink:0;width:var(--control-inline-size);height:var(--control-inline-size);padding:0;border:0;border-radius:var(--radius-control);color:var(--muted)}
 .priority-clear-button .ui-icon{width:16px;height:16px}
+/* 用户要求双滑杆图标固定在优先事项最右侧，清除已读紧邻其左侧；
+ * 操作区不伸缩、不换行，标题可省略，清除按钮出现/消失时不能挪动最右侧入口。 */
+.priority-section-actions{display:flex;align-items:center;flex:0 0 auto;gap:4px;margin-left:auto}
+.priority-section-label .section-label-text{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.priority-options-button{display:grid;place-items:center;flex:0 0 auto;width:var(--control-inline-size);height:var(--control-inline-size);padding:0;border:0;border-radius:var(--radius-control);background:transparent;color:var(--muted)}
+.priority-options-button>.ui-icon{width:16px;height:16px}
+.priority-options-button[aria-expanded=true]{background:var(--hover);color:var(--text)}
 .thread-row{display:grid;grid-template-columns:minmax(0,1fr) 34px;min-height:32px;border-radius:var(--radius-control)}
 .thread-row>.thread-link{grid-area:1/1}
 .thread-row>.thread-state,.thread-row>.row-menu-button{grid-area:1/2;justify-self:center;margin-right:0}

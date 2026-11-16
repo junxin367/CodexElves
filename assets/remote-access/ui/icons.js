@@ -18,6 +18,8 @@ export function icon(name) {
     recent: '<path d="M8 3a5 5 0 1 1-4.4 2.6"/><path d="M1.5 3.5v3h3"/><path d="M8 5v3l2 1.5"/>',
     more: '<circle cx="5" cy="12" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/>',
     menu: '<path d="M4 6h16M4 12h16M4 18h16"/>',
+    // 用户指定优先事项右侧使用参考图中的双横向滑杆：上方滑块靠右、下方靠左。
+    slidersHorizontal: '<path d="M3 7h8m6 0h4M3 17h4m6 0h8"/><rect x="11" y="4.5" width="6" height="5" rx="1.5"/><rect x="7" y="14.5" width="6" height="5" rx="1.5"/>',
     folderClosed: '<path d="M20 20H4a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2Z"/><path d="M2 10h20"/>',
     // 用户要求本地文件与文件夹使用两种简洁图标，预览中心与选择菜单共用。
     document: '<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8Z"/><path d="M14 2v6h6"/>',

@@ -176,7 +176,8 @@ export function renderPopup() {
     if (option.description) labels.append(element("small", "muted", option.description));
     node.append(labels);
     if (trigger.selectOptions) node.append(element("span", "choice-check", trigger.value === option.value ? "✓" : ""));
-    else if (option.checkable) node.append(element("span", "choice-check", option.selected ? "✓" : ""));
+    // 优先事项菜单按用户要求显示“√”；未指定字符的其他勾选菜单保持原有“✓”。
+    else if (option.checkable) node.append(element("span", "choice-check", option.selected ? option.checkmark || "✓" : ""));
     if (option.submenu) {
       node.setAttribute("aria-haspopup", "menu"); node.setAttribute("aria-expanded", "false");
       const arrow = icon("chevron"); arrow.classList.add("popup-submenu-arrow"); node.append(arrow);
