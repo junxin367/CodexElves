@@ -41,7 +41,9 @@ import { installChannelConfigurationObserver } from "./features/session/connecti
 import { connect, reconnectChangedAuthorization } from "./features/session/lifecycle.js";
 import { handleInitialConnectionError, requireAuthentication, showLogin } from "./features/session/login.js";
 import { installPageLifecycle, retryConnectionRecovery } from "./features/session/page-lifecycle.js";
-import { applyWorkspaceWindowMode, installSidePanelMessageListener } from "./features/session/side-panel.js";
+import {
+  applyWorkspaceWindowMode, installSessionWindowTitleSync, installSidePanelMessageListener
+} from "./features/session/side-panel.js";
 import { shell } from "./features/shell.js";
 import { installSidebarPreferenceSync } from "./features/sidebar/actions.js";
 import { restoreThreadDeletions } from "./features/sidebar/deletion-state.js";
@@ -68,6 +70,7 @@ restoreGoalComposerRecoveries();
 restoreQueuedEdits();
 restoreCompactions();
 applyWorkspaceWindowMode();
+installSessionWindowTitleSync();
 startAppearance();
 installLocalFileOpenListener();
 installComposerMenuViewportListeners();

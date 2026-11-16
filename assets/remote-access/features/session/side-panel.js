@@ -18,6 +18,34 @@ export function applyWorkspaceWindowMode() {
     document.documentElement.dataset.workspaceSidePanelVisible = "false";
   }
 }
+// 用户要求独立会话窗口在任务栏显示会话标题（如会话窗口显示会话标题、文件预览窗口显示文件标题）：
+// 页面标题跟随顶部会话标题，Windows 客户端监听页面标题变化后更新原生窗口标题，不向网页开放窗口命令。
+// 顶部标题在多处更新，且 shell() 会重建整个 #app，因此只监听 #app 子节点替换并重新绑定标题元素；
+// 默认标题“远程会话”及无标题时回退页面原标题。文件预览页由 workspace-preview.js 自行设置文件标题。
+export function installSessionWindowTitleSync() {
+  if (document.documentElement.dataset.sessionWindow !== "true") return;
+  const host = document.getElementById("app");
+  if (!host) return;
+  const fallback = document.title;
+  let heading = null, applied = fallback;
+  const sync = () => {
+    const name = (heading?.textContent || "").trim();
+    const next = name && name !== "远程会话" ? `${name} · CodexElves` : fallback;
+    if (next !== applied) document.title = applied = next;
+  };
+  const headingObserver = new MutationObserver(sync);
+  const bind = () => {
+    const current = document.getElementById("thread-title");
+    if (current !== heading) {
+      headingObserver.disconnect();
+      heading = current;
+      if (heading) headingObserver.observe(heading, { childList: true, characterData: true, subtree: true });
+    }
+    sync();
+  };
+  new MutationObserver(bind).observe(host, { childList: true });
+  bind();
+}
 let workspaceSidePanelStateSignature = "";
 export function syncWorkspaceSidePanelState(force = false) {
   if (!workspaceSidePanel || window.parent === window || creating || !selectedId || thread?.id !== selectedId) return;

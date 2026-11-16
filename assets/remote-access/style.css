@@ -430,7 +430,12 @@ input:focus,textarea:focus,.prompt-editor:focus,button:focus-visible{outline:1px
 .row-menu-button:disabled{opacity:.35}
 .thread-row>.row-menu-button:disabled{opacity:0}
 @media(hover:hover) and (pointer:fine) and (min-width:761px){
-  .thread-row:has(>.row-menu-button:not(:disabled)):is(:hover,:focus-within)>.thread-state,.thread-row:has(>.row-menu-button[aria-expanded=true])>.thread-state{opacity:0}
+  /* 用户要求 PC 会话行仅 hover 时显示“…”；761px 沿用 PC/手机断点，手机和触屏保持原规则。
+     选中行或标题获得焦点不常显；键盘聚焦按钮、菜单已展开时保留入口，并与右侧执行/未读图标互斥。 */
+  .thread-row>.row-menu-button{pointer-events:none}
+  .thread-row:not(:hover)>.row-menu-button{opacity:0}
+  .thread-row:hover>.row-menu-button:not(:disabled),.thread-row>.row-menu-button:not(:disabled):is(:focus-visible,[aria-expanded=true]){opacity:1;pointer-events:auto}
+  .thread-row:has(>.row-menu-button:not(:disabled)):hover>.thread-state,.thread-row:has(>.row-menu-button:not(:disabled):is(:focus-visible,[aria-expanded=true]))>.thread-state{opacity:0}
 }
 .sidebar-footer{display:flex;flex-direction:column;align-items:stretch;gap:4px;padding:12px 0 0;font-size:.85714rem}
 .footer-actions{display:flex;align-items:center;justify-content:space-between;gap:8px}

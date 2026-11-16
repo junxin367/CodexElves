@@ -9,18 +9,39 @@ use anyhow::Context;
 use serde::Serialize;
 use tauri::menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
-use tauri::{Manager, PhysicalPosition, WebviewUrl, WindowEvent};
+use tauri::{Manager, PhysicalPosition, PhysicalSize, WebviewUrl, WindowEvent};
 use url::Url;
 
 use crate::app_bar;
 use crate::appearance::{ThemeSnapshot, TitlebarTheme};
 use crate::connection::{Completion, Connection};
 use crate::resource_cache::{CacheInfo, ResourceCache};
-use crate::settings::{self, Settings};
+use crate::settings::{self, Settings, WindowState};
 
 const TITLE: &str = "CodexElves 远程会话";
 const WINDOW_LABEL: &str = "main";
 const CONTENT_LABEL: &str = "remote-content";
+// 原生窗口标题长度上限（字符数）；任务栏本身会截断，这里只防止异常页面标题无限增长。
+const MAX_WINDOW_TITLE_CHARS: usize = 200;
+
+// 用户要求独立窗口在任务栏显示与内容对应的标题（会话窗口为会话标题，文件预览窗口为文件标题），
+// 标题取自页面 document.title：会话页跟随顶部会话标题，文件预览页自行设置文件名。
+// 页面标题是展示文本：控制字符和连续空白折叠为单个空格；空白页、无标题页会让 WebView2 返回地址，
+// 地址不是内容标题，一律忽略并保留当前窗口标题。主窗口不使用此规则，固定显示程序标题。
+fn window_title_from_document(title: &str) -> Option<String> {
+    let cleaned = title
+        .split(|ch: char| ch.is_control() || ch.is_whitespace())
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ");
+    if cleaned.is_empty()
+        || cleaned == "about:blank"
+        || (!cleaned.contains(' ') && Url::parse(&cleaned).is_ok())
+    {
+        return None;
+    }
+    Some(cleaned.chars().take(MAX_WINDOW_TITLE_CHARS).collect())
+}
 
 #[derive(Clone)]
 struct SharedWebviewEnvironment(
@@ -541,43 +562,98 @@ fn remember_window(window: &tauri::Window, persist: bool) {
     }
 }
 
-fn restore_window(window: &tauri::Window, settings: &Settings) -> tauri::Result<()> {
-    // 用户要求基本窗口缩放；最小 520×420 保留连接页可用空间，上限仅防止损坏配置产生异常窗口。
-    let width = if settings.window.width.is_finite() {
-        settings.window.width.clamp(520.0, 7680.0)
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct RestoreGeometry {
+    width: u32,
+    height: u32,
+    position: Option<(i32, i32)>,
+}
+
+fn restore_geometry(
+    state: &WindowState,
+    monitors: &[(i32, i32, u32, u32, f64)],
+    fallback_scale: f64,
+) -> RestoreGeometry {
+    // 用户要求保持关闭前的逻辑大小和位置；仅原位置不可见或当前显示器无法完整容纳时才调整。
+    let logical_width = if state.width.is_finite() {
+        state.width.clamp(520.0, 7680.0)
     } else {
         1280.0
     };
-    let height = if settings.window.height.is_finite() {
-        settings.window.height.clamp(420.0, 4320.0)
+    let logical_height = if state.height.is_finite() {
+        state.height.clamp(420.0, 4320.0)
     } else {
         860.0
     };
-    window.set_size(tauri::LogicalSize::new(width, height))?;
-    let visible = settings
-        .window
-        .x
-        .zip(settings.window.y)
-        .is_some_and(|(x, y)| {
-            window
-                .available_monitors()
-                .unwrap_or_default()
-                .iter()
-                .any(|monitor| {
-                    let p = monitor.position();
-                    let s = monitor.size();
-                    // 至少保留 80×40 像素操作区（含 36px 标题栏）；显示器移除后回到当前屏幕中央。
-                    i64::from(x) + 80 > i64::from(p.x)
-                        && i64::from(x) < i64::from(p.x) + i64::from(s.width) - 80
-                        && i64::from(y) >= i64::from(p.y)
-                        && i64::from(y) < i64::from(p.y) + i64::from(s.height) - 40
-                })
+    let saved_position = state.x.zip(state.y);
+    let target = saved_position.and_then(|(x, y)| {
+        monitors.iter().find(|(left, top, width, height, _)| {
+            // 至少保留 80×40 物理像素操作区（含 36px 标题栏）；显示器移除后不再沿用旧位置。
+            i64::from(x) + 80 > i64::from(*left)
+                && i64::from(x) < i64::from(*left) + i64::from(*width) - 80
+                && i64::from(y) >= i64::from(*top)
+                && i64::from(y) < i64::from(*top) + i64::from(*height) - 40
+        })
+    });
+    let scale = target
+        .map(|monitor| monitor.4)
+        .filter(|scale| scale.is_finite() && *scale > 0.0)
+        .unwrap_or(if fallback_scale.is_finite() && fallback_scale > 0.0 {
+            fallback_scale
+        } else {
+            1.0
         });
-    if visible {
-        window.set_position(PhysicalPosition::new(
-            settings.window.x.unwrap(),
-            settings.window.y.unwrap(),
-        ))?;
+    let dimension = |logical: f64, minimum: f64, monitor_limit: Option<u32>| {
+        let minimum = (minimum * scale).round().max(1.0) as u32;
+        let maximum = monitor_limit.unwrap_or(u32::MAX).max(minimum);
+        ((logical * scale).round() as u32).clamp(minimum, maximum)
+    };
+    let width = dimension(logical_width, 520.0, target.map(|monitor| monitor.2));
+    let height = dimension(logical_height, 420.0, target.map(|monitor| monitor.3));
+    let position = target.map(|monitor| {
+        let (saved_x, saved_y) = saved_position.unwrap();
+        // 尺寸超出当前显示器时只平移必要的距离；同屏且原本完整可见时数值保持逐像素不变。
+        let min_x = i64::from(monitor.0);
+        let max_x = min_x + i64::from(monitor.2.saturating_sub(width));
+        let min_y = i64::from(monitor.1);
+        let max_y = min_y + i64::from(monitor.3.saturating_sub(height));
+        (
+            i64::from(saved_x).clamp(min_x, max_x) as i32,
+            i64::from(saved_y).clamp(min_y, max_y) as i32,
+        )
+    });
+    RestoreGeometry {
+        width,
+        height,
+        position,
+    }
+}
+
+fn restore_window(window: &tauri::Window, settings: &Settings) -> tauri::Result<()> {
+    let monitors: Vec<_> = window
+        .available_monitors()
+        .unwrap_or_default()
+        .iter()
+        .map(|monitor| {
+            let position = monitor.position();
+            let size = monitor.size();
+            (
+                position.x,
+                position.y,
+                size.width,
+                size.height,
+                monitor.scale_factor(),
+            )
+        })
+        .collect();
+    let geometry = restore_geometry(
+        &settings.window,
+        &monitors,
+        window.scale_factor().unwrap_or(1.0),
+    );
+    window.set_size(PhysicalSize::new(geometry.width, geometry.height))?;
+    if let Some((x, y)) = geometry.position {
+        window.set_position(PhysicalPosition::new(x, y))?;
     } else {
         window.center()?;
     }
@@ -845,6 +921,14 @@ fn create_client_window(
         open_external(url);
         tauri::webview::NewWindowResponse::Deny
     });
+    if !main {
+        // 页面标题变化在主线程回调；只改自身窗口的原生标题（任务栏、Alt+Tab），不向网页开放窗口命令。
+        content_builder = content_builder.on_document_title_changed(|webview, title| {
+            if let Some(title) = window_title_from_document(&title) {
+                let _ = webview.window().set_title(&title);
+            }
+        });
+    }
     if let Some(environment) = environment {
         // 子窗口与主窗口共享登录 Cookie、IndexedDB 和资源 profile；必须复用同一 WebView2 环境。
         content_builder = content_builder.with_environment(environment);
@@ -996,6 +1080,107 @@ pub fn show_startup_error(message: &str) {
             title.as_ptr(),
             windows_sys::Win32::UI::WindowsAndMessaging::MB_OK
                 | windows_sys::Win32::UI::WindowsAndMessaging::MB_ICONERROR,
+        );
+    }
+}
+
+#[cfg(test)]
+mod window_title_tests {
+    use super::window_title_from_document;
+
+    #[test]
+    fn independent_window_title_follows_page_title_but_ignores_addresses_and_blank_pages() {
+        assert_eq!(
+            window_title_from_document("修复登录 · CodexElves").as_deref(),
+            Some("修复登录 · CodexElves")
+        );
+        assert_eq!(
+            window_title_from_document("  说明.md \n · 变更\t· CodexElves ").as_deref(),
+            Some("说明.md · 变更 · CodexElves")
+        );
+        for title in [
+            "",
+            "   \n\t",
+            "about:blank",
+            "http://127.0.0.1:45222/",
+            "https://remote.example.com/?sessionWindow=1",
+        ] {
+            assert_eq!(window_title_from_document(title), None, "{title:?}");
+        }
+        let long = "长".repeat(500);
+        assert_eq!(
+            window_title_from_document(&long).unwrap().chars().count(),
+            200
+        );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn restore_geometry_preserves_same_monitor_size_and_position() {
+        let state = WindowState {
+            width: 900.0,
+            height: 700.0,
+            x: Some(100),
+            y: Some(80),
+            maximized: false,
+        };
+        let restored = restore_geometry(&state, &[(0, 0, 1920, 1080, 1.0)], 1.0);
+        assert_eq!(
+            restored,
+            RestoreGeometry {
+                width: 900,
+                height: 700,
+                position: Some((100, 80))
+            }
+        );
+    }
+
+    #[test]
+    fn restore_geometry_uses_target_monitor_dpi_without_moving_visible_window() {
+        let state = WindowState {
+            width: 1000.0,
+            height: 800.0,
+            x: Some(2000),
+            y: Some(100),
+            maximized: false,
+        };
+        let restored = restore_geometry(&state, &[(1920, 0, 2560, 1440, 1.5)], 1.0);
+        assert_eq!(
+            restored,
+            RestoreGeometry {
+                width: 1500,
+                height: 1200,
+                position: Some((2000, 100))
+            }
+        );
+    }
+
+    #[test]
+    fn restore_geometry_fits_current_monitor_and_centers_offscreen_position() {
+        let mut state = WindowState {
+            width: 1400.0,
+            height: 900.0,
+            x: Some(1700),
+            y: Some(900),
+            maximized: false,
+        };
+        let restored = restore_geometry(&state, &[(0, 0, 1920, 1080, 1.0)], 1.0);
+        assert_eq!(
+            restored,
+            RestoreGeometry {
+                width: 1400,
+                height: 900,
+                position: Some((520, 180))
+            }
+        );
+        state.x = Some(4000);
+        assert_eq!(
+            restore_geometry(&state, &[(0, 0, 1920, 1080, 1.0)], 1.0).position,
+            None
         );
     }
 }

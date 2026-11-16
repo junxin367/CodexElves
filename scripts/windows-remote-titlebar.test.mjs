@@ -29,6 +29,67 @@ test("独立窗口及原生顶栏只在主界面线程创建，异步命令不�
   assert.match(appBar, /pub fn resize[\s\S]*?ensure_ui_thread\(parent\)\?;[\s\S]*?MoveWindow/);
 });
 
+test("独立窗口的原生标题跟随页面标题，主窗口保持程序标题且页面不获得窗口命令", async () => {
+  const desktop = await readFile(new URL("src-tauri/src/desktop.rs", base), "utf8");
+  const build = desktop.slice(desktop.indexOf("fn create_client_window("), desktop.indexOf("let content = window.add_child("));
+  // 用户要求任务栏标题与独立窗口内容对应；只监听非主窗口，且不新增任何网页可调用的窗口命令。
+  assert.match(build, /if !main \{[\s\S]*?on_document_title_changed\([\s\S]*?window_title_from_document\(&title\)[\s\S]*?webview\.window\(\)\.set_title\(&title\)/);
+  assert.match(build, /\.title\(TITLE\)/);
+  assert.match(build, /app_bar::install\(&window, TITLE, main\)\?/);
+  assert.doesNotMatch(desktop, /fn remote_window_title|fn remote_set_title|fn remote_set_window_title/);
+  const capability = await readFile(new URL("src-tauri/capabilities/content-appearance.json", base), "utf8");
+  assert.doesNotMatch(capability, /set-title|window-title/);
+});
+
+test("会话窗口页面标题同步顶部会话标题，重命名、切换和重建界面后继续有效", async () => {
+  const pageSource = await readFile(new URL("../assets/remote-access/features/session/side-panel.js", import.meta.url), "utf8");
+  const start = pageSource.indexOf("export function installSessionWindowTitleSync()");
+  const body = pageSource.slice(start, pageSource.indexOf("let workspaceSidePanelStateSignature", start)).replace(/^export /, "");
+  assert.ok(start > 0 && body.includes("function installSessionWindowTitleSync"));
+  const run = ({ sessionWindow, heading }) => {
+    const observers = [];
+    class FakeObserver {
+      constructor(callback) { this.callback = callback; this.target = null; observers.push(this); }
+      observe(target) { this.target = target; }
+      disconnect() { this.target = null; }
+    }
+    const host = {};
+    let current = heading;
+    const document = {
+      title: "CodexElves · 远程会话",
+      documentElement: { dataset: sessionWindow ? { sessionWindow: "true" } : {} },
+      getElementById: id => id === "app" ? host : id === "thread-title" ? current : null,
+    };
+    vm.runInContext(`${body}; installSessionWindowTitleSync()`, vm.createContext({ document, MutationObserver: FakeObserver }));
+    const fire = target => observers.filter(observer => observer.target === target).forEach(observer => observer.callback());
+    return { document, host, fire, replace: next => { current = next; fire(host); } };
+  };
+
+  // 普通网页或 PC 主页面不是独立会话窗口，不改页面标题。
+  const normal = run({ sessionWindow: false, heading: { textContent: "不应显示" } });
+  assert.equal(normal.document.title, "CodexElves · 远程会话");
+
+  const heading = { textContent: "远程会话" };
+  const page = run({ sessionWindow: true, heading });
+  assert.equal(page.document.title, "CodexElves · 远程会话", "默认标题保留页面原标题");
+  heading.textContent = "  修复登录 ";
+  page.fire(heading);
+  assert.equal(page.document.title, "修复登录 · CodexElves");
+  heading.textContent = "重命名后的会话";
+  page.fire(heading);
+  assert.equal(page.document.title, "重命名后的会话 · CodexElves");
+  // shell() 重建 #app 后重新绑定新的标题元素，旧元素的变化不再影响页面标题。
+  const rebuilt = { textContent: "另一会话" };
+  page.replace(rebuilt);
+  assert.equal(page.document.title, "另一会话 · CodexElves");
+  heading.textContent = "旧元素";
+  page.fire(heading);
+  assert.equal(page.document.title, "另一会话 · CodexElves");
+  // 退出登录或标题元素消失时回到页面原标题。
+  page.replace(null);
+  assert.equal(page.document.title, "CodexElves · 远程会话");
+});
+
 test("外观连续变化合并为最新颜色并串行同步，模式来自实际页面", async () => {
   const frames = [], requests = [], completions = [], variables = new Map([
     ["--bg", "#181818"], ["--text", "#ededed"], ["--line", "#343434"],
