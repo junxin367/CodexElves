@@ -3785,6 +3785,7 @@ test("弹层帮助与说明移动到列表上方且只出现一次", () => {
 
 test("会话权限菜单文字继承当前设置字号，顶部信息与链接使用下边界", async () => {
   const css = await readFile(new URL("../assets/remote-access/style.css", import.meta.url), "utf8");
+  assert.match(css, /\.permission-button>\.ui-icon:last-child\{display:none\}/);
   const start = css.indexOf(".composer-permissions-popup{"), end = css.indexOf(".composer-add-popup", start);
   const block = css.slice(start, end);
   assert.ok(start >= 0 && end > start);

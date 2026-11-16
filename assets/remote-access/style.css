@@ -213,6 +213,8 @@ html{scrollbar-color:var(--muted) transparent}
 .composer-toolbar>.composer-controls>.permission-button{margin-inline-end:auto}
 .composer-toolbar .permission-button{display:inline-flex;align-items:center;justify-content:center;gap:5px;flex:0 0 auto;min-width:0;max-width:150px;height:30px;padding:4px 6px;border:0;border-radius:7px;background:transparent;color:var(--muted);font-size:calc(var(--font-size)*.78);white-space:nowrap}
 .composer-toolbar .permission-button .ui-icon{flex:0 0 16px;width:16px;height:16px}
+/* 用户要求会话权限入口不显示右侧下拉箭头；通用 Select 和其他控件继续保留各自箭头。 */
+.permission-button>.ui-icon:last-child{display:none}
 .permission-button .permission-button-label{min-width:0;overflow:hidden;text-overflow:ellipsis}
 /* Codex“完全访问”和 Claude“绕过权限”共用警示色；入口、菜单标题和图标随明暗主题同步。 */
 :root{--permission-elevated-color:light-dark(#9d690a,#e3b35e)}
@@ -1689,7 +1691,7 @@ body{font-weight:var(--ui-font-weight,400)}
   .composer-toolbar{gap:6px;flex-wrap:nowrap}
   .composer-toolbar>.composer-controls{gap:0;flex-wrap:nowrap}
   .composer-toolbar .permission-button{flex:0 0 28px;width:28px;max-width:28px;height:36px;gap:0;padding:0}
-  .permission-button>.permission-button-label,.permission-button>.ui-icon:last-child{display:none}
+  .permission-button>.permission-button-label{display:none}
   .composer-toolbar>.composer-send{flex:0 0 auto;flex-wrap:nowrap}
   .instance-permissions-card{padding-inline:12px}
 }
