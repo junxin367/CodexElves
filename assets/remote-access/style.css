@@ -479,7 +479,21 @@ input:focus,textarea:focus,.prompt-editor:focus,button:focus-visible{outline:1px
 @media(hover:hover) and (pointer:fine){.popup-option:not(:disabled):hover{background:var(--hover)}}
 .popup-option:disabled{cursor:not-allowed;opacity:.45}
 .popup-option:disabled:hover{background:transparent}
-.thread-row-popup .popup-option-danger{color:var(--danger)}
+.popup-separator{flex-shrink:0;height:1px;margin:4px 0;background:var(--menu-divider,var(--line))}
+.popup-submenu-arrow{flex:0 0 14px;width:14px;height:14px;transform:rotate(-90deg);color:var(--muted)}
+.ui-popup.has-submenu{overflow:visible}
+.popup-submenu.ui-popup{animation:none}
+.popup-submenu-back{display:flex;align-items:center;gap:8px;flex-shrink:0;min-height:40px;margin-bottom:4px;padding:7px 8px;border:0;border-radius:0;border-bottom:1px solid var(--menu-divider,var(--line));text-align:left;font-size:inherit}
+.popup-submenu-back[hidden]{display:none}
+/* 用户要求会话右键菜单参考 Codex：224px 主菜单配图标列、两处分组线及子菜单箭头，字号跟随当前外观。
+ * 224px 在 features/sidebar/list.js 中设置；手机继续沿用通用菜单的 44px 最小触摸行高。 */
+.thread-row-popup.ui-popup{padding:5px;border-color:var(--menu-divider,var(--line));border-radius:10px;background:var(--control-bg,var(--side));font-size:var(--font-size);box-shadow:0 12px 32px #0003}
+.thread-row-popup .popup-option{gap:9px;padding:7px 9px;font-size:inherit}
+.thread-row-popup .popup-option>.ui-icon{flex:0 0 16px;width:16px;height:16px;color:var(--muted)}
+.thread-row-popup .popup-option[aria-expanded=true]{background:var(--control-hover,var(--hover))}
+.thread-row-popup .popup-option-label>span{white-space:nowrap}
+.thread-row-popup .popup-option-danger,.thread-row-popup .popup-option-danger>.ui-icon{color:var(--danger)}
+@media(hover:hover) and (pointer:fine){.thread-row-popup .popup-option:not(:disabled):hover{background:var(--control-hover,var(--hover))}}
 #project-select{font-size:.92857rem}
 /* 用户要求新建项目栏更矮：默认约 37px = 30px 选择按钮 + 上下各 3px + 顶边框 1px；
    手机断点同步使用 30px 最小按钮高度，大字号仍允许内容自然撑高，不压缩文字。 */

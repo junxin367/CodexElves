@@ -17,6 +17,7 @@ import { markVisibleThreadRead } from "../messages/user-content.js";
 import { claudeThreadId, isActiveThread, privateInputScope, threadReadOnly } from "../session/capabilities.js";
 import { foregroundReadGeneration, initialAuthenticationRequired } from "../session/connection-state.js";
 import { enabledInstanceIds } from "../session/instances.js";
+import { threadOpenInMenu } from "../session/open-in.js";
 import { syncSideThreadUnread } from "../session/related-state.js";
 import { workspaceSidePanel } from "../session/side-panel.js";
 import { cacheDisplayData, sidebarSnapshot } from "../session/thread-cache.js";
@@ -43,37 +44,42 @@ function clientUnreadBadgeAvailable() {
   return !workspaceSidePanel && typeof window.__CODEX_ELVES_UNREAD_BADGE__?.setCount === "function";
 }
 
-// 用户要求会话列表右键菜单移除“打开会话”，改为复制可复用的会话命令和项目路径；
-// CLI 命令仅在后端提供原生连接命令时显示，项目路径仅复制当前列表项明确提供的 cwd。
+// 用户要求固定为重命名、置顶、独立窗口、复制、打开方式、删除；复制和打开方式使用二级菜单。
+// WSL 会话 ID 必须带真实发行版名称，优先复制后端明确提供的 nativeId，不把 CLI 命令当作 ID。
 export function threadMenuOptions(item, {
   pinned = false, deletion = null, deleting = false, independentWindow = false,
-  deletionCheckPending = false, deletionConflict = false,
+  deletionCheckPending = false, deletionConflict = false, openIn = null,
   openWindow, togglePinned, rename, deleteThread
 } = {}) {
-  const command = typeof item?.cliCommand === "string" ? item.cliCommand.trim() : "";
-  const projectPath = typeof item?.cwd === "string" ? item.cwd.trim() : "";
-  const options = [];
-  if (command) options.push({
-    value: "copyCommand", label: "复制会话命令", icon: "copy", action: () => void copyText(command)
-  });
-  if (projectPath) options.push({
-    value: "copyProjectPath", label: "复制项目路径", icon: "copy", action: () => void copyText(projectPath)
-  });
-  if (independentWindow) options.push({
-    value: "openWindow", label: "打开独立窗口", icon: "window",
-    disabled: !!deletion, action: openWindow
-  });
-  options.push(
-    { label: pinned ? "取消置顶会话" : "置顶会话", icon: "pin", disabled: !!deletion, action: togglePinned },
+  const projectPath = typeof item?.cwd === "string" && item.cwd.trim() ? item.cwd : "";
+  const nativeId = typeof item?.nativeId === "string" ? item.nativeId.trim() : "";
+  const sessionId = nativeId || (typeof item?.id === "string" ? item.id.trim() : "");
+  const distribution = typeof item?.wslDistribution === "string" ? item.wslDistribution.trim() : "";
+  const wsl = typeof item?.instanceId === "string"
+    ? item.instanceId.includes(":wsl:") : !!distribution;
+  const copiedId = sessionId && (!wsl || distribution) ? `${wsl ? `${distribution} ` : ""}${sessionId}` : "";
+  const copies = [
+    { value: "copyWorkingPath", label: "复制工作路径", icon: "folderClosed",
+      disabled: !projectPath, action: () => void copyText(projectPath) },
+    { value: "copySessionId", label: "复制会话 ID", icon: "copy",
+      disabled: !copiedId, action: () => void copyText(copiedId) }
+  ];
+  return [
     { value: "rename", label: "重命名", icon: "edit", disabled: !!deletion, action: rename },
+    { value: "pin", label: pinned ? "取消置顶" : "置顶", icon: "pin", disabled: !!deletion, action: togglePinned },
+    { value: "openWindow", label: "独立窗口打开", icon: "window",
+      disabled: !!deletion || !independentWindow, action: openWindow },
+    { value: "copy", label: "复制", icon: "copy", separatorBefore: true,
+      submenu: copies, submenuKey: JSON.stringify([projectPath, copiedId]), submenuWidth: 200 },
+    { ...openIn, value: "openIn", label: "打开方式", icon: "folder",
+      disabled: !!deletion || !openIn || openIn.disabled },
     { value: "deleteThread",
       label: deleting ? deletion?.state === "submitting" ? "正在删除会话…" : "核对删除结果" : "删除会话",
-      icon: "trash", danger: true,
+      icon: "trash", danger: true, separatorBefore: true,
       disabled: deleting ? deletion?.state === "submitting" || deletionCheckPending
         : !!deletion || deletionConflict,
       action: deleteThread }
-  );
-  return options;
+  ];
 }
 
 export function syncClientUnreadBadge(value = sidebar) {
@@ -321,6 +327,9 @@ export function renderSidebar() {
       const menu = rowMenu(domId("thread-menu", `${scope}:${item.id}`), `${item.title} 的会话菜单`,
         threadMenuOptions(item, {
           pinned, deletion, deleting, independentWindow: independentThreadWindowAvailable(),
+          openIn: threadOpenInMenu(item, {
+            isAvailable: () => !threadDeletions.has(threadDeletionKey(item.id))
+          }),
           deletionCheckPending: threadDeletionChecks.has(threadDeletionKey(item.id)),
           deletionConflict: threadDeletionConflict(item.id),
           openWindow: () => openIndependentThreadWindow(item),
@@ -329,6 +338,8 @@ export function renderSidebar() {
           deleteThread: () => deleting ? checkThreadDeletion(deletion) : deleteSidebarThread(item)
         }));
       menu.popupClassName = "thread-row-popup";
+      // 与 Codex 参考菜单一致保留图标列和子菜单箭头；宽度与 style.css 中的紧凑会话菜单同步核对。
+      menu.popupWidth = 224;
       container.append(menu);
       bindSidebarRowMenu(container, menu);
     }

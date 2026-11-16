@@ -2088,7 +2088,7 @@ test("会话菜单分离子智能体读取和侧边写入，并按连接代次�
   assert.deepEqual(Array.from(context.permissions(context.readContext())), [false, false]);
 });
 
-test("会话列表右键菜单移除打开会话并复制可用命令和项目路径", () => {
+test("会话列表右键菜单固定六项顺序，复制子菜单使用工作路径和带 WSL 名称的原生会话 ID", () => {
   const copied = [], context = nodeVm.createContext({
     copyText: value => copied.push(value),
   });
@@ -2098,20 +2098,34 @@ test("会话列表右键菜单移除打开会话并复制可用命令和项目�
   };
   const options = context.threadMenuOptions({
     id: "claude-01234567-89ab-4cde-8fab-0123456789ab",
+    nativeId: "native-session-id", instanceId: "claude:wsl:fixture", wslDistribution: "claude-us",
     cliCommand: "wsl.exe --distribution claude-us --user junes claude attach 1234",
     cwd: "E:\\workspace\\CodexElves",
-  }, { ...callbacks, independentWindow: true });
+  }, { ...callbacks, independentWindow: true, openIn: { submenu: [], disabled: false } });
   assert.deepEqual(Array.from(options, option => option.label), [
-    "复制会话命令", "复制项目路径", "打开独立窗口", "置顶会话", "重命名", "删除会话"
+    "重命名", "置顶", "独立窗口打开", "复制", "打开方式", "删除会话"
   ]);
-  options[0].action(); options[1].action();
+  assert.equal(options[2].disabled, false);
+  assert.equal(options[4].disabled, false);
+  assert.deepEqual(Array.from(options[3].submenu, option => option.label), ["复制工作路径", "复制会话 ID"]);
+  options[3].submenu[0].action(); options[3].submenu[1].action();
   assert.deepEqual(copied, [
-    "wsl.exe --distribution claude-us --user junes claude attach 1234",
     "E:\\workspace\\CodexElves",
+    "claude-us native-session-id",
   ]);
-  const withoutCommand = context.threadMenuOptions({ cwd: "E:\\workspace\\CodexElves" }, callbacks);
-  assert.equal(withoutCommand.some(option => option.label === "复制会话命令"), false);
-  assert.equal(withoutCommand.some(option => option.label === "打开会话"), false);
+  const local = context.threadMenuOptions({ id: "local-id", instanceId: "codex:local",
+    cwd: "\\\\wsl.localhost\\claude-us\\home\\junes" }, { ...callbacks, pinned: true });
+  assert.equal(local[1].label, "取消置顶");
+  assert.equal(local[2].disabled, true);
+  assert.equal(local[4].disabled, true);
+  local[3].submenu[1].action();
+  assert.equal(copied.at(-1), "local-id", "WSL 目录不能将本机会话改成 WSL 实例");
+  const missing = context.threadMenuOptions({ id: "wsl-id", instanceId: "claude:wsl:fixture" }, callbacks);
+  assert.ok(missing[3].submenu.every(option => option.disabled), "缺少路径或 WSL 名称时保留禁用项");
+  const pending = context.threadMenuOptions({ id: "local-id" }, { ...callbacks, deletion: { state: "confirming" },
+    independentWindow: true, openIn: { submenu: [], disabled: false } });
+  assert.ok([0, 1, 2, 4, 5].every(index => pending[index].disabled));
+  assert.equal(options.some(option => option.label === "复制会话命令" || option.label === "打开会话"), false);
 });
 
 test("Claude 原生子代理身份走本类型路由，读取能力独立于侧边会话且详情保持只读", () => {
@@ -2615,10 +2629,11 @@ function sessionFilterPopupHarness({ enabled = ["codex:local", "claude:wsl:a", "
   class PopupNode {
     constructor(tag, className = "", text = "") {
       this.tag = tag; this.className = className; this.textContent = text; this.children = [];
-      this.dataset = {}; this.attributes = new Map(); this.disabled = false; this.isConnected = true;
-      this.classList = { toggle() {} };
+      this.dataset = {}; this.attributes = new Map(); this.style = {}; this.disabled = false; this.isConnected = true;
+      this.classList = { toggle() {}, add() {}, remove() {} };
     }
     append(...children) { for (const child of children) { child.parentElement = this; this.children.push(child); } }
+    prepend(...children) { for (const child of children) child.parentElement = this; this.children.unshift(...children); }
     replaceChildren(...children) {
       for (const child of this.children) child.parentElement = null;
       this.children = []; this.append(...children);
@@ -2632,6 +2647,7 @@ function sessionFilterPopupHarness({ enabled = ["codex:local", "claude:wsl:a", "
     focus() { document.activeElement = this; this.onfocus?.(); }
     click() { if (!this.disabled) this.onclick?.(); }
     scrollIntoView() {}
+    getBoundingClientRect() { return this.rect || { left: 100, top: 100, right: 324, bottom: 420, width: 224, height: 320 }; }
     remove() {
       if (this.parentElement) this.parentElement.children = this.parentElement.children.filter(child => child !== this);
       this.parentElement = null; this.isConnected = false;
@@ -2660,6 +2676,7 @@ function sessionFilterPopupHarness({ enabled = ["codex:local", "claude:wsl:a", "
     { id: "claude:wsl:off", backend: "claude", label: "Claude · 未开启", ready: true },
   ];
   const context = vm.createContext({ nativeConnectionVersion: 1,
+    AbortController, setTimeout, clearTimeout, window: { innerWidth: 1200, innerHeight: 800 },
     document, element, icon: name => element("span", "ui-icon", name),
     $: selector => nodes.get(selector) || null,
     button(text, label, callback, className) {
@@ -2673,6 +2690,7 @@ function sessionFilterPopupHarness({ enabled = ["codex:local", "claude:wsl:a", "
     renderSidebar: () => context.renderSessionFilter(), updateComposer() {}, notice() {}, loadSidebar: async () => {},
   });
   vm.runInContext(sourceSection("function closePopup(", "function fitPopup("), context);
+  vm.runInContext(sourceSection("function closePopupSubmenu("), context);
   vm.runInContext(sourceSection('  const typeFilter = $("#sidebar-type-filter");', "  const setSidebarSearchOpen =")
     + sourceSection('document.addEventListener("pointerdown", event => {', 'document.addEventListener("focusout"'), context);
   const options = () => context.activePopup?.list.querySelectorAll("button") || [];
@@ -2685,6 +2703,100 @@ function sessionFilterPopupHarness({ enabled = ["codex:local", "claude:wsl:a", "
     focusOutside: () => listeners.get("focusin")({ target: element("input") }),
   };
 }
+
+test("二级菜单支持键盘进入返回，父菜单刷新保留子弹层且旧父项不能再触发", () => {
+  const h = sessionFilterPopupHarness(), copied = [];
+  h.trigger.menuOptions = [{ value: "copy", label: "复制", submenuKey: "same",
+    submenu: [{ value: "id", label: "复制会话 ID", action: () => copied.push("id") }] }];
+  h.context.openPopup(h.trigger);
+  const popup = h.context.activePopup, source = popup.list.querySelector("button");
+  const key = (target, value) => ({ target, key: value, preventDefault() {}, stopPropagation() {} });
+  popup.node.onkeydown(key(source, "ArrowRight"));
+  const submenu = popup.submenu, child = submenu.list.querySelector("button");
+  assert.equal(h.context.document.activeElement, child);
+  assert.equal(popup.node.contains(child), true, "子菜单仍属于同一菜单，点击不会被全局外部点击处理抢先关闭");
+  h.context.renderPopup();
+  assert.equal(popup.submenu, submenu);
+  assert.equal(submenu.list.querySelector("button"), child, "刷新不重建子菜单或丢失焦点");
+  assert.notEqual(submenu.source, source);
+  source.click();
+  assert.equal(popup.submenu, submenu, "旧父项点击无效");
+  submenu.node.onkeydown(key(child, "Escape"));
+  assert.equal(popup.submenu, null);
+  assert.equal(h.context.activePopup, popup);
+  assert.equal(h.context.document.activeElement, popup.list.querySelector("button"));
+  popup.list.querySelector("button").click();
+  popup.submenu.list.querySelector("button").click();
+  assert.deepEqual(copied, ["id"]);
+  assert.equal(h.context.activePopup, null);
+});
+
+test("异步子菜单关闭后取消读取，迟到应用列表不能污染新菜单", async () => {
+  const h = sessionFilterPopupHarness();
+  let finish, signal;
+  h.trigger.menuOptions = [{ value: "openIn", label: "打开方式", submenuKey: "old",
+    submenu: input => { signal = input.signal; return new Promise(resolve => { finish = resolve; }); } }];
+  h.context.openPopup(h.trigger);
+  h.context.activePopup.list.querySelector("button").click();
+  assert.equal(h.context.activePopup.submenu.node.getAttribute("aria-busy"), "true");
+  h.context.closePopup();
+  assert.equal(signal.aborted, true);
+  h.trigger.menuOptions = [{ value: "rename", label: "重命名", action() {} }];
+  h.context.openPopup(h.trigger);
+  const current = h.context.activePopup;
+  finish([{ value: "vscode", label: "VS Code", action() {} }]);
+  await Promise.resolve(); await Promise.resolve();
+  assert.equal(h.context.activePopup, current);
+  assert.equal(current.submenu, undefined);
+  assert.deepEqual(current.list.querySelectorAll("button").map(node => node.dataset.value), ["rename"]);
+});
+
+test("异步子菜单读取失败原地重试，父项失效后释放子菜单", async () => {
+  const h = sessionFilterPopupHarness();
+  let reads = 0;
+  h.trigger.menuOptions = [{ value: "openIn", label: "打开方式", submenuKey: "same",
+    submenu: async () => { if (++reads === 1) throw new Error("读取失败");
+      return [{ value: "powershell", label: "PowerShell", action() {} }]; } }];
+  h.context.openPopup(h.trigger); h.context.activePopup.list.querySelector("button").click();
+  await new Promise(setImmediate);
+  const popup = h.context.activePopup, submenu = popup.submenu;
+  assert.equal(submenu.list.querySelector("button").title, "重新加载打开方式");
+  submenu.list.querySelector("button").click();
+  await new Promise(setImmediate);
+  assert.equal(popup.submenu, submenu);
+  assert.equal(submenu.list.querySelector("button").dataset.value, "powershell");
+  h.trigger.menuOptions[0].disabled = true; h.context.renderPopup();
+  assert.equal(popup.submenu, null);
+});
+
+test("二级菜单按实际视口向右或向左避让，窄屏提供返回并保留八像素边距", () => {
+  const h = sessionFilterPopupHarness();
+  h.trigger.menuOptions = [{ value: "copy", label: "复制", submenuWidth: 200,
+    submenu: [{ value: "id", label: "复制会话 ID", action() {} }] }];
+  h.context.openPopup(h.trigger); h.context.activePopup.list.querySelector("button").click();
+  const popup = h.context.activePopup, submenu = popup.submenu;
+  assert.equal(submenu.node.dataset.direction, "right");
+  assert.equal(submenu.node.style.left, "327px");
+  popup.node.rect = { left: 960, right: 1184, top: 100, bottom: 420, width: 224, height: 320 };
+  submenu.source.rect = { left: 965, right: 1179, top: 230, bottom: 266 };
+  h.context.fitPopupSubmenu();
+  assert.equal(submenu.node.dataset.direction, "left");
+  assert.equal(submenu.node.style.left, "757px");
+  assert.equal(submenu.back.hidden, true);
+  h.context.window.visualViewport = { offsetLeft: 50, offsetTop: 30, width: 360, height: 700 };
+  popup.node.rect = { left: 100, right: 324, top: 100, bottom: 710 };
+  submenu.source.rect = { left: 105, right: 319, top: 660, bottom: 696 };
+  h.context.fitPopupSubmenu();
+  assert.equal(submenu.node.dataset.direction, "overlap");
+  assert.equal(submenu.back.hidden, false);
+  assert.ok(Number.parseFloat(submenu.node.style.left) >= 58);
+  assert.ok(Number.parseFloat(submenu.node.style.left) + 200 <= 402);
+  assert.ok(Number.parseFloat(submenu.node.style.top) >= 38);
+  assert.ok(Number.parseFloat(submenu.node.style.top) + 320 <= 722);
+  submenu.source.rect = { left: 105, right: 319, top: 0, bottom: 36 };
+  h.context.fitPopupSubmenu();
+  assert.equal(popup.submenu, null, "父项滚出菜单后关闭子菜单");
+});
 
 test("实例多选菜单连续选择并显示勾选，全部会话同步清除其它项且迟到旧节点不覆盖", () => {
   const h = sessionFilterPopupHarness(); h.open();
@@ -2918,6 +3030,75 @@ test("Open in 前台未确认时只提示，保留成功回执与首选应用且
     assert.deepEqual([...preferences.records.values()], ["powershell"]);
     assert.deepEqual(notices, warning ? [warning] : []);
     assert.equal(context.opening, false);
+  }
+});
+
+test("会话右键打开方式按该行读取并启动，切换当前聊天不借用其他会话", async () => {
+  const requests = [], copied = storage(), preferences = storage();
+  copied.removeItem = key => copied.records.delete(key);
+  const item = { id: "right-clicked", instanceId: "claude:wsl:fixture",
+    wslDistribution: "claude-us", wslUser: "junes", cwd: "E:\\项目" };
+  const context = rawVm.createContext({ nativeConnectionVersion: 1, pageLeaving: false,
+    selectedId: "another-session", sidebar: { recent: [item] },
+    session: { device: { id: "device", createdAtMs: 1 }, capabilities: { workspaceOpenIn: true } },
+    privateInputScope: value => JSON.stringify(value.device), threadReadOnly: () => false,
+    sessionStorage: copied, localStorage: preferences, randomId: () => "fixture-request",
+    AbortController, setTimeout, clearTimeout, notice() {},
+    api: async (path, payload, idempotency) => {
+      requests.push({ path, payload: JSON.parse(JSON.stringify(payload)), idempotency });
+      return path.endsWith("targets") ? { ok: true, root: item.cwd, targets: [
+        { target: "powershell", label: "PowerShell", available: true },
+        { target: "wsl", label: "WSL", available: true }
+      ] } : { state: "completed", result: { target: payload.target, root: item.cwd } };
+    }, validateRemoteReceipt: value => value });
+  rawVm.runInContext(
+    workspaceOpenInSource.slice(workspaceOpenInSource.indexOf("const applicationIds ="),
+      workspaceOpenInSource.indexOf("const applicationPaths ="))
+    + workspaceOpenInSource.slice(workspaceOpenInSource.indexOf("function normalizeTargets("),
+      workspaceOpenInSource.indexOf("export function mountWorkspaceOpenIn("))
+    + workspaceOpenInSource.slice(workspaceOpenInSource.indexOf("function sidebarOpenInContext("))
+      .replace(/^export /gm, ""), context);
+  const menu = context.threadOpenInMenu(item);
+  const targets = await menu.submenu({ signal: new AbortController().signal });
+  assert.deepEqual(Array.from(targets, target => target.value), ["powershell", "wsl"]);
+  await targets[0].action();
+  assert.equal(requests.length, 3, "展开、点击前复核和原生启动分别只请求一次");
+  assert.ok(requests.every(request => request.payload.threadId === item.id));
+  assert.equal(requests[2].payload.target, "powershell");
+  assert.equal(requests[2].idempotency, "fixture-request");
+  assert.equal(context.selectedId, "another-session");
+  assert.equal(copied.records.size, 0, "成功后清除待确认请求");
+});
+
+test("会话右键打开方式在异步准备后复核授权和删除状态，不派发过期点击", async () => {
+  for (const change of ["authorization", "deletion", "instance"]) {
+    const item = { id: "right-clicked", cwd: "E:\\项目", instanceId: "codex:local" };
+    let available = true, writes = 0;
+    const context = rawVm.createContext({ nativeConnectionVersion: 1, pageLeaving: false,
+      sidebar: { recent: [item] }, session: { device: { id: "device" }, capabilities: { workspaceOpenIn: true } },
+      privateInputScope: value => value.device.id, threadReadOnly: () => false,
+      notice() {}, performWorkspaceOpenIn: async () => { ++writes; },
+      api: async () => ({ ok: true, root: item.cwd, targets: [
+        { target: "powershell", label: "PowerShell", available: true }
+      ] }) });
+    rawVm.runInContext(
+      workspaceOpenInSource.slice(workspaceOpenInSource.indexOf("const applicationIds ="),
+        workspaceOpenInSource.indexOf("const applicationPaths ="))
+      + workspaceOpenInSource.slice(workspaceOpenInSource.indexOf("function normalizeTargets("),
+        workspaceOpenInSource.indexOf("function preferenceKey("))
+      + workspaceOpenInSource.slice(workspaceOpenInSource.indexOf("function sidebarOpenInContext("))
+        .replace(/^export /gm, ""), context);
+    const targets = await context.threadOpenInMenu(item, { isAvailable: () => available }).submenu({});
+    context.api = async () => {
+      if (change === "authorization") context.session.device.id = "other-device";
+      else if (change === "deletion") available = false;
+      else item.instanceId = "claude:wsl:other";
+      return { ok: true, root: item.cwd, targets: [
+        { target: "powershell", label: "PowerShell", available: true }
+      ] };
+    };
+    await targets[0].action();
+    assert.equal(writes, 0, change);
   }
 });
 
