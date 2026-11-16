@@ -223,7 +223,9 @@ html{scrollbar-color:var(--muted) transparent}
 @media(hover:hover) and (pointer:fine){.composer-toolbar .permission-button:hover:not(:disabled){background:var(--composer-hover,var(--hover))}}
 .context-info{position:relative;display:flex;align-items:center;justify-content:center;flex:0 0 28px;width:28px;height:28px;min-width:0;padding:0;border:0;border-radius:6px;font-size:calc(var(--font-size)*.78);white-space:nowrap}
 .context-info[aria-expanded=true]{color:var(--text)}
-.prompt-optimize-button{display:grid;place-items:center;flex:0 0 24px;width:24px;height:28px;padding:0;border-radius:6px;color:var(--muted);font:16px/1 "Segoe UI Emoji",system-ui,sans-serif}
+/* 用户要求提示词优化图标恢复原图的正常前景色；优化完成仍由下方规则显示绿色。 */
+.prompt-optimize-button{display:grid;place-items:center;flex:0 0 24px;width:24px;height:28px;padding:0;border-radius:6px;color:var(--text)}
+.prompt-optimize-button>.ui-icon{width:16px;height:16px}
 .prompt-optimize-button[data-state=loading]{animation:pulse 1s ease-in-out infinite}
 .prompt-optimize-button[data-state=optimized]{background:color-mix(in srgb,var(--green) 14%,transparent);color:var(--green)}
 /* 用户要求 PC 右键弹窗参考 Codex 注入版：600px、最大 760px、双列设置；输入控件沿用会话编辑区派生背景。 */
@@ -1036,7 +1038,11 @@ input:focus,textarea:focus,.prompt-editor:focus,button:focus-visible{outline:1px
 .composer-attachment-remove>svg{display:block;width:12px;height:12px}
 @media(hover:hover) and (pointer:fine){.composer-attachment-remove:hover:not(:disabled){background:var(--hover)}}
 .attachments-locked .composer-attachment{opacity:.7}
-.composer-add-button{display:grid;place-items:center;width:30px;height:30px;flex:0 0 30px;padding:0;border:0;border-radius:50%;color:var(--muted);line-height:1}
+/* 用户要求「+」恢复正常前景色，并在悬停、按下和菜单展开时沿用模型按钮的输入区背景。 */
+.composer-add-button{display:grid;place-items:center;width:30px;height:30px;flex:0 0 30px;padding:0;border:0;border-radius:50%;color:var(--text);line-height:1}
+.composer-toolbar .composer-add-button:is(:focus-visible,:active,[aria-expanded=true]){background:var(--composer-hover,var(--hover))}
+.composer-add-button:active:not(:disabled){opacity:1}
+@media(hover:hover) and (pointer:fine){.composer-toolbar .composer-add-button:hover:not(:disabled){background:var(--composer-hover,var(--hover))}}
 .composer-image-dragover{outline:2px dashed var(--accent);outline-offset:-4px}
 .queued-message-icon{display:grid;width:16px;height:16px;flex-shrink:0;place-items:center;color:var(--muted)}
 .queued-message-icon>.ui-icon{width:16px;height:16px}

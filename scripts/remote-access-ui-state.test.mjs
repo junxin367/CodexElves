@@ -9640,6 +9640,7 @@ function connectionRecoveryHarness() {
     sourceSection("function openStream(", "function stopConnectionPoll("),
     (sourceSection("function stopCon", "function ret") + "\n" + sourceSection("function selectedThreadR")),
     (sourceSection("function retireF", "async functi") + "\n" + sourceSection("function recordR")),
+    sourceSection("let promptFocusSnapshot", "function resumePage"),
     sourceSection("function resumePage(", "function ret"),
     (sourceSection("function probeCo") + "\n" + sourceSection("function retryCo", "function ins")),
     `${sourceSection("function receive(event) {", "  const params = { ...event.params || {} };")}\n}`,
@@ -13651,6 +13652,59 @@ test("Token 减少动态效果时直接更新，等待新轮次数据也不会�
   h.complete(1, { turnId: "next", steps: 21, turnTokens: 1100000 }); await h.flush();
   assert.ok(h.animations.length > 0);
   assert.equal(h.text(), "48tk/s  本轮 21步 1.1m  总 5m");
+});
+
+test("独立客户端切回前台时恢复编辑框焦点和光标，其他控件不抢焦点", () => {
+  const selection = { start: 4, end: 4, startTokens: new Set(), endTokens: new Set() }, restores = [];
+  const prompt = { isConnected: true, disabled: false, focusCalls: 0,
+    focus(options) { this.focusCalls += 1; this.focusOptions = options; } };
+  const document = { activeElement: prompt, hidden: false, focused: true, hasFocus() { return this.focused; } };
+  const context = nodeVm.createContext({ nativeConnectionVersion: 1, document,
+    $: selector => selector === "#prompt" ? prompt : null, promptSelection: () => selection,
+    setPromptSelection: (...args) => restores.push(args) });
+  nodeVm.runInContext(sourceSection("let promptFocusSnapshot", "function resumePage"), context);
+  context.rememberPromptFocus(); document.activeElement = null; context.restorePromptFocus();
+  assert.equal(prompt.focusCalls, 1);
+  assert.equal(prompt.focusOptions.preventScroll, true);
+  assert.equal(restores.length, 1);
+  assert.equal(restores[0][0], prompt);
+  assert.equal(restores[0][1], 4);
+  assert.equal(restores[0][2], 4);
+  context.restorePromptFocus();
+  assert.equal(prompt.focusCalls, 1, "focus 与 visible 连续触发不能重复恢复");
+  document.activeElement = {}; context.rememberPromptFocus(); context.restorePromptFocus();
+  assert.equal(prompt.focusCalls, 1, "后台前使用其他控件时不能抢走焦点");
+  document.activeElement = prompt; context.rememberPromptFocus(); document.focused = false; context.restorePromptFocus();
+  assert.equal(prompt.focusCalls, 1, "窗口尚未取得前台焦点时保留快照等待");
+  document.focused = true; context.restorePromptFocus();
+  assert.equal(prompt.focusCalls, 2);
+  assert.match(app, /window\.addEventListener\("focus", restorePromptFocus\)/);
+});
+
+test("编辑器末尾换行滚动到底部，中间编辑保持原滚动位置", () => {
+  const input = { isConnected: true, style: {}, value: "line\n", selectionStart: 5, selectionEnd: 5,
+    scrollHeight: 240, scrollTop: 0 };
+  const context = nodeVm.createContext({ nativeConnectionVersion: 1, document: { activeElement: input },
+    getComputedStyle: () => ({ minHeight: "80", maxHeight: "180" }) });
+  nodeVm.runInContext(sourceSection("function resizeEditorInput(", "function resizeComposerInput("), context);
+  context.resizeEditorInput(input);
+  assert.equal(input.style.height, "180px");
+  assert.equal(input.style.overflowY, "auto");
+  assert.equal(input.scrollTop, 240, "末尾回车后跟随到最新内容底部");
+  input.selectionStart = input.selectionEnd = 1; input.scrollTop = 72; context.resizeEditorInput(input);
+  assert.equal(input.scrollTop, 72, "编辑中间内容不能强制跳到底部");
+  input.selectionStart = input.selectionEnd = 5; input.scrollHeight = 80; context.resizeEditorInput(input);
+  assert.equal(input.scrollTop, 0, "内容无需滚动时沿用原顶部位置");
+});
+
+test("编辑区图标恢复正常前景色，加号悬停和点击显示模型同款背景", async () => {
+  const css = await readFile(new URL("../assets/remote-access/style.css", import.meta.url), "utf8");
+  assert.match(css, /\.composer-add-button\{[^}]*color:var\(--text\)/);
+  assert.match(css, /\.prompt-optimize-button\{[^}]*color:var\(--text\)/);
+  assert.ok(css.includes(".composer-toolbar .composer-add-button:is(:focus-visible,:active,[aria-expanded=true]){background:var(--composer-hover,var(--hover))}"));
+  assert.ok(css.includes(".composer-toolbar .composer-add-button:hover:not(:disabled){background:var(--composer-hover,var(--hover))}"));
+  assert.match(css, /\.composer-add-button:active:not\(:disabled\)\{opacity:1\}/);
+  assert.ok(app.includes('$("#prompt-optimize").replaceChildren(icon("sparkles"))'));
 });
 
 function claudeSlashMenuHarness() {

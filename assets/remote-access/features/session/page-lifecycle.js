@@ -1,12 +1,14 @@
 // 页面生命周期：前后台切换时暂停与恢复，以及连接恢复重试。
 
 import { notice } from "../../ui/notice.js";
+import { $ } from "../../ui/dom.js";
 import { selectThread, showWelcome } from "../../core/actions.js";
 import { pageLeaving, selectedId, session, setPageLeaving } from "../../core/state.js";
 import { recoverQuestionReceipts } from "../approval-requests.js";
 import { resetClaudeUsage, syncClaudeUsage } from "../composer/claude-usage.js";
 import { syncComposerMetrics } from "../composer/composer.js";
 import { closeContextUsageTip, resetComposerMetrics } from "../composer/metrics.js";
+import { promptSelection, setPromptSelection } from "../composer/prompt-editor.js";
 import { stopCatalogRefresh } from "../composer/skill-catalog.js";
 import { refreshCachedCatalogs } from "../composer/skills.js";
 import { rememberTranscript } from "../conversation/transcript.js";
@@ -30,6 +32,21 @@ import { scheduleRelatedOperationCheck, scheduleRelatedSessionCheck } from "./re
 import { rememberReadingPosition } from "./thread-cache.js";
 import { startClientUnreadBadgePolling, stopClientUnreadBadgePolling, syncClientUnreadBadge } from "../sidebar/list.js";
 
+let promptFocusSnapshot = null;
+function rememberPromptFocus() {
+  const prompt = $("#prompt");
+  if (prompt && document.activeElement === prompt) promptFocusSnapshot = promptSelection(prompt);
+}
+function restorePromptFocus() {
+  const snapshot = promptFocusSnapshot;
+  if (!snapshot || document.hidden || document.hasFocus?.() === false) return;
+  promptFocusSnapshot = null;
+  const prompt = $("#prompt");
+  if (!prompt?.isConnected || prompt.disabled) return;
+  // 用户要求独立客户端切回前台后继续编辑；只恢复后台前确实位于编辑框的焦点和选区。
+  prompt.focus({ preventScroll: true });
+  setPromptSelection(prompt, snapshot.start, snapshot.end, snapshot);
+}
 function resumePage() {
   const wasLeaving = pageLeaving;
   setPageLeaving(false);
@@ -71,6 +88,7 @@ export function installPageLifecycle() {
   document.addEventListener("visibilitychange", () => {
     if (document.hidden) {
       stopCatalogRefresh();
+      rememberPromptFocus();
       resetClaudeUsage();
       resetComposerMetrics();
       if (session) { rememberTranscript(); rememberReadingPosition(); }
@@ -88,6 +106,7 @@ export function installPageLifecycle() {
     stopClientUnreadBadgePolling();
     syncClientUnreadBadge();
     recordRuntimeDiagnostic("page.visible");
+    restorePromptFocus();
     if (pageLeaving) { resumePage(); return; }
     syncClaudeUsage();
     syncComposerMetrics();
@@ -98,7 +117,8 @@ export function installPageLifecycle() {
     retryConnectionRecovery({ suppressStreamErrors: true });
   });
   window.addEventListener("pagehide", suspendPage);
-  window.addEventListener("blur", () => finishQueueDrag());
+  window.addEventListener("blur", () => { rememberPromptFocus(); finishQueueDrag(); });
+  window.addEventListener("focus", restorePromptFocus);
   window.addEventListener("beforeunload", () => {
     recordRuntimeDiagnostic("page.beforeunload");
     // 导航可能被取消或交给 App 内置浏览器；只有 pagehide 才表示当前文档真正离开。

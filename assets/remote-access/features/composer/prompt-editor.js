@@ -308,6 +308,8 @@ export function composerPrompt(text = $("#prompt")?.value || "", skills = select
 }
 export function resizeEditorInput(input) {
   if (!input?.isConnected) return;
+  const followEnd = document.activeElement === input && input.selectionStart === input.selectionEnd
+    && input.selectionEnd === String(input.value ?? "").length;
   input.style.height = "auto";
   const style = getComputedStyle(input);
   const contentHeight = Math.max(parseFloat(style.minHeight), input.scrollHeight);
@@ -315,6 +317,8 @@ export function resizeEditorInput(input) {
   input.style.height = `${Math.min(maxHeight, contentHeight)}px`;
   input.style.overflowY = contentHeight > maxHeight ? "auto" : "hidden";
   if (contentHeight <= maxHeight) input.scrollTop = 0;
+  // 用户要求回车换行后光标保持可见；仅无选区且光标位于末尾时跟随底部，中间编辑不跳滚动位置。
+  else if (followEnd) input.scrollTop = input.scrollHeight;
 }
 export function resizeComposerInput() {
   resizeEditorInput($("#prompt"));
