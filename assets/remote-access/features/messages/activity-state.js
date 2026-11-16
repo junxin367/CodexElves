@@ -64,8 +64,8 @@ export function activityPresentation(turn, running, now = Date.now()) {
   }
   if (duration == null) return { text: "活动", ticking: false, live };
   const prefix = live ? "已处理" : "用时";
-  if (duration < 1000) return { text: `${prefix} <1秒`, ticking: live, live };
-  const seconds = Math.floor(duration / 1000), minutes = Math.floor(seconds / 60), hours = Math.floor(minutes / 60);
+  // 用户要求会话活动耗时从 1 秒开始显示；只调整展示秒数，保留原始毫秒耗时和真实计时状态。
+  const seconds = Math.max(1, Math.floor(duration / 1000)), minutes = Math.floor(seconds / 60), hours = Math.floor(minutes / 60);
   const time = `${hours ? `${hours}小时` : ""}${minutes % 60 ? `${minutes % 60}分` : ""}${seconds % 60 || !minutes ? `${seconds % 60}秒` : ""}`;
   return { text: `${prefix} ${time}`, ticking: live, live };
 }
