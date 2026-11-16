@@ -106,36 +106,48 @@ impl Harness {
 
     pub(super) async fn sidebar(&self) -> anyhow::Result<Value> {
         // 会话与项目互不依赖；首屏只等最近一页，后续目录由服务后台补齐。
-        let ((mut rows, complete), project_rows, native_pins) = tokio::try_join!(
+        let ((mut rows, complete), project_rows, native_pins, (desktop, project_warning)) = tokio::try_join!(
             self.catalog.snapshot(&self.runtime, &self.projection),
             self.list_all("project/list", json!({"limit":100})),
-            self.native_pinned_threads()
+            self.native_pinned_threads(),
+            async { Ok::<_, anyhow::Error>(self.sidebar_project_preferences().await) }
         )?;
-        // 用户要求独立服务提供项目列表：只列出已保存项目，并保留 project/list 的原生顺序；
-        // 会话工作目录不能补成项目，否则无项目会话和历史临时目录会进入新建选择器。
-        let mut projects: Vec<Value> = project_rows
-            .into_iter()
-            .filter_map(|mut project| {
-                project["id"].as_str()?;
-                let roots: Vec<_> = project["roots"]
-                    .as_array()?
-                    .iter()
-                    .filter_map(|r| r["path"].as_str().map(str::to_owned))
-                    .collect();
-                project["cwd"] = roots.first().map(|s| json!(s)).unwrap_or(Value::Null);
-                project["roots"] = json!(roots);
-                project["threads"] = json!([]);
-                project["serverProjectId"] = project["id"].clone();
-                Some(project)
-            })
-            .collect();
+        // 用户要求 App 添加的项目也进入目录；只合并明确保存的项目，不从会话 cwd 合成。
+        let mut projects = desktop.merge(project_rows);
         // 侧栏只需要置顶与排序，不能复制整份消息队列、图片和历史回执。
-        let (mut thread_pins, project_pins, project_pin_overrides, preferences) = {
-            let store = self.store.lock().await;
+        let (
+            mut thread_pins,
+            project_pins,
+            project_pin_overrides,
+            project_pin_revisions,
+            preferences,
+        ) = {
+            let mut store = self.store.lock().await;
+            if let Some(revision) = desktop.revision() {
+                let expired: Vec<_> = store
+                    .data
+                    .project_pin_desktop_revisions
+                    .iter()
+                    .filter(|(_, previous)| **previous != revision)
+                    .map(|(id, _)| id.clone())
+                    .collect();
+                if !expired.is_empty() {
+                    // App 调整后永久退役旧覆盖，避免之后改回相同顺序时旧远程选择再次复活。
+                    store.commit(|data| {
+                        for id in expired {
+                            data.project_pin_desktop_revisions.remove(&id);
+                            data.project_pin_overrides.remove(&id);
+                            data.project_pins.remove(&id);
+                        }
+                        Ok(())
+                    })?;
+                }
+            }
             (
                 store.data.thread_pins.clone(),
                 store.data.project_pins.clone(),
                 store.data.project_pin_overrides.clone(),
+                store.data.project_pin_desktop_revisions.clone(),
                 store.data.preferences.clone(),
             )
         };
@@ -209,18 +221,12 @@ impl Harness {
             recent.push(thread);
         }
         drop(projection);
-        for project in &mut projects {
-            let id = project["id"].as_str().unwrap_or("");
-            let server_id = project["serverProjectId"].as_str().unwrap_or(id);
-            let pinned = project_pin_overrides
-                .get(id)
-                .or_else(|| project_pin_overrides.get(server_id))
-                .copied()
-                .unwrap_or_else(|| project_pins.contains(id) || project_pins.contains(server_id));
-            project["pinned"] = json!(pinned);
-        }
-        // 用户禁止读取 App 私有项目状态：置顶取远程偏好，同组保留原生 project/list 顺序。
-        projects.sort_by_key(|project| project["pinned"] != true);
+        desktop.apply_order(
+            &mut projects,
+            &project_pins,
+            &project_pin_overrides,
+            &project_pin_revisions,
+        );
         let mut pins: Vec<_> = recent
             .iter()
             .filter(|t| t["pinned"] == true)
@@ -242,7 +248,7 @@ impl Harness {
         Ok(
             json!({"ok":true,"nativeBridge":"harness","complete":complete,"projects":projects,
             "recent":recent,"pinnedThreads":pins,"pinnedThreadsComplete":pinned_threads_complete,
-            "nextCursor":null,"sideThreadIds":side_ids,
+            "nextCursor":null,"sideThreadIds":side_ids,"projectPreferencesWarning":project_warning,
             "unreadSideThreads":unread_sides,"creationAvailable":true,"preferences":preferences}),
         )
     }
@@ -258,19 +264,32 @@ impl Harness {
             );
         }
         let id = required(payload, "projectId")?;
-        // 项目身份只取独立引擎的已保存项目；失效的旧缓存 ID 必须重新选择。
-        let projects = self.list_all("project/list", json!({"limit":100})).await?;
-        let server_id = id;
+        // App 已保存但尚未迁入引擎的项目也可读文件；写入前重新读记录，不使用展示缓存。
+        let native = self.list_all("project/list", json!({"limit":100})).await?;
+        // 原生项目可独立使用；App 文件损坏不能阻断已知原生项目的配置、文件或新建。
+        // 只有解析 App 别名或 App 独有项目时，才要求重新读取有效的 App 项目记录。
+        let desktop = if native.iter().any(|project| project["id"] == id) {
+            super::projects::ProjectPreferences::default()
+        } else {
+            self.project_preferences().await?
+        };
+        let projects = desktop.merge(native);
         let project = projects
             .iter()
-            .find(|project| project["id"] == server_id)
+            .find(|project| {
+                ["id", "serverProjectId", "desktopProjectId"]
+                    .iter()
+                    .any(|key| project[*key].as_str() == Some(id))
+            })
             .ok_or_else(|| error(404, "项目不存在"))?;
         let cwd = project["roots"]
             .as_array()
             .and_then(|roots| roots.first())
-            .and_then(|root| root["path"].as_str())
+            .and_then(Value::as_str)
             .ok_or_else(|| error(404, "项目没有可用工作目录"))?;
-        Ok(json!({"ok":true,"hostId":"local","projectId":id,"serverProjectId":server_id,"cwd":cwd}))
+        Ok(json!({"ok":true,"hostId":"local","projectId":project["id"],
+            "serverProjectId":project["serverProjectId"],"cwd":cwd,
+            "roots":project["roots"],"name":project["name"]}))
     }
 
     pub(super) async fn thread(&self, payload: &Value) -> anyhow::Result<Value> {

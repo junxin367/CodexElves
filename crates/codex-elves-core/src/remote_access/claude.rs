@@ -1271,7 +1271,23 @@ impl Claude {
             .map(Conversation::view)
             .collect();
         rows.sort_by_key(|row| std::cmp::Reverse(row["updatedAt"].as_u64().unwrap_or(0)));
-        for row in rows {
+        for mut row in rows {
+            // 用户要求共享 App 添加的项目；历史 Claude 记录中的 App 项目 ID 映射到同一目录的原生 ID。
+            if let Some(project) =
+                sidebar["projects"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .find(|project| {
+                        ["id", "desktopProjectId", "serverProjectId"]
+                            .iter()
+                            .any(|key| {
+                                row["projectId"].is_string() && project[*key] == row["projectId"]
+                            })
+                    })
+            {
+                row["projectId"] = project["id"].clone();
+            }
             if let Some(recent) = sidebar["recent"].as_array_mut() {
                 recent.push(row.clone());
             }

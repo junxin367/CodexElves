@@ -426,6 +426,15 @@ readline.createInterface({input:process.stdin}).on('line',line=>{
  if(q.method==='project/list'){
    output({id:q.id,result:{data:catalog?.projects||[{id:'project-a',name:'测试项目',roots:[{path:__dirname}]}],nextCursor:null}});return;
  }
+ if(q.method==='project/import'){
+   const current=catalog||{projects:[],threads:[]};
+   let project=current.projects.find(p=>p.metadata?.importKey===q.params.idempotencyKey);
+   if(!project){
+     project={id:'app-imported',name:q.params.name,roots:q.params.roots,metadata:{importKey:q.params.idempotencyKey}};
+     current.projects.push(project);fs.writeFileSync(__dirname+'/catalog.json',JSON.stringify(current));
+   }
+   output({id:q.id,result:{project}});return;
+ }
  if(q.method==='model/list'){
    if(fs.existsSync(__dirname+'/models-fail'))output({id:q.id,error:{code:-32601,message:'isolated model failure'}});
    else output({id:q.id,result:{data:[{id:'gpt-test',model:'gpt-test'}],nextCursor:null}});return;
@@ -761,6 +770,126 @@ readline.createInterface({input:process.stdin}).on('line',line=>{
                 .map(|project| project["id"].as_str().unwrap())
                 .collect::<Vec<_>>(),
             ["project-a", "project-z", "workspace-saved"]
+        );
+        service.release().await;
+    }
+
+    #[tokio::test]
+    async fn app_project_sidebar_refreshes_pins_order_and_imports_only_on_explicit_creation() {
+        let (directory, process) = engine_fixture().await;
+        let service = super::super::Harness::new(directory.path()).unwrap();
+        service.install_test_process(process).await;
+        std::fs::write(
+            directory.path().join("catalog.json"),
+            json!({
+                "projects":[{"id":"native-a","name":"原生甲","roots":[{"path":"/a"}]},
+                    {"id":"native-b","name":"原生乙","roots":[{"path":"/b"}]}],
+                "threads":[{"id":"loose","cwd":"/a","projectId":null}]
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let state_path = directory.path().join(".codex-global-state.json");
+        let mut state = json!({
+            "local-projects":{
+                "app-a":{"name":"甲","rootPaths":["/a"]},
+                "app-b":{"name":"乙","rootPaths":["/b"]},
+                "app-only":{"name":"空项目","rootPaths":["/empty"]}
+            },
+            "pinned-project-ids":["app-b","app-only"],"project-order":["app-a"]
+        });
+        std::fs::write(&state_path, state.to_string()).unwrap();
+        let first = service.sidebar().await.unwrap();
+        let ids = |sidebar: &Value| {
+            sidebar["projects"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|project| project["id"].as_str().unwrap().to_owned())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(ids(&first), ["native-b", "app-only", "native-a"]);
+        assert_eq!(first["recent"][0]["projectId"], Value::Null);
+        assert_eq!(
+            service
+                .workspace_context(&json!({"projectId":"app-a"}))
+                .await
+                .unwrap()["serverProjectId"],
+            "native-a"
+        );
+        assert_eq!(
+            service
+                .workspace_context(&json!({"projectId":"app-only"}))
+                .await
+                .unwrap()["cwd"],
+            "/empty"
+        );
+        assert!(
+            !requests(directory.path())
+                .iter()
+                .any(|read| read["method"] == "project/import")
+        );
+        let (_authorization_directory, authorization) =
+            super::super::super::tests::service_dispatch_fixture().await;
+        service
+            .call(
+                "pinProject",
+                json!({"projectId":"native-b","pinned":false}),
+                Some(&authorization),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            service.sidebar().await.unwrap()["projects"][0]["id"],
+            "app-only"
+        );
+        state["pinned-project-ids"] = json!(["app-a", "app-b"]);
+        state["project-order"] = json!(["app-only"]);
+        std::fs::write(&state_path, state.to_string()).unwrap();
+        assert_eq!(
+            ids(&service.sidebar().await.unwrap()),
+            ["native-a", "native-b", "app-only"]
+        );
+        assert!(
+            !service
+                .store
+                .lock()
+                .await
+                .data
+                .project_pin_overrides
+                .contains_key("native-b")
+        );
+        state["pinned-project-ids"] = json!(["app-b", "app-only"]);
+        state["project-order"] = json!(["app-a"]);
+        std::fs::write(&state_path, state.to_string()).unwrap();
+        assert_eq!(
+            ids(&service.sidebar().await.unwrap()),
+            ["native-b", "app-only", "native-a"],
+            "App 改回原顺序时，已退役的远程取消置顶不能复活"
+        );
+        let created = service
+            .creation_project("app-only", &authorization)
+            .await
+            .unwrap();
+        assert_eq!(created, ("/empty".into(), "app-imported".into()));
+        assert_eq!(
+            service
+                .creation_project("app-only", &authorization)
+                .await
+                .unwrap(),
+            created
+        );
+        assert_eq!(
+            requests(directory.path())
+                .iter()
+                .filter(|read| read["method"] == "project/import")
+                .count(),
+            1
+        );
+        assert_eq!(
+            std::fs::read_to_string(&state_path).unwrap(),
+            state.to_string(),
+            "远程服务不能写回 App 文件"
         );
         service.release().await;
     }

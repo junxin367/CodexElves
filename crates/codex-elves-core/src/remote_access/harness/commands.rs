@@ -229,6 +229,23 @@ impl Harness {
         payload: &Value,
         authorization: &RemoteAuthorization,
     ) -> anyhow::Result<Value> {
+        let project_pin_revision = if action == "pinProject" {
+            let preferences = self.project_preferences().await?;
+            let projects =
+                preferences.merge(self.list_all("project/list", json!({"limit":100})).await?);
+            let id = required(payload, "projectId")?;
+            let project = projects
+                .iter()
+                .find(|project| {
+                    ["id", "serverProjectId", "desktopProjectId"]
+                        .iter()
+                        .any(|key| project[*key].as_str() == Some(id))
+                })
+                .ok_or_else(|| error(404, "项目不存在"))?;
+            preferences.pin_revision(project)
+        } else {
+            None
+        };
         let mut store = self.store.lock().await;
         let permit = authorization.prepare_dispatch().await?;
         permit.commit(|| {
@@ -238,8 +255,15 @@ impl Harness {
                     let id=required(payload,if action=="pinThread" {"threadId"} else {"projectId"})?;
                     let pins=if action=="pinThread" {&mut data.thread_pins} else {&mut data.project_pins};
                     if payload["pinned"]==true { pins.insert(id.to_owned()); } else { pins.remove(id); }
-                    // 明确取消置顶后保留远程偏好，不从其他客户端继承旧值。
-                    if action=="pinProject" { data.project_pin_overrides.insert(id.to_owned(),payload["pinned"]==true); }
+                    // 远程显式操作保留，但 App 后续调整置顶/排序后必须重新跟随 App。
+                    if action=="pinProject" {
+                        data.project_pin_overrides.insert(id.to_owned(),payload["pinned"]==true);
+                        if let Some(revision) = &project_pin_revision {
+                            data.project_pin_desktop_revisions.insert(id.to_owned(),revision.clone());
+                        } else {
+                            data.project_pin_desktop_revisions.remove(id);
+                        }
+                    }
                 }
                 "sort" => {
                     if !["manual","updated_at"].contains(&required(payload,"mode")?) { return Err(error(400,"不支持的排序方式")); }
@@ -589,14 +613,9 @@ impl Harness {
         }
         let (cwd, project_id) =
             if let Some(id) = payload["projectId"].as_str().filter(|s| !s.is_empty()) {
-                // 新建属于实际写入，提交前重新核对项目根目录，不能用展示缓存决定写入位置。
-                self.runtime.invalidate_read("project/list").await;
-                let context = self.workspace_context(&json!({"projectId":id})).await?;
-                // 创建必须使用已验证的原生项目 ID。
-                (
-                    required(&context, "cwd")?.to_owned(),
-                    Some(required(&context, "serverProjectId")?.to_owned()),
-                )
+                // App 独有项目仅在明确发送时经原生幂等接口登记；创建仍使用核对后的引擎项目 ID。
+                let (cwd, server_id) = self.creation_project(id, authorization).await?;
+                (cwd, Some(server_id))
             } else {
                 let settings = crate::settings::SettingsStore::default().load()?;
                 let directory = crate::codex_home::codex_home_dir_for_settings(&settings)

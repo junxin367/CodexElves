@@ -26,7 +26,7 @@ import {
   sidebarFilters
 } from "./actions.js";
 import { filterDeletedSidebar, threadDeletionChecks, threadDeletionKey, threadDeletions } from "./deletion-state.js";
-import { renderSessionFilter, sessionFilterValue, sessionTypeVisible } from "./filters.js";
+import { projectTypeVisible, renderSessionFilter, sessionTypeVisible } from "./filters.js";
 import {
   clientUnreadBadgeRequest, clientUnreadBadgeTimer, clientUnreadThreadCount, collapsed,
   collapsedSidebarSections, markSidebarThreadReadLocally, mergeIncompleteSidebar,
@@ -182,6 +182,8 @@ export async function loadSidebar(cursor = null, { fresh = false, resourcePriori
       filterSideThreadSidebar(result);
       result = mergeIncompleteSidebar(sidebar, result);
       filterDeletedSidebar(result, deviceId);
+      if (result.projectPreferencesWarning && result.projectPreferencesWarning !== sidebar?.projectPreferencesWarning)
+        notice(result.projectPreferencesWarning, true);
       if (JSON.stringify(sidebar) !== JSON.stringify(result)) {
         setSidebar(result);
         cacheDisplayData("sidebar", "main", sidebarSnapshot(result));
@@ -218,7 +220,6 @@ export function renderSidebar() {
   if (popupState) closePopup();
   root.replaceChildren();
   // 用户要求按会话实例筛选所有分组，并与实例开关取交集；保留原快照和未读状态。
-  const filter = sessionFilterValue();
   const typeMatches = item => sessionTypeVisible(item);
   const preferences = {
     mode: sidebarFilters.mode ?? sidebar.preferences.mode,
@@ -337,7 +338,7 @@ export function renderSidebar() {
     root.append(heading, body);
   }
   function projectGroup(project) {
-    if (filter !== "all" && !project.threads.some(typeMatches)) return null;
+    if (!projectTypeVisible(project)) return null;
     const available = sortThreads(project.threads.filter(item => !pinnedIds.has(item.id) && typeMatches(item)), preferences.projects);
     const items = searchMatches(project) && search ? available : available.filter(matches);
     if (search && !searchMatches(project) && !items.length) return null;

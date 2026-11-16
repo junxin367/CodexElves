@@ -100,6 +100,7 @@ pub(super) struct Data {
     pub thread_pins: BTreeSet<String>,
     pub project_pins: BTreeSet<String>,
     pub project_pin_overrides: BTreeMap<String, bool>,
+    pub project_pin_desktop_revisions: BTreeMap<String, String>,
     pub preferences: Value,
     pub settings: BTreeMap<String, Value>,
     pub answered_questions: BTreeMap<String, Value>,

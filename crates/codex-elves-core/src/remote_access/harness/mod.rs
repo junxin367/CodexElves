@@ -48,6 +48,9 @@ pub(super) struct Harness {
     queue_recovery_after: Mutex<HashMap<String, std::time::Instant>>,
     loaded: Mutex<HashMap<String, String>>,
     pin_capability: Mutex<Option<(String, bool)>>,
+    project_preferences: Mutex<Option<(std::path::PathBuf, projects::ProjectPreferences)>>,
+    #[cfg(test)]
+    project_codex_home: std::path::PathBuf,
     pub enabled: AtomicBool,
 }
 
@@ -116,6 +119,9 @@ impl Harness {
             queue_recovery_after: Mutex::new(HashMap::new()),
             loaded: Mutex::new(HashMap::new()),
             pin_capability: Mutex::new(None),
+            project_preferences: Mutex::new(None),
+            #[cfg(test)]
+            project_codex_home: directory.to_path_buf(),
             enabled: AtomicBool::new(false),
         }))
     }

@@ -2447,6 +2447,29 @@ test("会话类型筛选与启用开关取交集，原生 Claude ID 也按同一
   }
 });
 
+test("项目筛选保留 Codex App 空项目和置顶项目，关闭实例及 Claude 筛选仍按各自范围显示", () => {
+  const context = vm.createContext();
+  vm.runInContext(sourceSection("function projectTypeVisible("), context);
+  const empty = { id: "app-empty", backend: "codex", instanceId: "codex:local", threads: [] };
+  const pinned = { ...empty, id: "app-pinned", pinned: true };
+  const shared = { ...empty, id: "shared", threads: [
+    { id: "claude-thread", backend: "claude", instanceId: "claude:wsl:test" }
+  ] };
+  for (const filter of ["all", ["codex:local"], ["codex:local", "claude:wsl:test"]]) {
+    const preferences = { sessionTypes: { codex: true, claude: true }, sessionFilter: filter };
+    assert.equal(context.projectTypeVisible(empty, preferences), true);
+    assert.equal(context.projectTypeVisible(pinned, preferences), true);
+  }
+  const claudeOnly = { sessionTypes: { codex: true, claude: true }, sessionFilter: ["claude:wsl:test"] };
+  assert.equal(context.projectTypeVisible(empty, claudeOnly), false);
+  assert.equal(context.projectTypeVisible(shared, claudeOnly), true);
+  const codexDisabled = { sessionTypes: { codex: false, claude: true }, sessionFilter: "all" };
+  assert.equal(context.projectTypeVisible(pinned, codexDisabled), false);
+  assert.equal(context.projectTypeVisible(shared, codexDisabled), true);
+  assert.match(app, /if \(!projectTypeVisible\(project\)\) return null/);
+  assert.doesNotMatch(app, /filter !== "all" && !project\.threads\.some\(typeMatches\)/);
+});
+
 test("会话实例筛选分别显示同类型 WSL 选项，精确匹配实例并遵循各自启用开关", () => {
   const instances = [
     { id: "codex:local", backend: "codex", label: "Codex", legacyDefault: true },

@@ -77,3 +77,9 @@ export function sessionTypeVisible(item, preferences = appearance) {
   // 最近、项目、置顶和搜索共用实例 ID 过滤，同类型的不同 WSL 实例不能互相混入。
   return sessionInstanceEnabled(instanceId, preferences) && (filter === "all" || filter.includes(instanceId));
 }
+export function projectTypeVisible(project, preferences = appearance) {
+  // 用户要求 App 添加及置顶的项目全部可见：项目所属 Codex 实例命中即可展示，不能要求先有会话。
+  // 只筛选 Claude 时，共享项目仍按其匹配会话显示；关闭 Codex 后不凭空展示 Codex 空项目。
+  return sessionTypeVisible(project, preferences)
+    || project.threads.some(thread => sessionTypeVisible(thread, preferences));
+}
