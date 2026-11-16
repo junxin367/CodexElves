@@ -11,6 +11,8 @@ const pendingFeedbackDelayMs = 5000;
 let pendingFeedbackTimer = null;
 export function setPendingFeedbackTimer(value) { return pendingFeedbackTimer = value; }
 export function pendingFeedbackDelay(record) {
+  // Claude 压缩命令受理后迟迟不开始才提示，时长与 compaction.js 的 nativeCompactionStartGraceMs 保持一致。
+  if (record?.action === "nativeCompactionStart") return 20000;
   // 用户要求：队列操作未确认满 8 秒才补充等待提醒；其他操作仍为 5 秒，不改变真实失败提示或回执轮询。
   return ["steerQueued", "removeQueued", "reorderQueued", "beginQueuedEdit", "editQueued", "cancelQueuedEdit", "dismissQueuedEdit"]
     .includes(record?.action) ? 8000 : pendingFeedbackDelayMs;

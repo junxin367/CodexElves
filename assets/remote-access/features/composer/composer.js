@@ -66,7 +66,7 @@ import { selectedSkills } from "./skill-catalog.js";
 import { compactCommandAvailable, renderSkillMenu } from "./skills.js";
 import {
   compactContext, compactionInProgress, compactionLocked, compactionQueueSendReason,
-  currentCompaction, renderCompactionBanner
+  currentCompaction, nativeCompactionStartBaseline, renderCompactionBanner
 } from "../conversation/compaction.js";
 import { historyInitialized, setFollowMessages, updateScrollControl } from "../conversation/history-state.js";
 import { pending, pendingTimer, setPendingTimer } from "../conversation/pending-state.js";
@@ -113,10 +113,13 @@ export function syncPendingFeedbackTimer() {
   const compaction = currentCompaction();
   const awaitingCompaction = compaction.state === "unknown"
     || compaction.state === "pending" && !compaction.acknowledged && !compaction.nativeConfirmed;
+  // Claude 压缩受理后迟迟不开始才提示：会话执行中的排队不计时，空闲后到点再刷新输入区提示。
+  const nativeStartSince = nativeCompactionStartBaseline(selectedId, compaction);
   const records = [
     pending, threadDeletions.get(threadDeletionKey(selectedId)),
     goalEditPending?.payload.threadId === selectedId ? goalEditPending : null,
     awaitingCompaction ? compaction : null,
+    nativeStartSince === null ? null : { action: "nativeCompactionStart", time: nativeStartSince },
     ...[...relatedThreadOperations.values()].filter(record =>
       ownsRelatedOperation(record) && record.parentThreadId === selectedId),
     ...[...goalComposerRecoveries.values()].filter(record =>

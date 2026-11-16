@@ -6257,7 +6257,7 @@ test("Claude 压缩输入区只保留一处待确认，目标原文折叠展示�
       nativeCommands: [{ name: "compact", state: "unknown" }] },
     compactionLocked: () => true, compactionQueueSendReason: () => "", pendingFeedbackReady: () => true,
     privateInputScope: () => "auth", expandedClaudeGoalNotice: "", connected: true });
-  vm.runInContext((sourceSection("function renderClaudeControlNotices(") + sourceSection("function renderCompactionBanner(", "async function applyCompactionReceipt(")), context);
+  vm.runInContext((sourceSection("function renderClaudeControlNotices(") + sourceSection("const nativeCompactionStartGraceMs", "function renderCompactionBanner(") + sourceSection("function renderCompactionBanner(", "async function applyCompactionReceipt(")), context);
   const root = element("div");
   context.renderClaudeControlNotices(root);
   context.renderCompactionBanner(root, "claude-fixture", { state: "unknown", receiptId: "receipt" });
@@ -11074,6 +11074,8 @@ function delayFeedbackHarness() {
     goalComposerStorageRecord: record => record,
     renderQueuedEditRecoveryControls: node => node.append({ label: "查回执" }),
     compactionQueueSendReason: () => "", threadReadOnly: () => false,
+    // 这些用例针对 Codex 会话；Claude 压缩“迟迟不开始”提示另有专项用例。
+    isClaude: () => false, isActiveThread: () => false, thread: null,
     element, button: (label, aria, action) => Object.assign(element("button", "", label), { label, aria, action }), $: () => area,
     notice: (message, error = false) => notices.push({ message, error }),
     renderApprovals() {}, reloadThread: async () => {}, reconcileCompaction() {},
@@ -11090,6 +11092,7 @@ function delayFeedbackHarness() {
     sourceSection("function renderRelatedOperationStatus("),
     sourceSection("function renderAsync", "function ren"),
     sourceSection("function updateB"),
+    sourceSection("const nativeCompactionStartGraceMs", "function renderCompactionBanner("),
     sourceSection("function renderCompactionBanner(", "async function applyCompactionReceipt("),
     sourceSection("async function applyCompactionReceipt(", "async function resolveCompactionReceipt("),
     `function renderFeedback(){${sourceSection("  const deletion = threadDeletions.get(threadDeletionKey(selectedId));",
@@ -13636,4 +13639,66 @@ test("Claude 无项目 Skill 目录刷新保持同一缓存键", async () => {
   assert.equal(c.skillScopeKey(active.scope), key);
   assert.equal(c.skillCatalogs.size, 1);
   assert.equal(c.skillChoices[0].name, "simplify");
+});
+
+test("Claude 压缩命令受理后的正常等待保持静默，空闲超过宽限才提示，执行中排队与原生弹窗不提示", () => {
+  // 用户要求压缩没有异常时不显示提示：已受理等待原生开始是正常过渡，只有会话空闲且迟迟不开始才提示。
+  const element = (tag, className = "", text = "") => ({ tag, className, text, children: [],
+    append(...children) { this.children.push(...children); } });
+  let now = 1_000_000, reloads = 0;
+  const compaction = { state: "pending", receiptId: "receipt", acknowledged: true, time: now };
+  const context = vm.createContext({
+    element, button: (text, label, action) => ({ tag: "button", text, click: action }),
+    Date: { now: () => now }, session: { device: { id: "device" } }, selectedId: "claude-fixture", connected: true,
+    isClaude: () => true, isActiveThread: () => context.thread.status.type === "active",
+    compactionLocked: () => true, compactionQueueSendReason: () => "", pendingFeedbackReady: () => true,
+    currentCompaction: () => compaction, recoverCompaction: () => { reloads += 1; },
+    thread: { id: "claude-fixture", backend: "claude", status: { type: "idle" }, requests: [],
+      nativeCommands: [{ name: "compact", state: "pending" }] },
+  });
+  vm.runInContext(sourceSection("const nativeCompactionStartGraceMs", "function renderCompactionBanner(")
+    + sourceSection("function renderCompactionBanner(", "async function applyCompactionReceipt("), context);
+  const render = () => {
+    const root = element("div");
+    context.renderCompactionBanner(root, "claude-fixture", compaction);
+    return root.children;
+  };
+  const grace = vm.runInContext("nativeCompactionStartGraceMs", context);
+  assert.equal(grace, 20000);
+  assert.equal(vm.runInContext(sourceSection("function pendingFeedbackDelay(", "function pendingFeedbackReady(")
+    + '; pendingFeedbackDelay({ action: "nativeCompactionStart" })', context), grace, "延时刷新与提示宽限一致");
+  assert.equal(render().length, 0, "刚受理时静默");
+  now += grace - 1;
+  assert.equal(render().length, 0, "宽限内静默");
+  now += 1;
+  const overdue = render();
+  assert.equal(overdue.length, 1, "空闲且超过宽限仍未开始才提示");
+  assert.match(overdue[0].text, /原生一直没有开始压缩/);
+  overdue[0].children.find(child => child.text === "重新读取").click();
+  assert.equal(reloads, 1);
+
+  // 会话仍在执行本轮时压缩由原生排队，属于正常等待：不计时、不提示；执行结束后重新计时。
+  context.thread.status = { type: "active" };
+  now += 10 * grace;
+  assert.equal(render().length, 0, "执行中排队不提示");
+  context.thread.status = { type: "idle" };
+  assert.equal(render().length, 0, "执行刚结束重新计时");
+  now += grace - 1;
+  assert.equal(render().length, 0);
+  now += 1;
+  assert.equal(render().length, 1);
+
+  // 原生已有待处理弹窗时由弹窗卡片说明，不再叠加压缩提示。
+  context.thread.requests = [{ method: "remote/nativeDialog" }];
+  assert.equal(render().length, 0);
+  context.thread.requests = [];
+
+  // 原生已开始压缩（running）或命令已结束后，不再属于“等待开始”。
+  context.thread.nativeCommands = [{ name: "compact", state: "running" }];
+  assert.equal(context.nativeCompactionStartBaseline("claude-fixture", compaction), null);
+  assert.equal(render().length, 0);
+
+  const composer = sourceSection("function syncPendingFeedbackTimer()", "function updateComposer(");
+  assert.match(composer, /nativeCompactionStartBaseline\(selectedId, compaction\)/);
+  assert.match(composer, /action: "nativeCompactionStart"/);
 });

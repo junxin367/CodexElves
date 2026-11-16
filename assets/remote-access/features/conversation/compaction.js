@@ -9,7 +9,7 @@ import { randomId } from "../../core/util.js";
 import { api } from "../api.js";
 import { pendingFeedbackReady } from "../composer/send-state.js";
 import { pending } from "./pending-state.js";
-import { claudeNativeQueue, isClaude, serviceSideThread, threadReadOnly } from "../session/capabilities.js";
+import { claudeNativeQueue, isActiveThread, isClaude, serviceSideThread, threadReadOnly } from "../session/capabilities.js";
 
 export let compactionVersion = 0;
 export const compactions = new Map();
@@ -129,12 +129,39 @@ export function reconcileCompaction(id, value) {
   if (thread?.id === id) thread.compaction = normalizeCompaction(current);
   return current;
 }
+// 用户要求 Claude 压缩没有异常时不显示提示、出现异常时再提示。命令已受理、等待原生开始属于正常过渡：
+// 会话正在执行本轮时由原生排队，空闲时通常数秒内（含恢复后台会话约 4 秒）进入压缩画面，这两种情况都保持静默。
+// 只有会话已空闲、且受理后超过宽限仍未开始压缩才提示；会话执行中不计时，转为空闲后重新计时，
+// 避免长时间执行结束的瞬间误报。宽限与 composer.js 的延时刷新共用，需同步核对。
+export const nativeCompactionStartGraceMs = 20000;
+let nativeCompactionIdleSince = { id: "", at: 0 };
+export function nativeCompactionStartPending(compaction = currentCompaction()) {
+  return isClaude() && compaction.state === "pending"
+    && !!thread?.nativeCommands?.some(command => command.name === "compact" && command.state === "pending");
+}
+// 返回开始计算“迟迟不开始”的时间点；原生仍在排队或执行本轮时返回 null，不计时。
+export function nativeCompactionStartBaseline(id, compaction = currentCompaction(id)) {
+  if (!id || !nativeCompactionStartPending(compaction) || isActiveThread()) {
+    nativeCompactionIdleSince = { id: "", at: 0 };
+    return null;
+  }
+  if (nativeCompactionIdleSince.id !== id) nativeCompactionIdleSince = { id, at: Date.now() };
+  return Math.max(nativeCompactionIdleSince.at, Number.isFinite(compaction.time) ? compaction.time : 0);
+}
 export function renderCompactionBanner(root, id, compaction) {
   if (!id || !compactionLocked(id)) return;
   const unavailable = compaction.deviceId && session?.device.id && compaction.deviceId !== session.device.id;
-  if (!unavailable && isClaude() && compaction.state === "pending"
-      && thread?.nativeCommands?.some(command => command.name === "compact" && command.state === "pending")) {
-    root.append(element("div", "pending-banner", "压缩命令已受理，等待原生执行"));
+  if (!unavailable && nativeCompactionStartPending(compaction)) {
+    const since = nativeCompactionStartBaseline(id, compaction);
+    // 原生已有待处理弹窗时由对应卡片说明原因，这里不再重复提示。
+    if (since !== null && Date.now() - since >= nativeCompactionStartGraceMs && !thread?.requests?.length) {
+      const box = element("div", "pending-banner",
+        "压缩命令已受理，但原生一直没有开始压缩。请在该会话的原版 Claude CLI 中核对，或重新读取状态。");
+      const reload = button("重新读取", "从原生会话重新读取压缩状态", () => void recoverCompaction(id), "text-button");
+      reload.disabled = !connected || selectedId !== id;
+      box.append(reload);
+      root.append(box);
+    }
     return;
   }
   const sendReason = compactionQueueSendReason(id);
