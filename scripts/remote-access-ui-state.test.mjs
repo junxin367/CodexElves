@@ -13947,3 +13947,57 @@ test("Claude 压缩命令受理后的正常等待保持静默，空闲超过宽�
   assert.match(composer, /nativeCompactionStartBaseline\(selectedId, compaction\)/);
   assert.match(composer, /action: "nativeCompactionStart"/);
 });
+
+test("Claude 压缩与发送消息一样触发所选模型切换，选择未变化时不带多余设置", async () => {
+  const calls = [], notices = [];
+  const context = nodeVm.createContext({
+    isClaude: () => true, selectedModel: "", selectedEffort: "", modelChoiceVersion: 0, selectedId: "claude-thread",
+    setSelectedModel: value => (context.selectedModel = value), setSelectedEffort: value => (context.selectedEffort = value),
+    currentThreadDisplay: () => ({ model: "claude-opus-5-5", reasoningEffort: "xhigh" }),
+    modelIdentityMatches: (left, right) => !!left && !!right && left === right,
+    stopping: false, busy: false, pending: null, connected: true, thread: { id: "claude-thread", compaction: {} },
+    threadReadOnly: () => false, compactionLocked: () => false, normalizeCompaction: value => value || {},
+    randomId: () => "receipt-1", session: { device: { id: "device-1" } }, compactions: new Map(),
+    setCompactionState() {}, updateComposer() {}, notice: (message, error) => notices.push([message, error]),
+    applyCompactionReceipt: async () => {},
+    api: async (path, body) => { calls.push([path, body]); return { ok: true }; }
+  });
+  nodeVm.runInContext(sourceSection("function compactionModelChoice(", "function compactionEventMatches("), context);
+  const run = async (state = {}) => {
+    calls.length = 0;
+    Object.assign(context, { selectedModel: "", selectedEffort: "", modelChoiceVersion: 0, isClaude: () => true }, state);
+    await context.compactContext();
+    return calls.at(-1)?.[1];
+  };
+  // 没有本地选择：普通压缩，不带模型，服务端不会因模型目录不可用而阻断。
+  assert.deepEqual({ ...await run() }, { threadId: "claude-thread" });
+  // 选了 haiku：随压缩请求带上模型和深度；送达后清掉本地覆盖值，交给原生设置状态展示。
+  assert.deepEqual({ ...await run({ selectedModel: "claude-haiku-5-5", selectedEffort: "high" }) },
+    { threadId: "claude-thread", model: "claude-haiku-5-5", reasoningEffort: "high" });
+  assert.equal(context.selectedModel, "");
+  assert.equal(context.selectedEffort, "");
+  // 选择与会话当前设置相同：不发切换，也不清除选择。
+  assert.deepEqual({ ...await run({ selectedModel: "claude-opus-5-5", selectedEffort: "xhigh" }) }, { threadId: "claude-thread" });
+  // 只改思考深度。
+  assert.deepEqual({ ...await run({ selectedEffort: "max" }) }, { threadId: "claude-thread", reasoningEffort: "max" });
+  // 换模型时深度一并带上，即使数值恰好与旧模型当前深度相同，避免服务端按“换模型即清空深度”处理。
+  assert.deepEqual({ ...await run({ selectedModel: "claude-haiku-5-5", selectedEffort: "xhigh" }) },
+    { threadId: "claude-thread", model: "claude-haiku-5-5", reasoningEffort: "xhigh" });
+  // 非 Claude 不带模型字段。
+  assert.deepEqual({ ...await run({ selectedModel: "gpt-x", isClaude: () => false }) }, { threadId: "claude-thread" });
+  // 请求期间菜单又做了新选择：迟到回执不能清掉新选择。
+  context.api = async (path, body) => {
+    calls.push([path, body]);
+    context.modelChoiceVersion += 1; context.selectedModel = "claude-sonnet-5-5";
+    return { ok: true };
+  };
+  await run({ selectedModel: "claude-haiku-5-5" });
+  assert.equal(context.selectedModel, "claude-sonnet-5-5");
+  // 服务端拒绝切换：提示原因、不清除选择，压缩状态回到空闲，不会静默按旧模型压缩。
+  context.api = async () => { throw Object.assign(new Error("所选模型未在当前 Claude 的可用模型列表中"), { code: 400 }); };
+  context.compactions.set("claude-thread", { receiptId: "receipt-1", state: "pending" });
+  Object.assign(context, { selectedModel: "claude-haiku-5-5", selectedEffort: "", modelChoiceVersion: 0, isClaude: () => true });
+  await context.compactContext();
+  assert.equal(context.selectedModel, "claude-haiku-5-5");
+  assert.deepEqual(notices.at(-1), ["所选模型未在当前 Claude 的可用模型列表中", true]);
+});

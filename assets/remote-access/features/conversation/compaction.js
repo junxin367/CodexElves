@@ -7,9 +7,14 @@ import { reloadThread, updateComposer } from "../../core/actions.js";
 import { busy, connected, selectedId, session, stopping, thread } from "../../core/state.js";
 import { randomId } from "../../core/util.js";
 import { api } from "../api.js";
+import { modelIdentityMatches } from "../composer/model-catalog.js";
+import {
+  modelChoiceVersion, selectedEffort, selectedModel, setSelectedEffort, setSelectedModel
+} from "../composer/options-state.js";
 import { pendingFeedbackReady } from "../composer/send-state.js";
 import { pending } from "./pending-state.js";
 import { claudeNativeQueue, isActiveThread, isClaude, serviceSideThread, threadReadOnly } from "../session/capabilities.js";
+import { currentThreadDisplay } from "../session/thread-cache.js";
 
 export let compactionVersion = 0;
 export const compactions = new Map();
@@ -257,10 +262,26 @@ async function recoverCompaction(id) {
   } catch (error) { notice(`重新读取压缩状态失败：${error.message}`, true); }
   updateComposer();
 }
+// 用户要求压缩与发送消息、/goal 一样触发所选模型切换：菜单里选的模型和思考深度只是本地选择，
+// 不随压缩请求带上就不会切到 CLI，压缩会沿用旧模型而界面仍显示新选择。
+// 仅 Claude 且选择与会话当前设置不同才带上（同值切换是空操作，不应因模型目录暂不可用而阻断压缩）；
+// 切换了模型时思考深度一并带上，避免服务端按“换模型即清空深度”处理而与界面显示不一致。
+// 服务端在发 /compact 之前先应用，应用失败则不压缩并返回错误；对应 claude_controls.rs 的 native_command_action
+// 与 composer.js 的发送载荷。
+export function compactionModelChoice() {
+  if (!isClaude()) return null;
+  const display = currentThreadDisplay();
+  const model = selectedModel && !modelIdentityMatches(selectedModel, display?.model) ? selectedModel : "";
+  const reasoningEffort = selectedEffort && (model || selectedEffort !== (display?.reasoningEffort || ""))
+    ? selectedEffort : "";
+  return model || reasoningEffort ? { model, reasoningEffort } : null;
+}
 export async function compactContext() {
   if (stopping || busy || pending || threadReadOnly() || !connected || !selectedId
       || thread?.id !== selectedId || compactionLocked(selectedId)) return;
   const id = selectedId, baseline = normalizeCompaction(thread.compaction), receiptId = randomId();
+  const choice = compactionModelChoice(), choiceVersion = modelChoiceVersion;
+  const choiceModel = selectedModel, choiceEffort = selectedEffort;
   try {
     setCompactionState(id, {
       state: "pending", receiptId, deviceId: session.device.id, acknowledged: false,
@@ -272,7 +293,16 @@ export async function compactContext() {
   }
   updateComposer();
   try {
-    const receipt = await api("/api/action/compact", { threadId: id }, receiptId);
+    const receipt = await api("/api/action/compact", {
+      threadId: id,
+      ...(choice?.model ? { model: choice.model } : {}),
+      ...(choice?.reasoningEffort ? { reasoningEffort: choice.reasoningEffort } : {})
+    }, receiptId);
+    // 送达后交给原生设置状态展示，不保留已提交的本地覆盖值；菜单后来做出的新选择有独立版本，不能被清掉。
+    if (choice && selectedId === id && choiceVersion === modelChoiceVersion) {
+      if (selectedModel === choiceModel) setSelectedModel("");
+      if (selectedEffort === choiceEffort) setSelectedEffort("");
+    }
     await applyCompactionReceipt(id, receiptId, receipt);
   } catch (error) {
     const current = compactions.get(id);
